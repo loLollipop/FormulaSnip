@@ -20,7 +20,7 @@ _CONFIG_PATH = Path(__file__).with_name("rapid_config.yaml")
 class RapidLatexBackend(RecognitionBackend):
     key = "rapid"
     display_name = "RapidLaTeXOCR（CPU）"
-    install_hint = "uv sync --extra rapid"
+    install_hint = "uv sync"
 
     def __init__(self) -> None:
         self._model: Any | None = None

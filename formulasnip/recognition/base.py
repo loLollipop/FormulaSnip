@@ -15,7 +15,7 @@ class RecognitionBackend(ABC):
     @classmethod
     @abstractmethod
     def is_available(cls) -> bool:
-        """Return whether the optional backend package can be imported."""
+        """Return whether the local backend package can be imported."""
 
     @abstractmethod
     def recognize(self, image: Image.Image) -> RecognitionResult:

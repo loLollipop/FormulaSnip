@@ -15,6 +15,7 @@ from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.ui import floating
 from formulasnip.ui import settings as settings_ui
+from formulasnip.ui.branding import application_icon, tutorial_formula_image
 from formulasnip.ui.floating import (
     FloatingFormulaAssistant,
     FloatingOrb,
@@ -29,6 +30,7 @@ from formulasnip.ui.settings import (
     read_logo_image,
 )
 from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, SnipOverlay
+from formulasnip.ui.styles import apply_application_theme
 
 
 def _application() -> QApplication:
@@ -172,23 +174,34 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
 
     assert panel.tutorial_stack.count() == 4
     assert panel.tutorial_stack.currentIndex() == 0
-    for _ in range(3):
-        panel.next_tutorial_step()
+    assert [item.step_index for item in panel.tutorial_illustrations] == [0, 1, 2, 3]
+    assert all(item.accessibleDescription() for item in panel.tutorial_illustrations)
+    panel.resize(panel.minimumSize())
+    for theme in ("dark", "light"):
+        apply_application_theme(theme)
+        for step_index, illustration in enumerate(panel.tutorial_illustrations):
+            panel._set_tutorial_step(step_index)
+            application.processEvents()
+            preview = illustration.grab()
+            assert not preview.isNull()
+            assert preview.width() >= 220
+            assert preview.height() >= 220
     assert panel.tutorial_stack.currentIndex() == 3
     assert panel.tutorial_start_button.isVisible()
     panel.tutorial_start_button.click()
     assert starts == [True]
     panel.hide()
+    apply_application_theme("dark")
 
 
-def test_v4_settings_center_has_minimal_navigation_and_desktop_sizing(tmp_path: Path) -> None:
+def test_v4_settings_center_matches_desktop_layout_and_navigation(tmp_path: Path) -> None:
     _application()
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
 
-    assert panel.size().width() == 1100
-    assert panel.size().height() == 700
-    assert panel.minimumWidth() == 960
-    assert panel.minimumHeight() == 620
+    assert panel.size().width() == 1180
+    assert panel.size().height() == 760
+    assert panel.minimumWidth() == 1040
+    assert panel.minimumHeight() == 680
     assert panel.pages.count() == 4
     assert [button.text().strip() for button, _title in panel._nav_entries] == [
         "常规",
@@ -196,6 +209,49 @@ def test_v4_settings_center_has_minimal_navigation_and_desktop_sizing(tmp_path: 
         "悬浮球",
         "使用方法",
     ]
+    assert panel.page_subtitle.text() == "启动行为、主题与识别引擎状态"
+    assert panel.startup_checkbox.isCheckable()
+    assert not application_icon().isNull()
+    assert not tutorial_formula_image().isNull()
+    assert not panel.windowIcon().isNull()
+    assert panel.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
+    assert panel.brand_logo.pixmap() is not None
+    assert not panel.brand_logo.pixmap().isNull()
+    assert "v0.1.0" in panel.brand_edition.text()
+    assert all(button.accessibleName() for button in panel.color_buttons.values())
+    panel.hide()
+
+
+def test_mode_cards_replace_visible_combo_and_persist_selection(tmp_path: Path) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    panel = SettingsPanel(settings, FloatingPreferences())
+    changed: list[FloatingPreferences] = []
+    panel.preferences_changed.connect(changed.append)
+
+    assert panel.mode_combo.isHidden()
+    assert set(panel.mode_cards) == {"auto", "rapid", "paddle"}
+    panel.mode_cards["rapid"].click()
+
+    assert panel.mode_combo.currentData() == "rapid"
+    assert panel.mode_cards["rapid"].isChecked()
+    assert settings.value("recognition/mode") == "rapid"
+    assert changed[-1].recognition_mode == "rapid"
+    assert panel.mode_summary_label.text() == "快速 · 只运行轻量后端"
+    panel.hide()
+
+
+def test_tutorial_progress_items_jump_between_steps(tmp_path: Path) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+
+    panel.show_tutorial()
+    panel.tutorial_step_buttons[2].click()
+
+    assert panel.tutorial_stack.currentIndex() == 2
+    assert panel.tutorial_step_buttons[0].property("stepState") == "complete"
+    assert panel.tutorial_step_buttons[2].property("stepState") == "current"
+    assert panel.tutorial_back_button.text() == "上一步"
     panel.hide()
 
 
@@ -233,6 +289,7 @@ def test_unavailable_paddle_mode_falls_back_and_cannot_be_selected(
     assert panel.mode_combo.currentData() == "auto"
     assert paddle_item is not None
     assert not paddle_item.isEnabled()
+    assert not panel.mode_cards["paddle"].isEnabled()
     panel.close()
 
 

@@ -19,7 +19,7 @@ _STYLE_COMMAND = re.compile(r"\\(?:textstyle|displaystyle|scriptstyle|scriptscri
 class PaddleFormulaBackend(RecognitionBackend):
     key = "paddle"
     display_name = "PP-FormulaNet-S（CPU）"
-    install_hint = "uv sync --extra paddle"
+    install_hint = "uv sync"
 
     def __init__(self) -> None:
         self._model: Any | None = None
@@ -33,7 +33,7 @@ class PaddleFormulaBackend(RecognitionBackend):
             return self._model
         if not self.is_available():
             raise BackendUnavailableError(
-                "尚未安装 PP-FormulaNet-S。请在项目目录运行：uv sync --extra paddle"
+                "尚未安装 PP-FormulaNet-S。请在项目目录运行：uv sync"
             )
         try:
             from paddleocr import FormulaRecognition
@@ -42,7 +42,7 @@ class PaddleFormulaBackend(RecognitionBackend):
         except Exception as exc:
             raise RecognitionError(
                 "PP-FormulaNet-S 初始化失败。第一次使用需要联网下载模型；"
-                "请确认已完整安装 paddle extra。"
+                "请确认默认依赖已完整安装。"
             ) from exc
         return self._model
 

@@ -1,0 +1,13 @@
+Unicode math symbol mapping notice
+
+The file `latex2mathml/unimathsymbols.txt` is distributed unmodified with
+FormulaSnip as runtime data for latex2mathml.
+
+Copyright (c) 2011 Günter Milde
+
+The file's original header licenses it under the LaTeX Project Public License,
+version 1.3 or (at your option) any later version. The original copyright and
+license header is preserved in the distributed data file.
+
+Canonical license text: https://www.latex-project.org/lppl.txt
+Upstream data source: https://github.com/roniemartinez/latex2mathml

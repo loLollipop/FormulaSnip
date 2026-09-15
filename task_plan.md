@@ -43,12 +43,13 @@
 - 悬浮球主体使用稳定的品牌底色，中间显示默认 `fx` Logo；颜色设置仅作用于外圈。
 - 外圈颜色通过系统颜色盘选择；Logo 可上传常见图片格式并恢复默认，不保存图片内容副本，只保存用户选择的绝对路径。
 - 软件深浅主题使用顶部单按钮切换，并同时作用于设置中心与结果面板。
+- RapidLaTeXOCR 与 PP-FormulaNet-S 改为默认同时安装，智能模式仍仅在命中风险条件时调用第二引擎。
 
 ## Errors Encountered
 - 当前工作目录不是 Git 仓库；将在新项目目录初始化独立仓库。
 - 本机尚未安装 PySide6、ONNX Runtime 或公式识别包；Pillow、pywin32、pytest 已存在。
 - `uv sync` 的可编辑安装在当前中文父目录生成绝对路径 `.pth` 后，Python 未加载该路径；改用项目根目录下的平铺 `formulasnip/` 包结构，并让 pytest 显式加入项目根目录。开发启动统一使用 `python -m formulasnip`，最终 EXE 不依赖 `.pth`。
-- `rapid-latex-ocr==0.0.9` 的源码导入 `requests`，但 PyPI 元数据没有声明该依赖；已在项目的 `rapid` extra 中显式补充。
+- `rapid-latex-ocr==0.0.9` 的源码导入 `requests`，但 PyPI 元数据没有声明该依赖；早期先在 `rapid` extra 中补充，现已随双引擎方案迁入默认依赖。
 - 直接按文件路径执行 `scripts/render_preview.py` 时同样不会自动加入项目根目录；预览脚本已显式从自身位置解析并加入根目录。
 - 离屏界面渲染发现 PySide6 `QMargins` 没有 `topLeft()`/`bottomRight()`；已改为显式计算四边边距对应的 `QSize`。
 - 从 `PySide6` 元包切换为 `PySide6-Essentials` 后，uv 卸载 Addons 时删除了两者共享的 Qt 文件，现有环境出现 `QtGui` DLL 加载失败；将强制重装 Essentials。全新安装不会经历该重叠卸载过程。
@@ -58,9 +59,9 @@
 - 首轮预处理消融脚本直接把 `PIL.Image` 传给 RapidLaTeXOCR，触发其输入类型限制（只接受路径、NumPy、bytes）；改为传入 RGB NumPy 数组后继续测试。该限制已经由现有后端通过 PNG bytes 适配。
 - 预处理消融显示：常规阈值/锐化/放大没有修复困难积分样例；0.65 倍缩小反而触发 512-token 退化输出并耗时约 59.6 秒。结论是不做无条件多预处理，增加解码上限/异常输出防护，并把处理限定为风险诊断触发。
 - 本机匿名 GitHub REST API 查询触发共享出口 IP 的 rate limit；社区历史调研改由公开仓库网页、raw 文件、搜索结果及可用的独立来源交叉核验，不使用或暴露用户凭据。
-- PP-FormulaNet-S 隔离环境首轮安装成功但构造 predictor 失败：`paddleocr`/`paddlex` 的公式后处理实际需要 `tokenizers`，默认最小依赖未自动带入。将其显式加入候选后端 extra 后继续实测，这也是安装完整性风险证据。
-- 补入 `tokenizers` 后模型可在约 9.66 秒内构造，但预测后处理再次因未声明的 `ftfy` 缺失而失败；候选 extra 还需显式加入 `ftfy`，Paddle 公式模块的可选依赖完整性低于预期。
-- PP-FormulaNet-S 加入 `ftfy` 后完成本机 CPU 推理：warm 约 0.76 秒；积分样例优于 Rapid，但双曲线样例产生缺少反斜杠的 `frac` 和重复减号。它适合作为可选复核后端，不适合无条件覆盖 Rapid。
+- PP-FormulaNet-S 隔离环境首轮安装成功但构造 predictor 失败：`paddleocr`/`paddlex` 的公式后处理实际需要 `tokenizers`，默认最小依赖未自动带入。早期先将其加入候选后端 extra，现已迁入默认依赖。
+- 补入 `tokenizers` 后模型可在约 9.66 秒内构造，但预测后处理再次因未声明的 `ftfy` 缺失而失败；`ftfy` 也已随双引擎方案迁入默认依赖。
+- PP-FormulaNet-S 加入 `ftfy` 后完成本机 CPU 推理：warm 约 0.76 秒；积分样例优于 Rapid，但双曲线样例产生缺少反斜杠的 `frac` 和重复减号。它不适合无条件覆盖 Rapid，因此虽默认安装，智能模式仍只在风险条件命中时调用。
 - V2 先将 Rapid 最大解码从 512 降到 256 后，退化输入仍需约 31.9 秒才被拒绝；进一步采用 128-token 快速上限，把超长公式交给智能/精确路径，以换取更可控的最坏延迟。
 - V3 写入代理未在约定时间内完成测试收敛；停止扩展后由主代理接管实际 diff、测试和交付验证。
 - 删除完整编辑器后，旧 UI 测试仍导入 `main_window`，导致 pytest 收集失败；已按新的设置/教程/悬浮状态重写测试并恢复通过。

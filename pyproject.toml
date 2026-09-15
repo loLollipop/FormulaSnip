@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Offline Windows formula snipping and recognition prototype"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-license = { text = "MIT" }
+license = { text = "GPL-3.0-only" }
 authors = [{ name = "FormulaSnip contributors" }]
 dependencies = [
   # QtCore/QtGui/QtWidgets are all in Essentials; avoiding Addons saves
@@ -17,25 +17,24 @@ dependencies = [
   "Pillow>=10.4,<13",
   "latex2mathml>=3.77,<4",
   "matplotlib>=3.9,<4",
-]
-
-[project.optional-dependencies]
-rapid = [
   "rapid-latex-ocr==0.0.9",
   # rapid-latex-ocr imports requests for model downloads but omits it from
   # the package metadata.
   "requests>=2.32,<3",
-]
-paddle = [
   "paddleocr>=3.3,<4",
   "paddlepaddle>=3.3,<4; sys_platform == 'win32'",
   "tokenizers>=0.20,<1",
   "ftfy>=6.3,<7",
 ]
+
+[project.optional-dependencies]
 dev = [
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
   "ruff>=0.9,<1",
+]
+packaging = [
+  "pyinstaller>=6.11,<7",
 ]
 
 [project.scripts]
@@ -43,6 +42,16 @@ formulasnip = "formulasnip.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["formulasnip"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/formulasnip",
+  "/LICENSE",
+  "/README.md",
+  "/THIRD_PARTY_NOTICES.md",
+  "/THIRD_PARTY_LICENSES",
+  "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"

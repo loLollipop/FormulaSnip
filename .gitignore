@@ -8,6 +8,9 @@ htmlcov/
 dist/
 build/
 *.spec
+!FormulaSnip.spec
 *.log
 .idea/
 .vscode/
+/软件设置中心UI设计/
+/软件设置中心UI设计.zip

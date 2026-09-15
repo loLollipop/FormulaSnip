@@ -57,7 +57,7 @@ class BackendManager:
                         (candidate,),
                     )
             raise BackendUnavailableError(
-                "没有检测到本地公式模型。请运行 `uv sync --extra rapid` 安装推荐后端。"
+                "没有检测到本地公式模型。请在项目目录运行 `uv sync` 安装默认双引擎。"
             )
 
         try:
@@ -144,7 +144,7 @@ class BackendManager:
                 if backend.is_available():
                     return backend.key
             raise BackendUnavailableError(
-                "没有检测到本地公式模型。请运行 `uv sync --extra rapid` 安装推荐后端。"
+                "没有检测到本地公式模型。请在项目目录运行 `uv sync` 安装默认双引擎。"
             )
         for backend in _BACKEND_TYPES:
             if backend.key == selected_key:

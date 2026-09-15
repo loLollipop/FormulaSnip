@@ -1,6 +1,6 @@
-Design system: FormulaSnip Minimal Settings
+Design system: FormulaSnip User UI
 
-- Query: Windows desktop utility settings minimal concise productivity
+- Query: Windows desktop formula OCR settings minimal sidebar tutorial stepper blue gray
 - Matched profile: saas
 - Style direction: minimal-modern
 - Palette: slate-indigo
