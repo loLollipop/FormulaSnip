@@ -1,0 +1,33 @@
+{
+  "backend": "rapid",
+  "runs": 2,
+  "samples": [
+    {
+      "id": "synthetic_hyperbola",
+      "prediction": "{\\frac{x^{2}}{e^{2}}}-{\\frac{y^{2}}{b^{2}}}=1",
+      "normalized_exact": false,
+      "issues": [],
+      "timings_seconds": [
+        2.649330899999768,
+        1.1284097999960068
+      ]
+    },
+    {
+      "id": "synthetic_integral",
+      "prediction": "\\int_{0}^{\\infty}\\mathrm{e}^{-x^{2}}\\,d x={\\frac{\\sqrt{n}}{2}}",
+      "normalized_exact": false,
+      "issues": [],
+      "timings_seconds": [
+        1.1509665999983554,
+        1.1894517000037013
+      ]
+    }
+  ],
+  "summary": {
+    "sample_count": 2,
+    "normalized_exact_count": 0,
+    "normalized_exact_rate": 0,
+    "mean_seconds": 1.5295397499994579,
+    "median_seconds": 1.1702091500010283
+  }
+}

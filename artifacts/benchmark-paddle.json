@@ -1,0 +1,36 @@
+{
+  "backend": "paddle",
+  "runs": 2,
+  "samples": [
+    {
+      "id": "synthetic_hyperbola",
+      "prediction": "{{frac{x^{2}}{a^{2}}--\\frac{y^{2}}{b^{2}}=1}}",
+      "normalized_exact": false,
+      "issues": [
+        "疑似缺少反斜杠：frac",
+        "疑似重复运算符"
+      ],
+      "timings_seconds": [
+        10.243853499996476,
+        0.667936900004861
+      ]
+    },
+    {
+      "id": "synthetic_integral",
+      "prediction": "\\int_{0}^{\\infty}e^{-x^{2}}\\,d x={\\frac{\\sqrt{\\pi}}{2}}",
+      "normalized_exact": false,
+      "issues": [],
+      "timings_seconds": [
+        0.6798944000038318,
+        0.7093726999955834
+      ]
+    }
+  ],
+  "summary": {
+    "sample_count": 2,
+    "normalized_exact_count": 0,
+    "normalized_exact_rate": 0,
+    "mean_seconds": 3.075264375000188,
+    "median_seconds": 0.6946335499997076
+  }
+}
