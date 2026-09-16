@@ -2,7 +2,7 @@
 
 FormulaSnip 是一个面向 Windows 论文写作场景的本地公式识别原型。它只处理用户截取的单个公式，不包含正文 OCR、表格或整页版面识别。
 
-> 当前提供 V4 源码与 Windows x64 便携版。Rapid 与 PP-FormulaNet-S 均包含在默认运行环境中；模型由各自官方组件在第一次识别时下载，之后可离线使用。
+> 当前提供 V4 源码、Windows x64 Setup 安装版与便携版。Rapid 与 PP-FormulaNet-S 均包含在默认运行环境中；模型由各自官方组件在第一次识别时下载，之后可离线使用。
 
 默认启动先显示完整设置中心，可查看四步使用教程；点击“开始识别公式”后进入悬浮模式：
 
@@ -30,6 +30,12 @@ FormulaSnip 是一个面向 Windows 论文写作场景的本地公式识别原�
 - 通过剪贴板粘贴到 Word、MathType 或其他支持 LaTeX/MathML 的编辑器。
 
 ## 安装与启动
+
+### Windows Setup 安装版（推荐）
+
+从 GitHub Releases 下载 `FormulaSnip-v0.1.0-windows-x64-setup.exe`，双击后按向导安装。安装器默认安装到当前用户的本机应用目录，不需要管理员权限，并会创建开始菜单入口和桌面快捷方式；也可以在安装向导中取消桌面快捷方式。
+
+安装完成后可以从桌面或开始菜单启动，Windows“设置 > 应用 > 已安装的应用”中可正常卸载。后续版本沿用相同应用标识，可直接覆盖升级。卸载时会清理应用目录以及 Rapid 模型；Paddle 保存在用户缓存目录中的模型会保留，重新安装后可以继续复用。
 
 ### Windows 便携版
 
@@ -99,7 +105,12 @@ FormulaSnip 自有源代码采用 **GNU General Public License v3.0 only（GPL-3
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-脚本会安装 `packaging` 依赖、生成 `dist\FormulaSnip\FormulaSnip.exe`，并创建 `dist\FormulaSnip-v0.1.0-windows-x64.zip`。首版采用目录模式打包，以避免大型 AI 运行库在每次启动时临时解压。
+需要先安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，也可以运行 `winget install --id JRSoftware.InnoSetup --exact`。构建脚本会安装 `packaging` 依赖、生成 `dist\FormulaSnip\FormulaSnip.exe`，并同时创建：
+
+- `dist\FormulaSnip-v0.1.0-windows-x64-setup.exe`：带安装向导、快捷方式和卸载入口的推荐安装版；
+- `dist\FormulaSnip-v0.1.0-windows-x64.zip`：无需安装的便携版。
+
+应用本体仍采用目录模式打包，避免大型 AI 运行库在每次启动时临时解压。只需要从已有 `dist\FormulaSnip` 目录重建安装器时，可运行 `powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1`。
 
 当前 v0.1.0 Windows x64 实测：ZIP 约 295.5 MiB，解压后约 799.0 MiB；首次使用下载两个模型后还会增加约 398 MiB。
 

@@ -32,6 +32,7 @@ FormulaSnip 是一个只识别单个数学公式的 Windows 本地桌面原型�
 - 可扩展 benchmark CLI、带 SHA-256/来源/许可校验的 manifest 和两张 CC0 合成样本；
 - MathML 剪贴板同时写入纯文本和 `application/mathml+xml`；
 - 四步教程使用深浅主题自适应矢量图示，示例统一为严格排版的高斯积分；
+- 提供标准 Windows Setup 安装器，支持按用户安装、开始菜单与桌面快捷方式、覆盖升级和系统卸载入口；
 - 完整编辑器、图片导入、Word 直写和 pix2tex 产品入口已从 V3 移除；
 - 项目采用 GPL-3.0-only，并保留第三方后端与模型权重的独立许可证说明。
 

@@ -10,6 +10,15 @@ application so the exact declared and resolved dependency sets can be audited.
 Additional license texts that are absent from upstream wheels are preserved in
 `THIRD_PARTY_LICENSES`.
 
+## Windows installer
+
+- The Setup package is built with Inno Setup. Its license is included at
+  `THIRD_PARTY_LICENSES/inno-setup-LICENSE.txt`. Source: https://jrsoftware.org/isinfo.php
+- The Simplified Chinese installer messages are maintained by Zhenghan Yang
+  (Kira) and distributed under the MIT License. The license is included at
+  `THIRD_PARTY_LICENSES/inno-chinese-translation-LICENSE.txt`. Source:
+  https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation
+
 ## User interface and conversion libraries
 
 - PySide6 Essentials and Shiboken6 are distributed by Qt under a choice of

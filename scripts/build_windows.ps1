@@ -1,13 +1,21 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipSync
+    [switch]$SkipSync,
+    [switch]$SkipInstaller
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $distDirectory = Join-Path $projectRoot "dist"
 $applicationDirectory = Join-Path $distDirectory "FormulaSnip"
-$archivePath = Join-Path $distDirectory "FormulaSnip-v0.1.0-windows-x64.zip"
+$versionMatch = Select-String `
+    -LiteralPath (Join-Path $projectRoot "pyproject.toml") `
+    -Pattern '^version = "([^"]+)"$'
+if ($null -eq $versionMatch -or $versionMatch.Matches.Count -ne 1) {
+    throw "Unable to read one project version from pyproject.toml."
+}
+$appVersion = $versionMatch.Matches[0].Groups[1].Value
+$archivePath = Join-Path $distDirectory "FormulaSnip-v$appVersion-windows-x64.zip"
 
 if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
     throw "FormulaSnip Windows packages must be built on Windows."
@@ -58,6 +66,10 @@ try {
     $archive = Get-Item -LiteralPath $archivePath
     Write-Output "Executable: $executablePath"
     Write-Output "Archive: $($archive.FullName) ($([Math]::Round($archive.Length / 1MB, 1)) MiB)"
+
+    if (-not $SkipInstaller) {
+        & (Join-Path $PSScriptRoot "build_installer.ps1")
+    }
 }
 finally {
     Pop-Location
