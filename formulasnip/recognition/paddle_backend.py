@@ -12,6 +12,7 @@ from formulasnip.core.latex import normalize_latex
 from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
+from formulasnip.recognition.quality import has_fatal_output_issue
 
 _STYLE_COMMAND = re.compile(r"\\(?:textstyle|displaystyle|scriptstyle|scriptscriptstyle)\b\s*")
 
@@ -62,6 +63,10 @@ class PaddleFormulaBackend(RecognitionBackend):
         latex = normalize_latex(_STYLE_COMMAND.sub("", prediction)).strip()
         if not latex:
             raise RecognitionError("模型没有返回公式，请调整截图范围后重试。")
+        if has_fatal_output_issue(latex):
+            raise RecognitionError(
+                "PP-FormulaNet-S 输出异常过长，请缩小截图范围或改用智能模式。"
+            )
         return RecognitionResult(latex, self.display_name, elapsed)
 
 

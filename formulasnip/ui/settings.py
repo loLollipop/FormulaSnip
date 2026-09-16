@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Property,
+    QByteArray,
     QEasingCurve,
     QPoint,
     QPropertyAnimation,
@@ -12,17 +13,22 @@ from PySide6.QtCore import (
     QSettings,
     QSize,
     Qt,
+    QUrl,
     Signal,
     Slot,
 )
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
+    QDesktopServices,
+    QIcon,
     QImage,
     QImageReader,
     QPainter,
     QPen,
+    QPixmap,
 )
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -72,6 +78,17 @@ MAX_LOGO_BYTES = 12 * 1024 * 1024
 MAX_LOGO_SIDE = 4096
 MAX_LOGO_PIXELS = 16_000_000
 LOGO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+GITHUB_MARK_PATH = (
+    "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59"
+    ".4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94"
+    "-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 "
+    "1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64"
+    "-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 "
+    ".67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 "
+    "2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 "
+    "3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 "
+    "2.2 0 .21.15.46.55.38A7.995 7.995 0 0016 8c0-4.42-3.58-8-8-8z"
+)
 
 
 def normalize_hex_color(value: object, default: str = DEFAULT_RING_COLOR) -> str:
@@ -82,6 +99,20 @@ def normalize_hex_color(value: object, default: str = DEFAULT_RING_COLOR) -> str
         if len(candidate) == 7 and candidate.startswith("#") and color.isValid():
             return color.name(QColor.NameFormat.HexRgb).upper()
     return default
+
+
+def github_mark_icon(color: str) -> QIcon:
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+        f'<path fill="{color}" d="{GITHUB_MARK_PATH}"/></svg>'
+    )
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter, QRectF(0, 0, 32, 32))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def read_logo_image(path: object, target_size: int = 40) -> QImage | None:
@@ -286,12 +317,12 @@ class TutorialStepIllustration(QWidget):
             QApplication.instance().property("theme") == "dark"
         )
         colors = {
-            "surface": QColor("#121B2B" if dark else "#FFFFFF"),
-            "surface_alt": QColor("#0D1524" if dark else "#F7F9FC"),
-            "border": QColor("#34445E" if dark else "#D7DFEB"),
-            "text": QColor("#EDF3FB" if dark else "#172033"),
-            "muted": QColor("#98A8BF" if dark else "#60708A"),
-            "accent": QColor("#5D83F3" if dark else "#315FDD"),
+            "surface": QColor("#161A21" if dark else "#FFFFFF"),
+            "surface_alt": QColor("#1C212A" if dark else "#F4F6F9"),
+            "border": QColor("#39414F" if dark else "#C8CFDA"),
+            "text": QColor("#E8ECF3" if dark else "#151A21"),
+            "muted": QColor("#98A8BF" if dark else "#5F6A79"),
+            "accent": QColor("#6E8CF5"),
             "success": QColor("#72DFB5" if dark else "#19704F"),
         }
         area = QRectF(self.rect()).adjusted(18, 18, -18, -18)
@@ -619,7 +650,7 @@ class ToggleSwitch(QAbstractButton):
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setFixedSize(50, 30)
+        self.setFixedSize(44, 24)
         self.setAccessibleName("启动时显示设置中心")
         self._animation = QPropertyAnimation(self, b"position", self)
         self._animation.setDuration(150)
@@ -627,7 +658,7 @@ class ToggleSwitch(QAbstractButton):
         self.toggled.connect(self._animate)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(50, 30)
+        return QSize(44, 24)
 
     def get_position(self) -> float:
         return self._position
@@ -651,22 +682,22 @@ class ToggleSwitch(QAbstractButton):
         dark = QApplication.instance() is not None and (
             QApplication.instance().property("theme") == "dark"
         )
-        accent = QColor("#5D83F3" if dark else "#315FDD")
-        inactive = QColor("#2B3B54" if dark else "#D7DFEB")
+        accent = QColor("#6E8CF5")
+        inactive = QColor("#39414F" if dark else "#C8CFDA")
         track = accent if self.isChecked() else inactive
         if not self.isEnabled():
             track.setAlpha(120)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track)
-        painter.drawRoundedRect(QRectF(1, 2, 48, 26), 13, 13)
-        x = 5.0 + self._position * 20.0
-        thumb_color = "#FFFFFF" if self.isChecked() or not dark else "#121B2B"
+        painter.drawRoundedRect(QRectF(1, 1, 42, 22), 11, 11)
+        x = 4.0 + self._position * 20.0
+        thumb_color = "#FFFFFF" if self.isChecked() or not dark else "#161A21"
         painter.setBrush(QColor(thumb_color))
-        painter.drawEllipse(QRectF(x, 5, 20, 20))
+        painter.drawEllipse(QRectF(x, 4, 16, 16))
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(accent, 2))
-            painter.drawRoundedRect(QRectF(0.5, 0.5, 49, 29), 14, 14)
+            painter.drawRoundedRect(QRectF(0.5, 0.5, 43, 23), 12, 12)
 
 
 class NavigationButton(QPushButton):
@@ -674,16 +705,17 @@ class NavigationButton(QPushButton):
 
     def __init__(self, text: str, hint: str = "") -> None:
         super().__init__(text)
-        marker = QLabel(self)
-        marker.setObjectName("NavMarker")
-        marker.setFixedSize(7, 7)
-        marker.move(13, 19)
-        marker.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.marker = QLabel(self)
+        self.marker.setObjectName("NavMarker")
+        self.marker.setProperty("selected", "false")
+        self.marker.setFixedSize(3, 18)
+        self.marker.move(0, 10)
+        self.marker.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         if hint:
             trailing = QLabel(hint, self)
             trailing.setObjectName("NavHint")
             trailing.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            trailing.setGeometry(145, 0, 42, 44)
+            trailing.setGeometry(136, 0, 42, 38)
             trailing.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
 
@@ -700,17 +732,17 @@ class ModeCard(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(f"{title}识别模式")
-        self.setMinimumHeight(116)
+        self.setMinimumHeight(84)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 17, 20, 17)
-        layout.setSpacing(15)
+        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setSpacing(14)
         self.indicator = QLabel()
         self.indicator.setObjectName("ModeIndicator")
-        self.indicator.setFixedSize(20, 20)
+        self.indicator.setFixedSize(18, 18)
         self.indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignTop)
         copy = QVBoxLayout()
-        copy.setSpacing(5)
+        copy.setSpacing(4)
         title_row = QHBoxLayout()
         title_row.setSpacing(9)
         self.title_label = QLabel(title)
@@ -735,8 +767,8 @@ class ModeCard(QPushButton):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         copy.addLayout(title_row)
         copy.addWidget(body_label)
-        copy.addWidget(meta_label)
         layout.addLayout(copy, 1)
+        layout.addWidget(meta_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.toggled.connect(self._sync_visual)
         self.clicked.connect(lambda: self.selected.emit(self.mode_key))
         self._sync_visual(False)
@@ -783,13 +815,6 @@ class SettingsPanel(QWidget):
             "直接粘贴到 Word、MathType 或其他支持 LaTeX / MathML 的编辑器。",
         ),
     )
-    _PAGE_SUBTITLES = (
-        "启动行为、主题与识别引擎状态",
-        "选择公式识别路径",
-        "圆环颜色与中心标记",
-        "从截图到粘贴进 Word 的完整流程",
-    )
-
     def __init__(self, settings: QSettings, preferences: FloatingPreferences) -> None:
         super().__init__()
         self._settings = settings
@@ -823,14 +848,15 @@ class SettingsPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        sidebar = self._build_sidebar()
-        outer.addWidget(sidebar)
+        self.sidebar = self._build_sidebar()
+        outer.addWidget(self.sidebar)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
-        content_layout.addWidget(self._build_header())
+        self.header = self._build_header()
+        content_layout.addWidget(self.header)
 
         self.pages = QStackedWidget()
         self.pages.setObjectName("SettingsPages")
@@ -850,43 +876,38 @@ class SettingsPanel(QWidget):
 
         for index, (button, _title) in enumerate(self._nav_entries):
             button.clicked.connect(lambda _checked=False, target=index: self._select_page(target))
-        for button in self.findChildren(QPushButton):
-            if button.objectName() != "ModeCard":
-                button.setMinimumHeight(max(button.minimumHeight(), 40))
         self._select_page(0)
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("SettingsSidebar")
-        sidebar.setFixedWidth(236)
+        sidebar.setFixedWidth(216)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(20, 24, 20, 24)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 20, 12, 12)
+        layout.setSpacing(2)
 
         brand_row = QHBoxLayout()
+        brand_row.setContentsMargins(8, 0, 8, 20)
+        brand_row.setSpacing(10)
         self.brand_logo = QLabel()
         self.brand_logo.setObjectName("BrandLogo")
         self.brand_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.brand_logo.setFixedSize(38, 38)
-        self.brand_logo.setPixmap(application_icon().pixmap(QSize(38, 38)))
+        self.brand_logo.setFixedSize(30, 30)
+        self.brand_logo.setPixmap(application_icon().pixmap(QSize(30, 30)))
         self.brand_logo.setAccessibleName("FormulaSnip 应用图标")
-        brand_text = QVBoxLayout()
-        brand_text.setSpacing(0)
         title = QLabel("FormulaSnip")
         title.setObjectName("BrandTitle")
-        brand_text.addWidget(title)
-        self.brand_edition = QLabel(f"本地公式识别 · v{application_version()}")
+        self.brand_edition = QLabel(f"v{application_version()}", sidebar)
         self.brand_edition.setObjectName("BrandEdition")
-        brand_text.addWidget(self.brand_edition)
+        self.brand_edition.hide()
         brand_row.addWidget(self.brand_logo)
-        brand_row.addSpacing(8)
-        brand_row.addLayout(brand_text)
+        brand_row.addWidget(title)
+        brand_row.addStretch(1)
         layout.addLayout(brand_row)
-        layout.addSpacing(24)
 
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
-        self._nav_entries: list[tuple[QPushButton, str]] = []
+        self._nav_entries: list[tuple[NavigationButton, str]] = []
         for label, title, hint in (
             ("常规", "常规", ""),
             ("识别", "识别", ""),
@@ -896,45 +917,63 @@ class SettingsPanel(QWidget):
             button = NavigationButton(label, hint)
             button.setObjectName("NavButton")
             button.setCheckable(True)
-            button.setMinimumHeight(44)
+            button.setFixedHeight(38)
             self.nav_group.addButton(button)
             self._nav_entries.append((button, title))
             layout.addWidget(button)
         layout.addStretch(1)
-        offline_card = QLabel("公式与截图仅在本机处理；模型首次使用时联网下载。")
-        offline_card.setObjectName("OfflineCard")
-        offline_card.setWordWrap(True)
-        offline_card.setMinimumHeight(66)
-        layout.addWidget(offline_card)
+        self.github_button = QPushButton("loLollipop/FormulaSnip")
+        self.github_button.setObjectName("GitHubLink")
+        self.github_button.setFixedHeight(36)
+        self.github_button.setIcon(
+            github_mark_icon(
+                "#98A8BF" if self._preferences.result_theme == "dark" else "#5F6A79"
+            )
+        )
+        self.github_button.setIconSize(QSize(16, 16))
+        self.github_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.github_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.github_button.setToolTip("打开 FormulaSnip GitHub 仓库")
+        self.github_button.setAccessibleName("打开 FormulaSnip GitHub 仓库")
+        self.github_button.clicked.connect(self._open_github_repository)
+        layout.addWidget(self.github_button)
         return sidebar
 
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("SettingsHeader")
-        header.setFixedHeight(84)
+        header.setFixedHeight(64)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(32, 14, 32, 14)
-        title_column = QVBoxLayout()
-        title_column.setSpacing(2)
+        layout.setContentsMargins(24, 0, 24, 0)
+        layout.setSpacing(10)
         self.page_title = QLabel()
         self.page_title.setObjectName("PageTitle")
-        self.page_subtitle = QLabel()
+        self.page_subtitle = QLabel(header)
         self.page_subtitle.setObjectName("PageSubtitle")
-        title_column.addWidget(self.page_title)
-        title_column.addWidget(self.page_subtitle)
+        self.page_subtitle.hide()
         self.theme_toggle_button = QPushButton()
-        self.theme_toggle_button.setMinimumSize(112, 40)
+        self.theme_toggle_button.setObjectName("ThemeToggleButton")
+        self.theme_toggle_button.setFixedSize(34, 34)
+        self.theme_toggle_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.theme_toggle_button.setAccessibleName("切换明暗主题")
         self.theme_toggle_button.clicked.connect(self.toggle_theme)
-        layout.addLayout(title_column)
+        self.start_button = QPushButton("开始识别")
+        self.start_button.setObjectName("SettingsPrimary")
+        self.start_button.setFixedHeight(34)
+        self.start_button.setMinimumWidth(104)
+        self.start_button.clicked.connect(self.start_requested.emit)
+        layout.addWidget(self.page_title)
         layout.addStretch(1)
         layout.addWidget(self.theme_toggle_button)
+        layout.addWidget(self.start_button)
         return header
 
     def _page_shell(self) -> tuple[QWidget, QVBoxLayout]:
         body = QWidget()
+        body.setObjectName("SettingsPageBody")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(32, 26, 32, 34)
-        layout.setSpacing(16)
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(body)
@@ -946,119 +985,110 @@ class SettingsPanel(QWidget):
 
     def _build_overview_page(self) -> QWidget:
         page, layout = self._page_shell()
-        general = _card("启动与主题")
+        mode_card = _card("")
+        mode_card.setObjectName("OverviewModeCard")
+        mode_layout = mode_card.layout()
+        assert mode_layout is not None
+        mode_row = QHBoxLayout()
+        mode_copy = QVBoxLayout()
+        mode_copy.setSpacing(5)
+        mode_copy.addWidget(_muted_text("当前识别模式"))
+        mode_title_row = QHBoxLayout()
+        mode_title_row.setSpacing(9)
+        self.overview_mode_name = QLabel()
+        self.overview_mode_name.setObjectName("OverviewModeName")
+        self.overview_mode_tag = QLabel()
+        self.overview_mode_tag.setObjectName("ModeTag")
+        mode_title_row.addWidget(self.overview_mode_name)
+        mode_title_row.addWidget(self.overview_mode_tag)
+        mode_title_row.addStretch(1)
+        mode_copy.addLayout(mode_title_row)
+        self.mode_summary_label = _muted_text("")
+        self.mode_summary_label.hide()
+        change_button = QPushButton("更改")
+        change_button.setObjectName("CompactButton")
+        change_button.setFixedSize(72, 36)
+        change_button.clicked.connect(lambda: self._select_page(1))
+        mode_row.addLayout(mode_copy, 1)
+        mode_row.addWidget(change_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        mode_layout.addLayout(mode_row)
+        layout.addWidget(mode_card)
+
+        general = _card("应用与引擎")
         general_layout = general.layout()
         assert general_layout is not None
         startup_row = QWidget()
         startup_row.setObjectName("SettingsRow")
         startup_layout = QHBoxLayout(startup_row)
-        startup_layout.setContentsMargins(0, 7, 0, 7)
+        startup_layout.setContentsMargins(0, 6, 0, 6)
         startup_copy = QVBoxLayout()
-        startup_copy.setSpacing(3)
+        startup_copy.setSpacing(0)
         startup_copy.addWidget(_row_title("启动时显示设置中心"))
-        startup_copy.addWidget(
-            _muted_text("关闭后启动即进入悬浮模式，只保留悬浮球。")
-        )
         self.startup_checkbox = ToggleSwitch()
         self.startup_checkbox.toggled.connect(self._startup_toggle_changed)
         startup_layout.addLayout(startup_copy, 1)
         startup_layout.addWidget(self.startup_checkbox)
         general_layout.addWidget(startup_row)
+        general_layout.addWidget(_divider())
 
-        divider = QFrame()
-        divider.setObjectName("CardDivider")
-        divider.setFrameShape(QFrame.Shape.HLine)
-        general_layout.addWidget(divider)
-        mode_row = QWidget()
-        mode_row.setObjectName("SettingsRow")
-        mode_layout = QHBoxLayout(mode_row)
-        mode_layout.setContentsMargins(0, 7, 0, 2)
-        mode_copy = QVBoxLayout()
-        mode_copy.setSpacing(3)
-        mode_copy.addWidget(_row_title("当前识别模式"))
-        self.mode_summary_label = _muted_text("")
-        mode_copy.addWidget(self.mode_summary_label)
-        change_button = QPushButton("更改")
-        change_button.setObjectName("CompactButton")
-        change_button.setMinimumSize(72, 40)
-        change_button.clicked.connect(lambda: self._select_page(1))
-        mode_layout.addLayout(mode_copy, 1)
-        mode_layout.addWidget(change_button)
-        general_layout.addWidget(mode_row)
-
-        update_divider = QFrame()
-        update_divider.setObjectName("CardDivider")
-        update_divider.setFrameShape(QFrame.Shape.HLine)
-        general_layout.addWidget(update_divider)
         update_row = QWidget()
         update_row.setObjectName("SettingsRow")
         update_layout = QHBoxLayout(update_row)
-        update_layout.setContentsMargins(0, 7, 0, 2)
+        update_layout.setContentsMargins(0, 6, 0, 6)
         update_copy = QVBoxLayout()
         update_copy.setSpacing(3)
-        update_copy.addWidget(_row_title(f"当前版本 v{application_version()}"))
-        self.update_status_label = _muted_text("自动检查间隔为 12 小时")
+        self.update_version_label = _row_title(
+            f"当前版本 v{application_version()}"
+        )
+        update_copy.addWidget(self.update_version_label)
+        self.update_status_label = _muted_text("稳定通道")
         update_copy.addWidget(self.update_status_label)
         self.check_update_button = QPushButton("检查更新")
+        self.update_button = self.check_update_button
         self.check_update_button.setObjectName("CompactButton")
-        self.check_update_button.setMinimumSize(96, 40)
+        self.check_update_button.setFixedSize(96, 36)
         self.check_update_button.clicked.connect(self.update_check_requested.emit)
         update_layout.addLayout(update_copy, 1)
         update_layout.addWidget(self.check_update_button)
         general_layout.addWidget(update_row)
-        layout.addWidget(general)
+        general_layout.addWidget(_divider())
 
-        engines = _card("识别引擎", "默认双引擎 · 本机运行")
-        engines_layout = engines.layout()
-        assert engines_layout is not None
-        for key, name, available in backend_summaries():
+        summaries = backend_summaries()
+        for index, (key, name, available) in enumerate(summaries):
             row = QWidget()
             row.setObjectName("EngineRow")
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 6, 0, 6)
-            row_layout.setSpacing(13)
+            row_layout.setContentsMargins(0, 5, 0, 5)
+            row_layout.setSpacing(12)
+            badge = QLabel("R" if key == "rapid" else "PP")
+            badge.setObjectName("EngineBadge")
+            badge.setFixedSize(30, 30)
+            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             dot = QLabel()
             dot.setObjectName("EngineDot")
             dot.setProperty("available", "true" if available else "false")
-            dot.setFixedSize(8, 8)
+            dot.setFixedSize(6, 6)
             copy = QVBoxLayout()
-            copy.setSpacing(3)
+            copy.setSpacing(0)
             copy.addWidget(_row_title(name))
             if key == "rapid":
-                detail = "默认快速后端 · 模型约 170.7 MiB · warm 约 1–2 s"
+                detail = "170.7 MiB · 1–2 s"
             elif available:
-                detail = "默认精确后端 · 模型约 227.4 MiB · warm 约 0.67–0.76 s"
+                detail = "227.4 MiB · 0.7 s"
             else:
-                detail = "默认精确后端缺失 · 请重新运行 uv sync"
-            copy.addWidget(_muted_text(detail))
+                detail = "安装缺失 · 请重新运行 uv sync"
+            row.setToolTip(detail)
             status = QLabel("已就绪" if available else "安装缺失")
             status.setObjectName("EngineStatus")
             status.setProperty("available", "true" if available else "false")
-            row_layout.addWidget(dot)
+            row_layout.addWidget(badge)
             row_layout.addLayout(copy, 1)
             row_layout.addWidget(status)
-            engines_layout.addWidget(row)
-        layout.addWidget(engines)
-
-        cta = QWidget()
-        cta.setObjectName("SettingsCTA")
-        cta_layout = QHBoxLayout(cta)
-        cta_layout.setContentsMargins(22, 18, 22, 18)
-        cta_copy = QVBoxLayout()
-        cta_copy.setSpacing(4)
-        cta_copy.addWidget(_row_title("开始公式识别"))
-        cta_detail = _muted_text(
-            "设置中心收起后，桌面仅保留可拖动的置顶悬浮球；右键可随时返回设置。"
-        )
-        cta_detail.setWordWrap(True)
-        cta_copy.addWidget(cta_detail)
-        self.start_button = QPushButton("开始识别公式  →")
-        self.start_button.setObjectName("SettingsPrimary")
-        self.start_button.setMinimumSize(172, 46)
-        self.start_button.clicked.connect(self.start_requested.emit)
-        cta_layout.addLayout(cta_copy, 1)
-        cta_layout.addWidget(self.start_button)
-        layout.addWidget(cta)
+            row_layout.addWidget(dot)
+            general_layout.addWidget(row)
+            if index < len(summaries) - 1:
+                general_layout.addWidget(_divider())
+        layout.addWidget(general)
         layout.addStretch(1)
         return page
 
@@ -1085,27 +1115,25 @@ class SettingsPanel(QWidget):
                 "auto",
                 "智能",
                 "推荐",
-                "先运行 Rapid；遇到积分、求和、极限、矩阵、低质量图片或"
-                "疑似异常 LaTeX 时，再调用 PP-FormulaNet-S 复核，"
-                "界面只显示最终采用的结果。",
-                "warm 约 1–2 s，必要时才二次识别",
+                "双引擎自动复核",
+                "1–2 s",
             ),
             (
                 "rapid",
                 "快速",
                 "轻量",
-                "只运行轻量 ONNX 后端 RapidLaTeXOCR，不做复核。适合排版清晰的行内公式。",
-                "warm 约 1–2 s · 模型约 170.7 MiB",
+                "RapidLaTeXOCR",
+                "1–2 s",
             ),
             (
                 "paddle",
                 "精确",
                 "已内置" if paddle_available else "安装缺失",
-                "直接运行 PP-FormulaNet-S。它不保证每个公式都比 Rapid 正确，仍需人工校对。",
+                "PP-FormulaNet-S",
                 (
-                    "首次初始化约 9.6 s，warm 约 0.67–0.76 s"
+                    "0.7 s"
                     if paddle_available
-                    else "默认双引擎安装不完整，请在项目目录重新运行 uv sync"
+                    else "未安装"
                 ),
             ),
         )
@@ -1120,54 +1148,37 @@ class SettingsPanel(QWidget):
             self.mode_cards[key] = mode_card
             layout.addWidget(mode_card)
 
-        trigger_card = _card("智能模式何时触发复核")
-        trigger_layout = trigger_card.layout()
-        assert trigger_layout is not None
-        trigger_description = _muted_text(
-            "确定性风险规则，不使用模型置信度，也不会拼接多个模型。清晰、普通的公式只运行一次轻量后端。"
-        )
-        trigger_description.setWordWrap(True)
-        trigger_layout.addWidget(trigger_description)
-        tags = QHBoxLayout()
-        tags.setSpacing(8)
-        for text in ("积分", "求和", "极限", "矩阵", "低质量图片", "疑似异常 LaTeX"):
-            tag = QLabel(text)
-            tag.setObjectName("TriggerTag")
-            tags.addWidget(tag)
-        tags.addStretch(1)
-        trigger_layout.addLayout(tags)
-        layout.addWidget(trigger_card)
         layout.addStretch(1)
         return page
 
     def _build_appearance_page(self) -> QWidget:
         page, layout = self._page_shell()
         row = QHBoxLayout()
-        row.setSpacing(18)
-        preview_card = _card("预览")
+        row.setSpacing(12)
+        preview_card = _card("")
         preview_layout = preview_card.layout()
         assert preview_layout is not None
         stage = QWidget()
         stage.setObjectName("OrbPreviewStage")
-        stage.setMinimumHeight(232)
+        stage.setFixedHeight(258)
         stage_layout = QVBoxLayout(stage)
-        stage_layout.setContentsMargins(36, 26, 36, 26)
+        stage_layout.setContentsMargins(20, 20, 20, 12)
         self.orb_preview = OrbAppearancePreview()
         stage_layout.addWidget(self.orb_preview, 0, Qt.AlignmentFlag.AlignCenter)
-        preview_layout.addWidget(stage)
-        preview_description = _muted_text(
-            "悬浮球主体保持统一中性色，只有圆环与中心标记可自定义。"
+        self.ring_hex_label = QLabel(self._ring_color)
+        self.ring_hex_label.setObjectName("RingHexLabel")
+        stage_layout.addWidget(
+            self.ring_hex_label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom
         )
-        preview_description.setWordWrap(True)
-        preview_layout.addWidget(preview_description)
-        row.addWidget(preview_card, 4)
+        preview_layout.addWidget(stage)
+        row.addWidget(preview_card, 5)
 
         controls = _card("外观")
         controls_layout = controls.layout()
         assert controls_layout is not None
         controls_layout.addWidget(_field_label("圆环颜色"))
         swatches = QHBoxLayout()
-        swatches.setSpacing(8)
+        swatches.setSpacing(10)
         self.color_group = QButtonGroup(self)
         self.color_group.setExclusive(True)
         self.color_buttons: dict[str, QPushButton] = {}
@@ -1175,7 +1186,7 @@ class SettingsPanel(QWidget):
             button = QPushButton()
             button.setObjectName("SwatchButton")
             button.setCheckable(True)
-            button.setFixedSize(42, 42)
+            button.setFixedSize(34, 34)
             button.setProperty("ringColor", color)
             button.setToolTip(color)
             button.setAccessibleName(f"圆环颜色：{RING_PRESET_LABELS[name]}（{color}）")
@@ -1183,32 +1194,34 @@ class SettingsPanel(QWidget):
             self.color_group.addButton(button)
             self.color_buttons[name] = button
             swatches.addWidget(button)
+        self.custom_color_button = QPushButton("+")
+        self.custom_color_button.setObjectName("CustomColorButton")
+        self.custom_color_button.setFixedSize(34, 34)
+        self.custom_color_button.setToolTip("从系统颜色盘选择")
+        self.custom_color_button.setAccessibleName("从系统颜色盘选择圆环颜色")
+        self.custom_color_button.clicked.connect(self.choose_ring_color)
+        swatches.addWidget(self.custom_color_button)
         swatches.addStretch(1)
         controls_layout.addLayout(swatches)
-        self.custom_color_button = QPushButton("从系统颜色盘选择…")
-        self.custom_color_button.setMinimumHeight(40)
-        self.custom_color_button.clicked.connect(self.choose_ring_color)
-        controls_layout.addWidget(self.custom_color_button)
-        controls_layout.addSpacing(8)
+        controls_layout.addWidget(_divider())
         controls_layout.addWidget(_field_label("中心 Logo"))
         logo_row = QHBoxLayout()
         self.upload_logo_button = QPushButton("上传图片…")
         self.restore_logo_button = QPushButton("恢复默认")
+        self.upload_logo_button.setFixedHeight(36)
+        self.restore_logo_button.setFixedHeight(36)
         self.upload_logo_button.clicked.connect(self.choose_logo)
+        self.upload_logo_button.setToolTip(
+            "PNG / JPG / WebP / BMP，最大 12 MB"
+        )
         self.restore_logo_button.clicked.connect(self.restore_default_logo)
         logo_row.addWidget(self.upload_logo_button)
         logo_row.addWidget(self.restore_logo_button)
         controls_layout.addLayout(logo_row)
-        self.logo_status_label = QLabel("当前使用默认 fx 标记")
+        self.logo_status_label = QLabel("默认 Logo")
         self.logo_status_label.setObjectName("MutedText")
         self.logo_status_label.setWordWrap(True)
         controls_layout.addWidget(self.logo_status_label)
-        logo_safety = _muted_text(
-            "支持 PNG / JPG / WebP / BMP，最大 12 MB；图片无效时自动回退到默认 fx 标记。"
-        )
-        logo_safety.setObjectName("LogoSafetyText")
-        logo_safety.setWordWrap(True)
-        controls_layout.addWidget(logo_safety)
         row.addWidget(controls, 6)
         layout.addLayout(row)
         layout.addStretch(1)
@@ -1218,12 +1231,12 @@ class SettingsPanel(QWidget):
     def _build_tutorial_page(self) -> QWidget:
         page, layout = self._page_shell()
         progress = QHBoxLayout()
-        progress.setSpacing(10)
+        progress.setSpacing(8)
         self.tutorial_step_buttons: list[QPushButton] = []
         for step_index, step_data in enumerate(self._TUTORIAL_STEPS):
-            step_button = QPushButton(f"{step_index + 1}  {step_data[0]}")
+            step_button = QPushButton(f"{step_index + 1:02d}  {step_data[0]}")
             step_button.setObjectName("TutorialStepButton")
-            step_button.setMinimumHeight(42)
+            step_button.setFixedHeight(38)
             step_button.clicked.connect(
                 lambda _checked=False, target=step_index: self._set_tutorial_step(target)
             )
@@ -1233,7 +1246,7 @@ class SettingsPanel(QWidget):
 
         self.tutorial_stack = QStackedWidget()
         self.tutorial_stack.setObjectName("TutorialStack")
-        self.tutorial_stack.setMinimumHeight(320)
+        self.tutorial_stack.setMinimumHeight(300)
         self.tutorial_counters: list[QLabel] = []
         self.tutorial_illustrations: list[TutorialStepIllustration] = []
         for step_index, (_label, heading, body, tip) in enumerate(
@@ -1241,7 +1254,7 @@ class SettingsPanel(QWidget):
         ):
             step = QWidget()
             step_layout = QHBoxLayout(step)
-            step_layout.setContentsMargins(28, 26, 28, 26)
+            step_layout.setContentsMargins(28, 22, 28, 22)
             step_layout.setSpacing(24)
             copy = QVBoxLayout()
             copy.setSpacing(0)
@@ -1256,12 +1269,11 @@ class SettingsPanel(QWidget):
             tip_label = QLabel(tip)
             tip_label.setObjectName("TutorialTip")
             tip_label.setWordWrap(True)
-            copy.addWidget(counter)
-            copy.addSpacing(8)
+            counter.hide()
             copy.addWidget(heading_label)
-            copy.addSpacing(11)
+            copy.addSpacing(12)
             copy.addWidget(body_label)
-            copy.addSpacing(14)
+            copy.addSpacing(12)
             copy.addWidget(tip_label)
             copy.addStretch(1)
             illustration = TutorialStepIllustration(step_index)
@@ -1282,7 +1294,7 @@ class SettingsPanel(QWidget):
             self.tutorial_next_button,
             self.tutorial_start_button,
         ):
-            button.setMinimumHeight(42)
+            button.setFixedHeight(36)
         nav.addWidget(self.tutorial_back_button)
         nav.addStretch(1)
         nav.addWidget(self.tutorial_next_button)
@@ -1317,8 +1329,18 @@ class SettingsPanel(QWidget):
         self.pages.setCurrentIndex(bounded)
         button, title = self._nav_entries[bounded]
         button.setChecked(True)
+        for nav_button, _nav_title in self._nav_entries:
+            nav_button.marker.setProperty(
+                "selected", "true" if nav_button is button else "false"
+            )
+            nav_button.marker.style().unpolish(nav_button.marker)
+            nav_button.marker.style().polish(nav_button.marker)
         self.page_title.setText(title)
-        self.page_subtitle.setText(self._PAGE_SUBTITLES[bounded])
+        self.page_subtitle.clear()
+
+    @Slot()
+    def _open_github_repository(self) -> None:
+        QDesktopServices.openUrl(QUrl("https://github.com/loLollipop/FormulaSnip"))
 
     @Slot(str)
     def _select_recognition_mode(self, mode: str) -> None:
@@ -1339,11 +1361,14 @@ class SettingsPanel(QWidget):
         for key, card in self.mode_cards.items():
             card.setChecked(key == selected)
         summaries = {
-            "auto": "智能（推荐） · 必要时自动复核",
-            "rapid": "快速 · 只运行轻量后端",
-            "paddle": "精确 · 直接运行精确后端",
+            "auto": ("智能", "推荐", "Rapid 优先 · 必要时复核"),
+            "rapid": ("快速", "轻量", "只运行 RapidLaTeXOCR"),
+            "paddle": ("精确", "已内置", "只运行 PP-FormulaNet-S"),
         }
-        self.mode_summary_label.setText(summaries.get(selected, summaries["auto"]))
+        name, tag, meta = summaries.get(selected, summaries["auto"])
+        self.overview_mode_name.setText(name)
+        self.overview_mode_tag.setText(tag)
+        self.mode_summary_label.setText(meta)
 
     @Slot()
     def _controls_changed(self) -> None:
@@ -1386,11 +1411,22 @@ class SettingsPanel(QWidget):
 
     def _update_theme_button(self) -> None:
         if self._preferences.result_theme == "dark":
-            self.theme_toggle_button.setText("浅色模式")
-            self.theme_toggle_button.setToolTip("当前为深色主题")
+            self.theme_toggle_button.setText("☀")
+            self.theme_toggle_button.setToolTip("切换到浅色主题")
+            self.theme_toggle_button.setAccessibleDescription(
+                "当前为深色主题，按下切换到浅色主题"
+            )
         else:
-            self.theme_toggle_button.setText("深色模式")
-            self.theme_toggle_button.setToolTip("当前为浅色主题")
+            self.theme_toggle_button.setText("☾")
+            self.theme_toggle_button.setToolTip("切换到深色主题")
+            self.theme_toggle_button.setAccessibleDescription(
+                "当前为浅色主题，按下切换到深色主题"
+            )
+        self.github_button.setIcon(
+            github_mark_icon(
+                "#98A8BF" if self._preferences.result_theme == "dark" else "#5F6A79"
+            )
+        )
 
     @Slot()
     def _preset_color_selected(self) -> None:
@@ -1432,10 +1468,10 @@ class SettingsPanel(QWidget):
         image = read_logo_image(path)
         if image is None:
             self._logo_path = ""
-            self.logo_status_label.setText("图片无效、损坏或过大，已安全恢复默认 fx 标记")
+            self.logo_status_label.setText("已恢复默认 Logo")
         else:
             self._logo_path = str(Path(path).resolve())
-            self.logo_status_label.setText(f"自定义 Logo · {Path(path).name}")
+            self.logo_status_label.setText(Path(path).name)
         self._update_appearance_preview()
         self._controls_changed()
 
@@ -1449,8 +1485,9 @@ class SettingsPanel(QWidget):
 
     def _update_appearance_preview(self) -> None:
         self.orb_preview.set_appearance(self._ring_color, self._logo_path)
+        self.ring_hex_label.setText(self._ring_color)
         if not self._logo_path:
-            self.logo_status_label.setText("当前使用默认 fx 标记")
+            self.logo_status_label.setText("默认 Logo")
 
     @Slot()
     def show_tutorial(self) -> None:
@@ -1515,15 +1552,23 @@ def _card(title: str, description: str = "") -> QWidget:
     layout = QVBoxLayout(card)
     layout.setContentsMargins(22, 20, 22, 20)
     layout.setSpacing(10)
-    heading = QLabel(title)
-    heading.setObjectName("CardTitle")
-    layout.addWidget(heading)
+    if title:
+        heading = QLabel(title)
+        heading.setObjectName("CardTitle")
+        layout.addWidget(heading)
     if description:
         detail = QLabel(description)
         detail.setObjectName("CardDescription")
         detail.setWordWrap(True)
         layout.addWidget(detail)
     return card
+
+
+def _divider() -> QFrame:
+    divider = QFrame()
+    divider.setObjectName("CardDivider")
+    divider.setFrameShape(QFrame.Shape.HLine)
+    return divider
 
 
 def _field_label(text: str) -> QLabel:

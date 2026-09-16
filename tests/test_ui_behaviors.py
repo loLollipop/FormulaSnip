@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRect, QSettings, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
@@ -195,7 +195,7 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
     apply_application_theme("dark")
 
 
-def test_v4_settings_center_matches_desktop_layout_and_navigation(tmp_path: Path) -> None:
+def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Path) -> None:
     _application()
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
 
@@ -210,7 +210,26 @@ def test_v4_settings_center_matches_desktop_layout_and_navigation(tmp_path: Path
         "悬浮球",
         "使用方法",
     ]
-    assert panel.page_subtitle.text() == "启动行为、主题与识别引擎状态"
+    assert panel.sidebar.width() == 216
+    assert panel.header.height() == 64
+    assert panel.brand_logo.size().width() == 30
+    assert all(button.height() == 38 for button, _title in panel._nav_entries)
+    assert panel.theme_toggle_button.size().width() == 34
+    assert panel.theme_toggle_button.size().height() == 34
+    assert panel.theme_toggle_button.toolTip()
+    assert panel.theme_toggle_button.accessibleName() == "切换明暗主题"
+    scroll = panel.settings_page.findChild(QScrollArea)
+    assert scroll is not None
+    body_layout = scroll.widget().layout()
+    assert body_layout is not None
+    margins = body_layout.contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        24,
+        20,
+        24,
+        24,
+    )
+    assert body_layout.spacing() == 12
     assert panel.startup_checkbox.isCheckable()
     assert not application_icon().isNull()
     assert not tutorial_formula_image().isNull()
@@ -218,8 +237,55 @@ def test_v4_settings_center_matches_desktop_layout_and_navigation(tmp_path: Path
     assert panel.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
     assert panel.brand_logo.pixmap() is not None
     assert not panel.brand_logo.pixmap().isNull()
-    assert "v0.2.0" in panel.brand_edition.text()
+    assert panel.brand_edition.isHidden()
+    assert panel.update_button is panel.check_update_button
+    assert "v0.2.1" in panel.update_version_label.text()
     assert all(button.accessibleName() for button in panel.color_buttons.values())
+    assert panel.findChild(settings_ui.QWidget, "SettingsCTA") is None
+    panel.hide()
+
+
+def test_header_start_and_github_buttons_emit_and_open_target(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    starts: list[bool] = []
+    opened: list[str] = []
+    panel.start_requested.connect(lambda: starts.append(True))
+    monkeypatch.setattr(
+        settings_ui.QDesktopServices,
+        "openUrl",
+        lambda url: opened.append(url.toString()) or True,
+    )
+
+    assert panel.github_button.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert panel.github_button.text() == "loLollipop/FormulaSnip"
+    assert not panel.github_button.icon().isNull()
+    assert panel.github_button.iconSize().width() == 16
+    assert panel.github_button.toolTip()
+    assert panel.github_button.accessibleName()
+    panel.start_button.click()
+    panel.github_button.click()
+
+    assert starts == [True]
+    assert opened == ["https://github.com/loLollipop/FormulaSnip"]
+    panel.hide()
+
+
+def test_appearance_page_uses_reference_stage_and_swatch_sizes(tmp_path: Path) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+
+    stage = panel.appearance_page.findChild(settings_ui.QWidget, "OrbPreviewStage")
+    assert stage is not None
+    assert stage.height() == 258
+    assert all(button.size().width() == 34 for button in panel.color_buttons.values())
+    assert all(button.size().height() == 34 for button in panel.color_buttons.values())
+    assert panel.custom_color_button.size().width() == 34
+    assert panel.ring_hex_label.text() == DEFAULT_RING_COLOR
+    assert panel.logo_status_label.text() == "默认 Logo"
+    assert "12 MB" in panel.upload_logo_button.toolTip()
     panel.hide()
 
 
@@ -238,7 +304,13 @@ def test_mode_cards_replace_visible_combo_and_persist_selection(tmp_path: Path) 
     assert panel.mode_cards["rapid"].isChecked()
     assert settings.value("recognition/mode") == "rapid"
     assert changed[-1].recognition_mode == "rapid"
-    assert panel.mode_summary_label.text() == "快速 · 只运行轻量后端"
+    assert panel.overview_mode_name.text() == "快速"
+    assert panel.overview_mode_tag.text() == "轻量"
+    assert panel.mode_summary_label.text() == "只运行 RapidLaTeXOCR"
+    assert panel.mode_summary_label.isHidden()
+    assert panel.recognition_page.findChild(
+        settings_ui.QWidget, "RecognitionTriggerCard"
+    ) is None
     panel.hide()
 
 
@@ -358,7 +430,7 @@ def test_theme_toggle_updates_application_result_panel_and_storage(tmp_path: Pat
     assert assistant.panel.theme_name == "light"
     assert application.property("theme") == "light"
     assert settings.value("appearance/theme") == "light"
-    assert "#f3f6fb" in application.styleSheet()
+    assert "#f6f7f9" in application.styleSheet()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -389,7 +461,7 @@ def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
     panel.check_update_button.click()
 
     assert requests == [True]
-    assert panel.update_status_label.text() == "自动检查间隔为 12 小时"
+    assert panel.update_status_label.text() == "稳定通道"
     panel.hide()
 
 

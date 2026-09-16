@@ -8,20 +8,22 @@ def application_stylesheet(theme: str) -> str:
     """Return the complete application stylesheet for the selected theme."""
     light = theme == "light"
     colors = {
-        "window": "#f3f6fb" if light else "#0d1320",
-        "surface": "#ffffff" if light else "#121b2b",
-        "surface_alt": "#f7f9fc" if light else "#172235",
-        "surface_hover": "#edf2f9" if light else "#202e45",
-        "sidebar": "#e9eef6" if light else "#0a101c",
-        "text": "#172033" if light else "#edf3fb",
-        "muted": "#60708a" if light else "#98a8bf",
-        "border": "#d7dfeb" if light else "#2b3b54",
-        "accent": "#315fdd" if light else "#5d83f3",
-        "accent_hover": "#244ec2" if light else "#7598ff",
-        "accent_pressed": "#1d3fa8" if light else "#426be0",
-        "accent_soft": "#e8efff" if light else "#1b2d55",
-        "code": "#f7f9fc" if light else "#09101d",
-        "success": "#19704f" if light else "#72dfb5",
+        "window": "#f6f7f9" if light else "#0f1218",
+        "surface": "#ffffff" if light else "#161a21",
+        "surface_alt": "#f4f6f9" if light else "#1c212a",
+        "surface_hover": "#e9edf3" if light else "#222832",
+        "sidebar": "#eef0f4" if light else "#0c0f14",
+        "text": "#151a21" if light else "#e8ecf3",
+        "muted": "#5f6a79" if light else "#98a8bf",
+        "border": "#e1e5ec" if light else "#262d38",
+        "border_strong": "#c8cfda" if light else "#39414f",
+        "accent": "#315fdd" if light else "#8fa4ff",
+        "accent_primary": "#315fdd" if light else "#4f6ed4",
+        "accent_hover": "#244ec2" if light else "#4262c9",
+        "accent_pressed": "#1d3fa8" if light else "#3653b5",
+        "accent_soft": "#edf0fd" if light else "#1a2131",
+        "code": "#f4f6f9" if light else "#11151c",
+        "success": "#1c7a56" if light else "#5fd3a3",
         "warning": "#9a5800" if light else "#fbbf24",
     }
     return f"""
@@ -48,16 +50,16 @@ QWidget#SettingsSidebar {{
     border-right: 1px solid {colors['border']};
 }}
 QWidget#SettingsHeader {{
-    background: {colors['surface']};
+    background: {colors['window']};
     border-bottom: 1px solid {colors['border']};
 }}
 QLabel#BrandLogo {{ background: transparent; border: none; }}
-QLabel#BrandTitle {{ font-size: 17px; font-weight: 700; }}
+QLabel#BrandTitle {{ font-size: 15px; font-weight: 700; }}
 QLabel#BrandEdition, QLabel#PageSubtitle, QLabel#SettingsHint,
 QLabel#CardDescription, QLabel#TutorialCounter, QLabel#MutedText,
 QLabel#LogoSafetyText {{ color: {colors['muted']}; }}
 QLabel#BrandEdition {{ font-size: 11px; }}
-QLabel#PageTitle {{ font-size: 22px; font-weight: 700; }}
+QLabel#PageTitle {{ font-size: 19px; font-weight: 700; }}
 QLabel#PageSubtitle {{ font-size: 12px; }}
 QLabel#CardTitle, QLabel#SettingsFieldLabel, QLabel#RowTitle {{
     font-size: 15px; font-weight: 700;
@@ -67,7 +69,8 @@ QLabel#OfflineCard {{
     border: 1px solid {colors['border']}; border-radius: 10px;
     padding: 11px; font-size: 11px;
 }}
-QWidget#SettingsCard, QStackedWidget#TutorialStack {{
+QWidget#SettingsCard, QWidget#OverviewModeCard, QWidget#RecognitionTriggerCard,
+QStackedWidget#TutorialStack {{
     background: {colors['surface']};
     border: 1px solid {colors['border']};
     border-radius: 12px;
@@ -86,16 +89,25 @@ QWidget#OrbPreviewStage {{
     border: 1px solid {colors['border']};
     border-radius: 12px;
 }}
+QLabel#RingHexLabel {{
+    color: {colors['muted']}; background: transparent;
+    font-family: Consolas, monospace; font-size: 11px;
+}}
+QLabel#OverviewModeName {{ font-size: 24px; font-weight: 700; }}
+QLabel#EngineBadge {{
+    color: {colors['accent']}; background: {colors['accent_soft']};
+    border-radius: 8px; font-family: Consolas, monospace; font-size: 11px;
+}}
 QLabel#EngineDot {{
     background: {colors['muted']}; border-radius: 4px;
 }}
 QLabel#EngineDot[available="true"] {{ background: {colors['success']}; }}
 QLabel#EngineStatus {{
-    color: {colors['muted']}; background: {colors['surface_alt']};
-    border-radius: 6px; padding: 5px 10px; font-size: 12px;
+    color: {colors['muted']}; background: transparent;
+    padding: 4px 8px; font-size: 12px;
 }}
 QLabel#EngineStatus[available="true"] {{
-    color: {colors['accent']}; background: {colors['accent_soft']};
+    color: {colors['success']};
 }}
 QPushButton {{
     background: {colors['surface_alt']}; color: {colors['text']};
@@ -115,20 +127,37 @@ QPushButton:disabled {{
 }}
 QPushButton#NavButton {{
     background: transparent; border: none; color: {colors['muted']};
-    border-radius: 9px; padding: 10px 12px 10px 31px; text-align: left;
+    border-radius: 8px; padding: 0 12px; text-align: left;
     font-weight: 500;
 }}
 QPushButton#NavButton:hover {{
     background: {colors['surface_hover']}; color: {colors['text']};
 }}
 QPushButton#NavButton:checked {{
-    background: {colors['accent_soft']}; color: {colors['accent']}; font-weight: 700;
+    background: {colors['accent_soft']}; color: {colors['text']}; font-weight: 600;
 }}
-QLabel#NavMarker {{ background: {colors['muted']}; border-radius: 2px; }}
-QPushButton#NavButton:checked QLabel#NavMarker {{ background: {colors['accent']}; }}
+QLabel#NavMarker {{ background: transparent; border-radius: 2px; }}
+QLabel#NavMarker[selected="true"] {{ background: {colors['accent']}; }}
 QLabel#NavHint {{ color: {colors['muted']}; font-size: 11px; background: transparent; }}
+QPushButton#GitHubLink {{
+    background: transparent; color: {colors['muted']}; border: none;
+    border-radius: 8px; padding: 0 8px; text-align: left;
+    font-family: Consolas, monospace; font-size: 11px; font-weight: 500;
+}}
+QPushButton#GitHubLink:hover, QPushButton#GitHubLink:focus {{
+    background: {colors['surface_alt']}; color: {colors['text']};
+    border: 1px solid {colors['accent']};
+}}
+QPushButton#ThemeToggleButton {{
+    background: transparent; color: {colors['muted']}; border: 1px solid {colors['border']};
+    border-radius: 8px; padding: 0; font-size: 15px;
+}}
+QPushButton#ThemeToggleButton:hover {{
+    background: {colors['surface_alt']}; color: {colors['text']};
+}}
 QPushButton#SettingsPrimary, QPushButton#FloatingPrimary {{
-    background: {colors['accent']}; border-color: {colors['accent']}; color: white;
+    background: {colors['accent_primary']};
+    border-color: {colors['accent_primary']}; color: white;
 }}
 QPushButton#SettingsPrimary:hover, QPushButton#FloatingPrimary:hover {{
     background: {colors['accent_hover']}; border-color: {colors['accent_hover']};
@@ -138,7 +167,7 @@ QPushButton#SettingsPrimary:pressed, QPushButton#FloatingPrimary:pressed {{
 }}
 QPushButton#ModeCard {{
     background: {colors['surface']}; border: 1px solid {colors['border']};
-    border-radius: 12px; padding: 0; text-align: left; min-height: 116px;
+    border-radius: 12px; padding: 0; text-align: left; min-height: 84px;
 }}
 QPushButton#ModeCard:hover, QPushButton#ModeCard:focus {{
     border: 2px solid {colors['accent']};
@@ -148,14 +177,14 @@ QPushButton#ModeCard[selected="true"] {{
 }}
 QPushButton#ModeCard:disabled {{ background: {colors['surface_alt']}; }}
 QLabel#ModeIndicator {{
-    border: 2px solid {colors['border']}; border-radius: 10px;
-    color: {colors['accent']}; font-size: 11px;
+    border: 2px solid {colors['border_strong']}; border-radius: 9px;
+    color: {colors['accent']}; font-size: 10px;
 }}
 QLabel#ModeIndicator[selected="true"] {{ border-color: {colors['accent']}; }}
 QLabel#ModeTitle {{ font-size: 15px; font-weight: 700; background: transparent; }}
 QLabel#ModeTag {{
-    color: {colors['muted']}; background: {colors['surface_alt']};
-    border-radius: 5px; padding: 3px 8px; font-size: 11px; font-weight: 600;
+    color: {colors['accent']}; background: {colors['accent_soft']};
+    border-radius: 8px; padding: 2px 8px; font-size: 11px; font-weight: 600;
 }}
 QLabel#ModeBody {{ color: {colors['muted']}; font-size: 13px; background: transparent; }}
 QLabel#ModeMeta {{ color: {colors['muted']}; font-size: 11px; background: transparent; }}
@@ -165,8 +194,8 @@ QLabel#TriggerTag {{
 }}
 QPushButton#TutorialStepButton {{
     background: transparent; color: {colors['muted']};
-    border: none; border-top: 4px solid {colors['border']};
-    border-radius: 2px; padding: 7px 2px 0; text-align: left; font-size: 12px;
+    border: none; border-top: 3px solid {colors['border']};
+    border-radius: 2px; padding: 6px 2px 0; text-align: left; font-size: 12px;
 }}
 QPushButton#TutorialStepButton[stepState="complete"],
 QPushButton#TutorialStepButton[stepState="current"] {{
@@ -187,8 +216,12 @@ QWidget#TutorialIllustration {{
     background: {colors['surface_alt']};
     border: 1px solid {colors['border']}; border-radius: 10px;
 }}
-QPushButton#SwatchButton {{ padding: 5px; border-radius: 10px; }}
-QPushButton#SwatchButton:checked {{ border: 3px solid {colors['accent']}; }}
+QPushButton#SwatchButton {{ padding: 0; border: 1px solid transparent; border-radius: 10px; }}
+QPushButton#SwatchButton:checked {{ border: 3px solid {colors['text']}; }}
+QPushButton#CustomColorButton {{
+    background: transparent; color: {colors['muted']};
+    border: 1px dashed {colors['border_strong']}; border-radius: 10px; padding: 0;
+}}
 QPushButton#IconButton {{
     background: transparent; color: {colors['muted']}; border: none;
     border-radius: 6px; padding: 0; font-size: 20px;
@@ -249,17 +282,20 @@ def apply_application_theme(theme: str) -> str:
     application.setStyleSheet(application_stylesheet(normalized))
     palette = QPalette()
     palette.setColor(
-        QPalette.ColorRole.Window, QColor("#f3f6fb" if normalized == "light" else "#0d1320")
+        QPalette.ColorRole.Window,
+        QColor("#f6f7f9" if normalized == "light" else "#0f1218"),
     )
     palette.setColor(
         QPalette.ColorRole.WindowText,
-        QColor("#172033" if normalized == "light" else "#edf3fb"),
+        QColor("#151a21" if normalized == "light" else "#e8ecf3"),
     )
     palette.setColor(
-        QPalette.ColorRole.Base, QColor("#ffffff" if normalized == "light" else "#121b2b")
+        QPalette.ColorRole.Base,
+        QColor("#ffffff" if normalized == "light" else "#161a21"),
     )
     palette.setColor(
-        QPalette.ColorRole.Text, QColor("#172033" if normalized == "light" else "#edf3fb")
+        QPalette.ColorRole.Text,
+        QColor("#151a21" if normalized == "light" else "#e8ecf3"),
     )
     application.setPalette(palette)
     return normalized

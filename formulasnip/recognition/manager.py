@@ -194,6 +194,12 @@ def _choose_candidate(
     candidates: tuple[RecognitionCandidate, ...], *, prefer_paddle_on_tie: bool
 ) -> RecognitionCandidate:
     rapid, paddle = candidates
+    rapid_score = assess_latex(rapid.latex).score
+    paddle_score = assess_latex(paddle.latex).score
+    if paddle_score > rapid_score:
+        return paddle
+    if paddle_score < rapid_score:
+        return rapid
     if len(paddle.issues) < len(rapid.issues):
         return paddle
     if len(paddle.issues) > len(rapid.issues):

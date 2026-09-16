@@ -5,10 +5,15 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
-from formulasnip.domain import RecognitionResult
+from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition import manager as manager_module
-from formulasnip.recognition.manager import BackendManager, backend_summaries
+from formulasnip.recognition.manager import (
+    BackendManager,
+    _choose_candidate,
+    backend_summaries,
+)
+from formulasnip.recognition.quality import assess_latex
 
 
 def test_backend_summaries_have_unique_keys() -> None:
@@ -94,6 +99,39 @@ def test_auto_complex_formula_reviews_and_keeps_cleaner_candidate(monkeypatch: A
     assert result.backend_name == "Paddle"
     assert len(result.alternatives) == 2
     assert result.elapsed_seconds >= 0
+
+
+def test_new_quality_rule_triggers_review_and_selects_clean_candidate(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    rapid = FakeBackend(RecognitionResult("x == y", "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult("x = y", "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert result.backend_name == "Paddle"
+    assert result.strategy == "auto-reviewed"
+    assert rapid.calls == paddle.calls == 1
+
+
+def test_candidate_choice_prioritizes_quality_score_before_issue_count() -> None:
+    rapid_latex = "frac{x}{y}--z"
+    paddle_latex = r"\alpha+x" * 20
+    rapid_report = assess_latex(rapid_latex)
+    paddle_report = assess_latex(paddle_latex)
+    assert len(rapid_report.issues) > len(paddle_report.issues)
+    assert rapid_report.score > paddle_report.score
+    candidates = (
+        RecognitionCandidate(rapid_latex, "Rapid", 0.2, rapid_report.issues),
+        RecognitionCandidate(paddle_latex, "Paddle", 0.3, paddle_report.issues),
+    )
+
+    winner = _choose_candidate(candidates, prefer_paddle_on_tie=False)
+
+    assert winner.backend == "Rapid"
 
 
 def test_auto_never_lets_malformed_paddle_replace_clean_rapid(monkeypatch: Any) -> None:

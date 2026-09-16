@@ -7,6 +7,14 @@ from PIL import Image, ImageStat
 
 _BARE_COMMAND = re.compile(r"(?<!\\)\b(frac|sqrt)\s*\{")
 _REPEATED_OPERATOR = re.compile(r"(?<!-)--(?![-=>])|(?<!\+)\+\+(?!\+)")
+_REPEATED_RELATION = re.compile(r"==")
+_ENVIRONMENT = re.compile(r"\\(begin|end)\s*\{([^{}]+)\}")
+_LEFT_RIGHT = re.compile(r"\\(left|right)(?![A-Za-z])")
+_LITERAL_GROUP = re.compile(
+    r"\\(?:text|textbf|textmd|textrm|textsf|texttt|textup|textit|textsl|textsc|"
+    r"textnormal|emph|mbox|operatorname)\s*\{"
+)
+_VERB = re.compile(r"\\verb\*?([^\sA-Za-z])")
 _COMPLEX_STRUCTURE = re.compile(
     r"\\(?:int|iint|iiint|oint|sum|prod|lim)(?![A-Za-z])"
     r"|\\begin\s*\{(?:matrix|pmatrix|bmatrix|cases)\}"
@@ -24,20 +32,40 @@ def assess_latex(latex: str) -> QualityReport:
     """Return deterministic syntax heuristics, not model confidence."""
 
     issues: list[str] = []
+    penalties: list[int] = []
+    structural_latex = _mask_literal_contexts(latex)
     if _has_unbalanced_delimiters(latex):
         issues.append("括号不配对")
+        penalties.append(25)
     bare = sorted(set(_BARE_COMMAND.findall(latex)))
     if bare:
         issues.append("疑似缺少反斜杠：" + "、".join(bare))
+        penalties.append(20)
     if _REPEATED_OPERATOR.search(latex):
         issues.append("疑似重复运算符")
+        penalties.append(15)
+    if _has_mismatched_environments(structural_latex):
+        issues.append("LaTeX 环境开始与结束不匹配")
+        penalties.append(30)
+    if _has_unbalanced_left_right(structural_latex):
+        issues.append(r"\left 与 \right 数量不平衡")
+        penalties.append(25)
+    if _has_repeated_relation(structural_latex):
+        issues.append("疑似重复关系符 ==")
+        penalties.append(15)
 
     tokens = _TOKEN.findall(latex)
+    structural_tokens = _TOKEN.findall(structural_latex)
+    if _has_repeated_token_run(structural_tokens):
+        issues.append("输出含相同符号异常连续重复")
+        penalties.append(40)
     if len(latex) > 900 or len(tokens) > 160:
         issues.append("输出异常过长")
-    if _has_repeated_fragment(latex):
+        penalties.append(50)
+    if _has_repeated_fragment(structural_latex):
         issues.append("输出含异常重复片段")
-    return QualityReport(tuple(issues), max(0, 100 - 20 * len(issues)))
+        penalties.append(45)
+    return QualityReport(tuple(issues), max(0, 100 - sum(penalties)))
 
 
 def diagnose_image(image: Image.Image) -> tuple[str, ...]:
@@ -64,7 +92,7 @@ def has_complex_structure(latex: str) -> bool:
 
 def has_fatal_output_issue(latex: str) -> bool:
     issues = assess_latex(latex).issues
-    return "输出异常过长" in issues or "输出含异常重复片段" in issues
+    return "输出异常过长" in issues
 
 
 def _has_unbalanced_delimiters(value: str) -> bool:
@@ -85,12 +113,131 @@ def _has_unbalanced_delimiters(value: str) -> bool:
     return bool(stack)
 
 
+def _has_mismatched_environments(value: str) -> bool:
+    stack: list[str] = []
+    for match in _ENVIRONMENT.finditer(value):
+        if not _is_active_command(value, match.start()):
+            continue
+        kind, name = match.groups()
+        name = name.strip()
+        if kind == "begin":
+            stack.append(name)
+        elif not stack or stack.pop() != name:
+            return True
+    return bool(stack)
+
+
+def _has_unbalanced_left_right(value: str) -> bool:
+    balance = 0
+    for match in _LEFT_RIGHT.finditer(value):
+        if not _is_active_command(value, match.start()):
+            continue
+        if match.group(1) == "left":
+            balance += 1
+        else:
+            balance -= 1
+            if balance < 0:
+                return True
+    return balance != 0
+
+
+def _has_repeated_relation(value: str) -> bool:
+    return any(
+        not _is_escaped_character(value, match.start())
+        for match in _REPEATED_RELATION.finditer(value)
+    )
+
+
+def _has_repeated_token_run(tokens: list[str], threshold: int = 8) -> bool:
+    previous = ""
+    run_length = 0
+    for token in tokens:
+        repeatable = token.startswith("\\")
+        if repeatable and token == previous:
+            run_length += 1
+        elif repeatable:
+            previous = token
+            run_length = 1
+        else:
+            previous = ""
+            run_length = 0
+        if run_length >= threshold:
+            return True
+    return False
+
+
+def _mask_literal_contexts(value: str) -> str:
+    """Hide literal text from math-structure checks without changing offsets."""
+
+    masked = list(value)
+    occupied: list[tuple[int, int]] = []
+    for match in _VERB.finditer(value):
+        if not _is_active_command(value, match.start()):
+            continue
+        delimiter = match.group(1)
+        end = value.find(delimiter, match.end())
+        if end >= 0:
+            occupied.append((match.start(), end + 1))
+
+    for match in _LITERAL_GROUP.finditer(value):
+        if not _is_active_command(value, match.start()):
+            continue
+        end = _matching_group_end(value, match.end() - 1)
+        if end is not None:
+            occupied.append((match.start(), end + 1))
+
+    for start, end in occupied:
+        masked[start:end] = " " * (end - start)
+    return "".join(masked)
+
+
+def _matching_group_end(value: str, opening: int) -> int | None:
+    depth = 0
+    for index in range(opening, len(value)):
+        char = value[index]
+        if char == "{" and not _is_escaped_character(value, index):
+            depth += 1
+        elif char == "}" and not _is_escaped_character(value, index):
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _is_active_command(value: str, index: int) -> bool:
+    backslashes = 0
+    position = index - 1
+    while position >= 0 and value[position] == "\\":
+        backslashes += 1
+        position -= 1
+    return backslashes % 2 == 0
+
+
+def _is_escaped_character(value: str, index: int) -> bool:
+    return not _is_active_command(value, index)
+
+
 def _has_repeated_fragment(value: str) -> bool:
     compact = re.sub(r"\s+", " ", value).strip()
-    for size in range(8, min(65, len(compact) // 3 + 1)):
-        for start in range(0, len(compact) - size * 3 + 1):
+    if len(compact) < 96:
+        return False
+    minimum_repeats = 6
+    for size in range(8, min(65, len(compact) // minimum_repeats + 1)):
+        for start in range(0, len(compact) - size * minimum_repeats + 1):
             fragment = compact[start : start + size]
-            if len(set(fragment)) > 2 and fragment * 3 in compact:
+            if len(set(fragment)) <= 2:
+                continue
+            repeat_end = start + size
+            repeat_count = 1
+            while compact.startswith(fragment, repeat_end):
+                repeat_count += 1
+                repeat_end += size
+            repeated_span = repeat_end - start
+            if (
+                repeat_count >= minimum_repeats
+                and repeated_span >= 96
+                and repeated_span >= len(compact) * 0.75
+            ):
                 return True
     return False
 
