@@ -5,6 +5,7 @@ from time import perf_counter
 
 from PIL import Image
 
+from formulasnip.core.preview import is_formula_previewable
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
@@ -36,6 +37,12 @@ class BackendManager:
             if selected_key != "auto":
                 return _with_quality_warning(self._get_backend(selected_key).recognize(image))
             return self._recognize_auto(image)
+
+    def warmup(self, key: str) -> None:
+        """Warm one backend while sharing its instance and serialization lock."""
+
+        with self._lock:
+            self._get_backend(key).warmup()
 
     def _recognize_auto(self, image: Image.Image) -> RecognitionResult:
         started = perf_counter()
@@ -87,11 +94,24 @@ class BackendManager:
         rapid_candidate = _candidate(rapid_result)
         image_risks = diagnose_image(image)
         complex_formula = has_complex_structure(rapid_result.latex)
-        should_review = bool(rapid_candidate.issues or image_risks or complex_formula)
+        should_review = bool(
+            rapid_candidate.issues
+            or image_risks
+            or complex_formula
+            or not rapid_candidate.previewable
+        )
         if not should_review or not PaddleFormulaBackend.is_available():
             warnings = list(_candidate_warnings(rapid_candidate, image_risks))
             if should_review and not PaddleFormulaBackend.is_available():
-                warnings.append("检测到复核条件，但 PP-FormulaNet-S 未安装，保留 Rapid 结果。")
+                if rapid_candidate.previewable:
+                    warnings.append(
+                        "检测到复核条件，但 PP-FormulaNet-S 未安装，保留 Rapid 结果。"
+                    )
+                else:
+                    warnings.append(
+                        "Rapid 结果无法预览，且 PP-FormulaNet-S 未安装；"
+                        "可在结果框中继续修改 LaTeX。"
+                    )
             return RecognitionResult(
                 rapid_result.latex,
                 rapid_result.backend_name,
@@ -117,15 +137,24 @@ class BackendManager:
         paddle_candidate = _candidate(paddle_result)
         candidates = (rapid_candidate, paddle_candidate)
         winner = _choose_candidate(candidates, prefer_paddle_on_tie=complex_formula)
-        warning = (
-            f"智能模式已用 PP-FormulaNet-S 复核，选择 {winner.backend}；"
-            "请与原公式核对采用结果。"
-        )
+        no_preview = not any(candidate.previewable for candidate in candidates)
+        if no_preview:
+            warning = (
+                "两个引擎均未生成可预览候选；已按质量评分保留"
+                f" {winner.backend} 结果，请在结果框中修改 LaTeX。"
+            )
+            strategy = "auto-reviewed-no-preview"
+        else:
+            warning = (
+                f"智能模式已用 PP-FormulaNet-S 复核，选择 {winner.backend}；"
+                "请与原公式核对采用结果。"
+            )
+            strategy = "auto-reviewed"
         return RecognitionResult(
             winner.latex,
             winner.backend,
             perf_counter() - started,
-            "auto-reviewed",
+            strategy,
             _candidate_warnings(winner, (*image_risks, warning)),
             candidates,
         )
@@ -163,16 +192,21 @@ def _candidate(result: RecognitionResult) -> RecognitionCandidate:
         result.backend_name,
         result.elapsed_seconds,
         report.issues,
+        is_formula_previewable(result.latex),
     )
 
 
 def _candidate_warnings(
     candidate: RecognitionCandidate, warnings: tuple[str, ...]
 ) -> tuple[str, ...]:
-    if not candidate.issues:
-        return warnings
-    quality_warning = "识别结果需要人工校对：" + "；".join(candidate.issues)
-    return (quality_warning, *warnings)
+    candidate_warnings: list[str] = []
+    if candidate.issues:
+        candidate_warnings.append("识别结果需要人工校对：" + "；".join(candidate.issues))
+    if not candidate.previewable:
+        candidate_warnings.append(
+            "当前识别结果无法生成电子公式预览，可在结果框中继续修改 LaTeX。"
+        )
+    return (*candidate_warnings, *warnings)
 
 
 def _with_quality_warning(result: RecognitionResult) -> RecognitionResult:
@@ -194,6 +228,8 @@ def _choose_candidate(
     candidates: tuple[RecognitionCandidate, ...], *, prefer_paddle_on_tie: bool
 ) -> RecognitionCandidate:
     rapid, paddle = candidates
+    if rapid.previewable != paddle.previewable:
+        return rapid if rapid.previewable else paddle
     rapid_score = assess_latex(rapid.latex).score
     paddle_score = assess_latex(paddle.latex).score
     if paddle_score > rapid_score:

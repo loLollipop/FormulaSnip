@@ -97,3 +97,17 @@ def test_paddle_does_not_treat_an_ordinary_bracket_issue_as_fatal() -> None:
     backend._model = Model()
 
     assert backend.recognize(Image.new("RGB", (30, 20), "white")).latex == r"\frac{x}{y"
+
+
+@pytest.mark.parametrize("backend_type", (RapidLatexBackend, PaddleFormulaBackend))
+def test_backend_warmup_only_loads_model(
+    backend_type: type[RapidLatexBackend] | type[PaddleFormulaBackend],
+    monkeypatch: Any,
+) -> None:
+    backend = backend_type()
+    loaded: list[bool] = []
+    monkeypatch.setattr(backend, "_load_model", lambda: loaded.append(True) or object())
+
+    backend.warmup()
+
+    assert loaded == [True]

@@ -1054,6 +1054,9 @@ class SettingsPanel(QWidget):
         general_layout.addWidget(_divider())
 
         summaries = backend_summaries()
+        self.engine_status_labels: dict[str, QLabel] = {}
+        self.engine_status_dots: dict[str, QLabel] = {}
+        self._engine_available = {key: available for key, _name, available in summaries}
         for index, (key, name, available) in enumerate(summaries):
             row = QWidget()
             row.setObjectName("EngineRow")
@@ -1066,7 +1069,7 @@ class SettingsPanel(QWidget):
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             dot = QLabel()
             dot.setObjectName("EngineDot")
-            dot.setProperty("available", "true" if available else "false")
+            dot.setProperty("available", "false")
             dot.setFixedSize(6, 6)
             copy = QVBoxLayout()
             copy.setSpacing(0)
@@ -1078,9 +1081,11 @@ class SettingsPanel(QWidget):
             else:
                 detail = "安装缺失 · 请重新运行 uv sync"
             row.setToolTip(detail)
-            status = QLabel("已就绪" if available else "安装缺失")
+            status = QLabel("已安装 · 等待初始化" if available else "安装缺失")
             status.setObjectName("EngineStatus")
-            status.setProperty("available", "true" if available else "false")
+            status.setProperty("available", "false")
+            self.engine_status_labels[key] = status
+            self.engine_status_dots[key] = dot
             row_layout.addWidget(badge)
             row_layout.addLayout(copy, 1)
             row_layout.addWidget(status)
@@ -1091,6 +1096,35 @@ class SettingsPanel(QWidget):
         layout.addWidget(general)
         layout.addStretch(1)
         return page
+
+    def set_engine_status(self, key: str, state: str) -> None:
+        """Update one engine's compact initialization status."""
+
+        label = self.engine_status_labels.get(key)
+        dot = self.engine_status_dots.get(key)
+        if label is None or dot is None:
+            return
+        if not self._engine_available.get(key, False) or state == "missing":
+            message = "安装缺失"
+            ready = False
+        else:
+            messages = {
+                "waiting": "已安装 · 等待初始化",
+                "started": "正在初始化",
+                "warming": "正在初始化",
+                "succeeded": "已初始化",
+                "ready": "已初始化",
+                "failed": "初始化失败（识别时可重试）",
+            }
+            message = messages.get(state, state)
+            ready = state in {"succeeded", "ready"}
+        label.setText(message)
+        available = "true" if ready else "false"
+        label.setProperty("available", available)
+        dot.setProperty("available", available)
+        for widget in (label, dot):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _build_recognition_page(self) -> QWidget:
         page, layout = self._page_shell()

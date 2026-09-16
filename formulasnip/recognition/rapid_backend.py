@@ -64,3 +64,6 @@ class RapidLatexBackend(RecognitionBackend):
                 "RapidLaTeXOCR 输出异常过长，请缩小截图范围或改用智能模式。"
             )
         return RecognitionResult(latex, self.display_name, elapsed)
+
+    def warmup(self) -> None:
+        self._load_model()

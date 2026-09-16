@@ -4,7 +4,7 @@ import os
 import sys
 from typing import TextIO
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -62,5 +62,6 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     assistant = FloatingFormulaAssistant()
     assistant.show()
+    QTimer.singleShot(0, assistant.start_model_warmup)
     assistant.start_update_checks()
     return app.exec()

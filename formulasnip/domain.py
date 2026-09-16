@@ -11,6 +11,7 @@ class RecognitionCandidate:
     backend: str
     elapsed_seconds: float
     issues: tuple[str, ...] = ()
+    previewable: bool = True
 
 
 @dataclass(frozen=True, slots=True)

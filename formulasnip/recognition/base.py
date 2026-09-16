@@ -20,3 +20,7 @@ class RecognitionBackend(ABC):
     @abstractmethod
     def recognize(self, image: Image.Image) -> RecognitionResult:
         """Recognize one already-cropped formula image."""
+
+    @abstractmethod
+    def warmup(self) -> None:
+        """Load local model resources without running inference."""

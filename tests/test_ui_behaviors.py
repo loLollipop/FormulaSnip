@@ -31,6 +31,7 @@ from formulasnip.ui.settings import (
 )
 from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, SnipOverlay
 from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.worker import ModelWarmupWorker
 from formulasnip.update import ReleaseInfo, UpdateAsset
 
 
@@ -164,6 +165,130 @@ def test_mathml_conversion_failure_keeps_result_visible(monkeypatch: Any) -> Non
     application.processEvents()
 
 
+def test_result_panel_rerenders_and_copies_edited_latex(monkeypatch: Any) -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+
+    original_render = floating.render_formula_svg
+    monkeypatch.setattr(
+        floating,
+        "render_formula_svg",
+        lambda latex: (
+            (_ for _ in ()).throw(ValueError("bad preview"))
+            if latex == "bad"
+            else original_render(r"\frac{x}{y}")
+        ),
+    )
+    panel.show_result(RecognitionResult("bad", "Rapid", 0.1), QRect(20, 20, 68, 68))
+    assert panel.preview_stack.currentWidget() is panel.preview_message
+
+    panel.latex_view.setPlainText("edited")
+    panel._refresh_edited_preview()
+    assert panel.preview_stack.currentWidget() is panel.preview_frame
+    assert panel.status_label.text() == "预览已更新"
+    panel.copy_latex_button.click()
+    assert QApplication.clipboard().text() == "edited"
+    QApplication.clipboard().clear()
+    panel.close()
+    application.processEvents()
+
+
+def test_result_panel_converts_edited_latex_to_mathml(monkeypatch: Any) -> None:
+    _application()
+    converted: list[str] = []
+    monkeypatch.setattr(
+        floating,
+        "latex_to_mathml",
+        lambda latex: converted.append(latex) or "<math><mi>y</mi></math>",
+    )
+    panel = FloatingResultPanel()
+    panel.show_result(RecognitionResult("x", "Rapid", 0.1), QRect(20, 20, 68, 68))
+    panel.latex_view.setPlainText("y")
+
+    panel.copy_mathml_button.click()
+
+    assert converted == ["y"]
+    assert QApplication.clipboard().text() == "<math><mi>y</mi></math>"
+    assert panel.isHidden()
+    QApplication.clipboard().clear()
+
+
+def test_empty_edited_latex_disables_copy_buttons() -> None:
+    panel = FloatingResultPanel()
+    panel.show_result(RecognitionResult("x", "Rapid", 0.1), QRect(20, 20, 68, 68))
+
+    panel.latex_view.clear()
+
+    assert not panel.copy_latex_button.isEnabled()
+    assert not panel.copy_mathml_button.isEnabled()
+    panel.close()
+
+
+def test_model_warmup_worker_continues_after_failure() -> None:
+    _application()
+    events: list[tuple[str, ...]] = []
+
+    class Manager:
+        def warmup(self, key: str) -> None:
+            if key == "rapid":
+                raise RuntimeError("boom")
+
+    worker = ModelWarmupWorker(Manager(), ("rapid", "paddle"))  # type: ignore[arg-type]
+    worker.signals.started.connect(lambda key: events.append(("started", key)))
+    worker.signals.succeeded.connect(lambda key: events.append(("succeeded", key)))
+    worker.signals.failed.connect(
+        lambda key, message: events.append(("failed", key, message))
+    )
+    worker.signals.finished.connect(lambda: events.append(("finished",)))
+
+    worker.run()
+
+    assert events == [
+        ("started", "rapid"),
+        ("failed", "rapid", "boom"),
+        ("started", "paddle"),
+        ("succeeded", "paddle"),
+        ("finished",),
+    ]
+
+
+def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
+    tmp_path: Path,
+) -> None:
+    _application()
+
+    class Pool:
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+
+        def start(self, worker: Any) -> None:
+            self.started.append(worker)
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant.preferences = FloatingPreferences("paddle", "blue", "dark", True)
+    pool = Pool()
+    assistant._thread_pool = pool  # type: ignore[assignment]
+
+    assistant.start_model_warmup()
+    assistant.start_model_warmup()
+
+    assert len(pool.started) == 1
+    worker = pool.started[0]
+    assert worker.backend_keys == ("paddle", "rapid")
+    assert assistant._warmup_worker is worker
+    worker.signals.started.emit("paddle")
+    assert assistant.settings_panel.engine_status_labels["paddle"].text() == "正在初始化"
+    worker.signals.succeeded.emit("paddle")
+    assert assistant.settings_panel.engine_status_labels["paddle"].text() == "已初始化"
+    worker.signals.failed.emit("rapid", "offline")
+    assert "初始化失败" in assistant.settings_panel.engine_status_labels["rapid"].text()
+    worker.signals.finished.emit()
+    assert assistant._warmup_worker is None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
 def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> None:
     application = _application()
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
@@ -239,7 +364,11 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.1" in panel.update_version_label.text()
+    assert "v0.2.2" in panel.update_version_label.text()
+    assert all(
+        dot.property("available") == "false"
+        for dot in panel.engine_status_dots.values()
+    )
     assert all(button.accessibleName() for button in panel.color_buttons.values())
     assert panel.findChild(settings_ui.QWidget, "SettingsCTA") is None
     panel.hide()
@@ -506,6 +635,7 @@ def test_update_waits_for_active_recognition_before_starting_installer(
         lambda: events.append("quit"),
     )
     assistant._worker = object()  # type: ignore[assignment]
+    assistant._warmup_worker = object()  # type: ignore[assignment]
 
     assistant._update_downloaded(installer, release)
     assert events == []
@@ -515,6 +645,9 @@ def test_update_waits_for_active_recognition_before_starting_installer(
     assert not assistant._capture_pending
 
     assistant._worker = None
+    assert not assistant._try_launch_pending_installer()
+    assert events == []
+    assistant._warmup_worker = None
     assert assistant._try_launch_pending_installer()
     assert events == ["installer", "quit"]
 
@@ -643,6 +776,60 @@ def test_cancelled_recapture_restores_unconsumed_result(tmp_path: Path) -> None:
     assert assistant.orb.has_result is True
     assistant.panel.close()
     assistant.orb.close()
+    assistant.settings_panel.hide()
+
+
+def test_settings_round_trip_preserves_edited_result(tmp_path: Path) -> None:
+    application = _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._recognition_finished(RecognitionResult("x", "Rapid", 0.1))
+    assistant.panel.latex_view.setPlainText("edited-y")
+
+    assistant.open_settings()
+    assistant.enter_floating_mode()
+    application.processEvents()
+
+    assert assistant.panel.latex_view.toPlainText() == "edited-y"
+    assistant.panel.copy_latex_button.click()
+    assert QApplication.clipboard().text() == "edited-y"
+    QApplication.clipboard().clear()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_cancelled_recapture_preserves_edited_result_and_mathml(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    application = _application()
+    scheduled: list[Any] = []
+    monkeypatch.setattr(
+        floating.QTimer,
+        "singleShot",
+        lambda _milliseconds, callback: scheduled.append(callback),
+    )
+    converted: list[str] = []
+    monkeypatch.setattr(
+        floating,
+        "latex_to_mathml",
+        lambda latex: converted.append(latex) or "<math><mi>z</mi></math>",
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._recognition_finished(RecognitionResult("x", "Rapid", 0.1))
+    assistant.panel.latex_view.setPlainText("edited-z")
+
+    assistant.start_capture()
+    assert len(scheduled) == 1
+    assistant._capture_cancelled()
+    application.processEvents()
+
+    assert assistant.panel.latex_view.toPlainText() == "edited-z"
+    assistant.panel.copy_mathml_button.click()
+    assert converted == ["edited-z"]
+    assert QApplication.clipboard().text() == "<math><mi>z</mi></math>"
+    QApplication.clipboard().clear()
+    assistant.orb.close()
+    assistant.panel.close()
     assistant.settings_panel.hide()
 
 

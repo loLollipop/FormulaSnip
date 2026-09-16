@@ -10,6 +10,7 @@ from PySide6.QtCore import (
     QProcess,
     QRect,
     QSettings,
+    QSignalBlocker,
     QStandardPaths,
     Qt,
     QThreadPool,
@@ -18,11 +19,13 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+from PySide6.QtCore import QTimer as PreviewTimer
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QCursor,
     QDesktopServices,
+    QHideEvent,
     QImage,
     QMouseEvent,
     QPainter,
@@ -64,7 +67,7 @@ from formulasnip.ui.update_dialog import (
     UpdateDownloadWorker,
 )
 from formulasnip.ui.widgets import FormulaSvgWidget
-from formulasnip.ui.worker import RecognitionWorker
+from formulasnip.ui.worker import ModelWarmupWorker, RecognitionWorker
 from formulasnip.update import (
     CHECK_INTERVAL_SECONDS,
     ReleaseInfo,
@@ -280,11 +283,16 @@ class FloatingOrb(QWidget):
 class FloatingResultPanel(QWidget):
     recapture_requested = Signal()
     result_consumed = Signal()
+    draft_changed = Signal(str)
 
     def __init__(self, theme: str = "dark") -> None:
         super().__init__()
         self._result: RecognitionResult | None = None
         self._theme = "dark"
+        self._preview_timer = PreviewTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(250)
+        self._preview_timer.timeout.connect(self._refresh_edited_preview)
         self.setObjectName("FloatingResultPanel")
         self.setWindowTitle("FormulaSnip 识别结果")
         self.setWindowFlags(
@@ -352,8 +360,8 @@ class FloatingResultPanel(QWidget):
 
         self.latex_view = QPlainTextEdit()
         self.latex_view.setObjectName("FloatingLatex")
-        self.latex_view.setReadOnly(True)
         self.latex_view.setMaximumHeight(68)
+        self.latex_view.setPlaceholderText("在此修改 LaTeX，预览会自动更新")
         outer.addWidget(self.latex_view)
 
         copy_row = QHBoxLayout()
@@ -376,25 +384,47 @@ class FloatingResultPanel(QWidget):
 
         self.copy_latex_button.clicked.connect(self._copy_latex)
         self.copy_mathml_button.clicked.connect(self._copy_mathml)
+        self.latex_view.textChanged.connect(self._latex_edited)
 
-    def show_result(self, result: RecognitionResult, anchor: QRect) -> None:
+    def show_result(
+        self,
+        result: RecognitionResult,
+        anchor: QRect,
+        draft: str | None = None,
+    ) -> None:
         self._result = result
-        self.copy_latex_button.setEnabled(True)
-        self.copy_mathml_button.setEnabled(True)
+        self._preview_timer.stop()
         self.backend_label.setText(f"{result.backend_name} · {result.elapsed_seconds:.2f} 秒")
-        self.latex_view.setPlainText(result.latex)
-        try:
-            self.svg_preview.set_formula_svg(render_formula_svg(result.latex))
-            self.preview_stack.setCurrentWidget(self.preview_frame)
-        except Exception:
-            self.preview_message.setText("当前公式暂时无法生成电子预览，请核对 LaTeX。")
-            self.preview_stack.setCurrentWidget(self.preview_message)
+        displayed_latex = result.latex if draft is None else draft
+        edited_draft = displayed_latex != result.latex
+        blocker = QSignalBlocker(self.latex_view)
+        self.latex_view.setPlainText(displayed_latex)
+        del blocker
+        self._update_copy_buttons()
+        self._render_preview(displayed_latex, edited=edited_draft)
+        if edited_draft:
+            self._show_near(anchor)
+            return
         adopted_issues: tuple[str, ...] = ()
+        adopted_previewable: bool | None = None
         for candidate in result.alternatives:
             if candidate.latex == result.latex and candidate.backend == result.backend_name:
                 adopted_issues = candidate.issues
+                adopted_previewable = candidate.previewable
                 break
-        if adopted_issues:
+        if adopted_previewable is False:
+            self.quality_label.setText(
+                next(
+                    (
+                        warning
+                        for warning in result.warnings
+                        if "预览" in warning or "修改 LaTeX" in warning
+                    ),
+                    "当前结果无法预览，可继续修改 LaTeX 后重试。",
+                )
+            )
+            self.quality_label.setProperty("warning", True)
+        elif adopted_issues:
             self.quality_label.setText("识别结果需要人工校对：" + "；".join(adopted_issues))
             self.quality_label.setProperty("warning", True)
         elif result.warnings and any(
@@ -417,7 +447,10 @@ class FloatingResultPanel(QWidget):
         self.quality_label.setText("请检查模型安装后重新截图。")
         self.quality_label.setProperty("warning", True)
         _refresh_style(self.quality_label)
+        self._preview_timer.stop()
+        blocker = QSignalBlocker(self.latex_view)
         self.latex_view.clear()
+        del blocker
         self.copy_latex_button.setDisabled(True)
         self.copy_mathml_button.setDisabled(True)
         self._show_near(anchor)
@@ -446,13 +479,17 @@ class FloatingResultPanel(QWidget):
     def _copy_latex(self) -> None:
         if self._result is None:
             return
+        latex = self.latex_view.toPlainText()
+        if not latex.strip():
+            return
         try:
-            QApplication.clipboard().setText(self._result.latex)
+            QApplication.clipboard().setText(latex)
         except Exception as exc:
             self.status_label.setText(f"复制失败：{exc}")
             return
         self.status_label.setText("LaTeX 已复制")
         self._result = None
+        self._preview_timer.stop()
         self.hide()
         self.result_consumed.emit()
 
@@ -460,8 +497,11 @@ class FloatingResultPanel(QWidget):
     def _copy_mathml(self) -> None:
         if self._result is None:
             return
+        latex = self.latex_view.toPlainText()
+        if not latex.strip():
+            return
         try:
-            mathml = latex_to_mathml(self._result.latex)
+            mathml = latex_to_mathml(latex)
             mime_data = QMimeData()
             mime_data.setText(mathml)
             mime_data.setData("application/mathml+xml", mathml.encode("utf-8"))
@@ -471,20 +511,74 @@ class FloatingResultPanel(QWidget):
             return
         self.status_label.setText("MathML 已复制，可粘贴到 Word/MathType")
         self._result = None
+        self._preview_timer.stop()
         self.hide()
         self.result_consumed.emit()
 
     @Slot()
+    def _latex_edited(self) -> None:
+        latex = self.latex_view.toPlainText()
+        self.draft_changed.emit(latex)
+        self._update_copy_buttons()
+        self.status_label.setText("正在更新预览…" if latex.strip() else "")
+        self._preview_timer.start()
+
+    @Slot()
+    def _refresh_edited_preview(self) -> None:
+        self._render_preview(self.latex_view.toPlainText(), edited=True)
+
+    def _update_copy_buttons(self) -> None:
+        enabled = self._result is not None and bool(self.latex_view.toPlainText().strip())
+        self.copy_latex_button.setEnabled(enabled)
+        self.copy_mathml_button.setEnabled(enabled)
+
+    def _render_preview(self, latex: str, *, edited: bool) -> None:
+        if not latex.strip():
+            self.preview_message.setText("请输入 LaTeX 以生成电子公式预览。")
+            self.preview_stack.setCurrentWidget(self.preview_message)
+            if edited:
+                self.quality_label.setText("LaTeX 为空，请继续修改。")
+                self.quality_label.setProperty("warning", True)
+                self.status_label.clear()
+                _refresh_style(self.quality_label)
+            return
+        try:
+            self.svg_preview.set_formula_svg(render_formula_svg(latex))
+        except Exception:
+            self.preview_message.setText(
+                "当前 LaTeX 暂时无法生成电子公式预览，可继续修改后重试。"
+            )
+            self.preview_stack.setCurrentWidget(self.preview_message)
+            if edited:
+                self.quality_label.setText("预览生成失败，可继续修改 LaTeX 后重试。")
+                self.quality_label.setProperty("warning", True)
+                self.status_label.setText("预览生成失败，可继续修改")
+                _refresh_style(self.quality_label)
+            return
+        self.preview_stack.setCurrentWidget(self.preview_frame)
+        if edited:
+            self.quality_label.setText("电子公式预览已更新，请核对后复制")
+            self.quality_label.setProperty("warning", False)
+            self.status_label.setText("预览已更新")
+            _refresh_style(self.quality_label)
+
+    @Slot()
     def _dismiss_result(self) -> None:
         self._result = None
+        self._preview_timer.stop()
         self.hide()
         self.result_consumed.emit()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._result is not None:
             self._result = None
+            self._preview_timer.stop()
             self.result_consumed.emit()
         event.accept()
+
+    def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
+        self._preview_timer.stop()
+        super().hideEvent(event)
 
 
 class FloatingFormulaAssistant(QObject):
@@ -512,10 +606,12 @@ class FloatingFormulaAssistant(QObject):
         self._capture_pending = False
         self._last_image: QImage | None = None
         self._last_result: RecognitionResult | None = None
+        self._last_result_draft: str | None = None
         self._pending_result = False
         self._pending_error: str | None = None
         self._settings_visible = False
         self._thread_pool = QThreadPool.globalInstance()
+        self._warmup_worker: ModelWarmupWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_download_worker: UpdateDownloadWorker | None = None
         self._update_dialog: UpdateDialog | None = None
@@ -533,11 +629,41 @@ class FloatingFormulaAssistant(QObject):
         self.orb.quit_requested.connect(QApplication.quit)
         self.panel.recapture_requested.connect(self.start_capture)
         self.panel.result_consumed.connect(self._result_consumed)
+        self.panel.draft_changed.connect(self._result_draft_changed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
         self.settings_panel.update_check_requested.connect(
             lambda: self.check_for_updates(manual=True)
         )
+
+    def start_model_warmup(self) -> None:
+        """Start one ordered, non-blocking model warmup run."""
+
+        if self._warmup_worker is not None:
+            return
+        keys = (
+            ("paddle", "rapid")
+            if self.preferences.recognition_mode == "paddle"
+            else ("rapid", "paddle")
+        )
+        worker = ModelWarmupWorker(self.manager, keys)
+        worker.signals.started.connect(
+            lambda key: self.settings_panel.set_engine_status(key, "started")
+        )
+        worker.signals.succeeded.connect(
+            lambda key: self.settings_panel.set_engine_status(key, "succeeded")
+        )
+        worker.signals.failed.connect(
+            lambda key, _message: self.settings_panel.set_engine_status(key, "failed")
+        )
+        worker.signals.finished.connect(self._model_warmup_finished)
+        self._warmup_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot()
+    def _model_warmup_finished(self) -> None:
+        self._warmup_worker = None
+        self._try_launch_pending_installer()
 
     def show(self) -> None:
         if self.preferences.show_settings_on_startup:
@@ -653,7 +779,12 @@ class FloatingFormulaAssistant(QObject):
         if pending is None:
             return False
         dialog = self._update_dialog
-        if self._worker is not None or self._capture_pending or self._overlay is not None:
+        if (
+            self._worker is not None
+            or self._warmup_worker is not None
+            or self._capture_pending
+            or self._overlay is not None
+        ):
             if dialog is not None:
                 dialog.show_waiting_for_recognition()
             return False
@@ -701,7 +832,11 @@ class FloatingFormulaAssistant(QObject):
         self.orb.show_at_default_position()
         if self._pending_result and self._last_result is not None:
             self._pending_result = False
-            self.panel.show_result(self._last_result, self.orb.geometry())
+            self.panel.show_result(
+                self._last_result,
+                self.orb.geometry(),
+                self._last_result_draft,
+            )
         elif self._pending_error is not None:
             message = self._pending_error
             self._pending_error = None
@@ -761,6 +896,7 @@ class FloatingFormulaAssistant(QObject):
         self.orb.set_result_available(False)
         self._last_image = pixmap.toImage()
         self._last_result = None
+        self._last_result_draft = None
         self._pending_result = False
         self._pending_error = None
         try:
@@ -783,12 +919,17 @@ class FloatingFormulaAssistant(QObject):
         if self._try_launch_pending_installer():
             return
         if self._last_result is not None and not self._settings_visible:
-            self.panel.show_result(self._last_result, self.orb.geometry())
+            self.panel.show_result(
+                self._last_result,
+                self.orb.geometry(),
+                self._last_result_draft,
+            )
 
     @Slot(object)
     def _recognition_finished(self, result: RecognitionResult) -> None:
         self._worker = None
         self._last_result = result
+        self._last_result_draft = result.latex
         self._pending_error = None
         self.orb.set_busy(False)
         self.orb.set_result_available(True)
@@ -815,7 +956,13 @@ class FloatingFormulaAssistant(QObject):
         self._pending_result = False
         self._last_image = None
         self._last_result = None
+        self._last_result_draft = None
         self.orb.set_result_available(False)
+
+    @Slot(str)
+    def _result_draft_changed(self, latex: str) -> None:
+        if self._last_result is not None:
+            self._last_result_draft = latex
 
 
 def _refresh_style(widget: QWidget) -> None:

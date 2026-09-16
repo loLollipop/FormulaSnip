@@ -195,3 +195,88 @@ def test_specific_backend_does_not_run_adaptive_route(monkeypatch: Any) -> None:
 
     assert result.strategy == "single"
     assert result.alternatives == ()
+
+
+def test_candidate_choice_prefers_the_only_previewable_result() -> None:
+    candidates = (
+        RecognitionCandidate("x+y", "Rapid", 0.2, (), False),
+        RecognitionCandidate("frac{x", "Paddle", 0.3, ("括号不配对",), True),
+    )
+
+    winner = _choose_candidate(candidates, prefer_paddle_on_tie=False)
+
+    assert winner.backend == "Paddle"
+
+
+def test_unpreviewable_rapid_result_triggers_paddle_review(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    monkeypatch.setattr(
+        manager_module,
+        "is_formula_previewable",
+        lambda latex: latex == "paddle-result",
+    )
+    rapid = FakeBackend(RecognitionResult("rapid-result", "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult("paddle-result", "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert paddle.calls == 1
+    assert result.latex == "paddle-result"
+    assert result.alternatives[0].previewable is False
+    assert result.alternatives[1].previewable is True
+
+
+def test_auto_marks_when_neither_candidate_can_be_previewed(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    monkeypatch.setattr(manager_module, "is_formula_previewable", lambda _latex: False)
+    rapid = FakeBackend(RecognitionResult("x+y", "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult("x-y", "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert result.strategy == "auto-reviewed-no-preview"
+    assert any("两个引擎均未生成可预览候选" in warning for warning in result.warnings)
+
+
+def test_specific_backend_warns_when_result_cannot_be_previewed(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=False)
+    monkeypatch.setattr(manager_module, "is_formula_previewable", lambda _latex: False)
+    rapid = FakeBackend(RecognitionResult("unknown", "Rapid", 0.2))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image(), "rapid")
+
+    assert any("无法生成电子公式预览" in warning for warning in result.warnings)
+    assert result.alternatives[0].previewable is False
+
+
+def test_warmup_reuses_backend_and_failure_can_be_retried(monkeypatch: Any) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=False)
+
+    class RetryBackend(FakeBackend):
+        def warmup(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RecognitionError("first failure")
+
+    backend = RetryBackend(RecognitionResult("x", "Rapid", 0.1))
+    manager = BackendManager()
+    manager._instances = {"rapid": backend}  # type: ignore[dict-item]
+
+    with pytest.raises(RecognitionError, match="first failure"):
+        manager.warmup("rapid")
+    manager.warmup("rapid")
+
+    assert backend.calls == 2
+    assert manager._instances["rapid"] is backend

@@ -69,6 +69,9 @@ class PaddleFormulaBackend(RecognitionBackend):
             )
         return RecognitionResult(latex, self.display_name, elapsed)
 
+    def warmup(self) -> None:
+        self._load_model()
+
 
 def _extract_formula(result: Any) -> str:
     payload = getattr(result, "json", result)
