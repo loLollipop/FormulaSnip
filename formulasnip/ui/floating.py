@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -427,10 +428,18 @@ class FloatingResultPanel(QWidget):
         elif adopted_issues:
             self.quality_label.setText("识别结果需要人工校对：" + "；".join(adopted_issues))
             self.quality_label.setProperty("warning", True)
-        elif result.warnings and any(
-            marker in result.warnings[0] for marker in ("未安装", "失败", "需要人工校对")
+        elif quality_warning := next(
+            (
+                warning
+                for warning in result.warnings
+                if any(
+                    marker in warning
+                    for marker in ("未安装", "失败", "需要人工校对", "疑似偏导")
+                )
+            ),
+            None,
         ):
-            self.quality_label.setText(result.warnings[0])
+            self.quality_label.setText(quality_warning)
             self.quality_label.setProperty("warning", True)
         else:
             self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
@@ -642,9 +651,9 @@ class FloatingFormulaAssistant(QObject):
         if self._warmup_worker is not None:
             return
         keys = (
-            ("paddle", "rapid")
+            ("paddle",)
             if self.preferences.recognition_mode == "paddle"
-            else ("rapid", "paddle")
+            else ("rapid",)
         )
         worker = ModelWarmupWorker(self.manager, keys)
         worker.signals.started.connect(
@@ -659,6 +668,10 @@ class FloatingFormulaAssistant(QObject):
         worker.signals.finished.connect(self._model_warmup_finished)
         self._warmup_worker = worker
         self._thread_pool.start(worker)
+
+    def shutdown(self) -> None:
+        self._update_timer.stop()
+        self.manager.close()
 
     @Slot()
     def _model_warmup_finished(self) -> None:
@@ -791,16 +804,20 @@ class FloatingFormulaAssistant(QObject):
         path, release = pending
         self._pending_update_install = None
         try:
+            self.manager.close()
+            logging.getLogger(__name__).info("update-installer-launch")
             started = launch_verified_installer(
                 path,
                 release.asset,
                 start_detached=QProcess.startDetached,
             )
         except Exception as exc:
+            self.manager = BackendManager()
             if dialog is not None:
                 dialog.show_error(f"安装包校验失败：{exc}")
             return False
         if not started:
+            self.manager = BackendManager()
             if dialog is not None:
                 dialog.show_error("无法启动更新安装程序。")
             return False

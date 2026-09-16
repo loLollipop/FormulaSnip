@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.2"
+  #define AppVersion "0.2.3"
 #endif
 
 #define AppName "FormulaSnip"
@@ -66,7 +66,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsAutoUpdate
-Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Flags: nowait runhidden; Check: IsAutoUpdate
+Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutoUpdate
 
 [UninstallDelete]
 ; RapidLaTeXOCR downloads these files after installation, so Inno does not

@@ -165,6 +165,28 @@ def test_mathml_conversion_failure_keeps_result_visible(monkeypatch: Any) -> Non
     application.processEvents()
 
 
+def test_result_panel_surfaces_derivative_review_warning() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    result = RecognitionResult(
+        r"\frac{\partial u}{\partial t}",
+        "Paddle",
+        0.2,
+        strategy="auto-reviewed",
+        warnings=(
+            "智能模式已用 PP-FormulaNet-S 复核。",
+            "Rapid 候选疑似偏导符号与重音字符混淆，请对照原图重点校对。",
+        ),
+    )
+
+    panel.show_result(result, QRect(20, 20, 68, 68))
+
+    assert "疑似偏导" in panel.quality_label.text()
+    assert panel.quality_label.property("warning") is True
+    panel.close()
+    application.processEvents()
+
+
 def test_result_panel_rerenders_and_copies_edited_latex(monkeypatch: Any) -> None:
     application = _application()
     panel = FloatingResultPanel()
@@ -274,7 +296,7 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
 
     assert len(pool.started) == 1
     worker = pool.started[0]
-    assert worker.backend_keys == ("paddle", "rapid")
+    assert worker.backend_keys == ("paddle",)
     assert assistant._warmup_worker is worker
     worker.signals.started.emit("paddle")
     assert assistant.settings_panel.engine_status_labels["paddle"].text() == "正在初始化"
@@ -318,6 +340,21 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
     assert starts == [True]
     panel.hide()
     apply_application_theme("dark")
+
+
+def test_auto_startup_only_warms_rapid_and_shutdown_closes_manager(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    started: list[Any] = []
+    closed: list[bool] = []
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    monkeypatch.setattr(assistant._thread_pool, "start", started.append)
+    monkeypatch.setattr(assistant.manager, "close", lambda: closed.append(True))
+    assistant.start_model_warmup()
+    assert started[0].backend_keys == ("rapid",)
+    assistant.shutdown()
+    assert closed == [True]
 
 
 def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Path) -> None:
@@ -364,7 +401,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.2" in panel.update_version_label.text()
+    assert "v0.2.3" in panel.update_version_label.text()
     assert all(
         dot.property("available") == "false"
         for dot in panel.engine_status_dots.values()
@@ -624,6 +661,7 @@ def test_update_waits_for_active_recognition_before_starting_installer(
     )
     release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
     events: list[str] = []
+    monkeypatch.setattr(assistant.manager, "close", lambda: events.append("close"))
     monkeypatch.setattr(
         floating,
         "launch_verified_installer",
@@ -649,7 +687,7 @@ def test_update_waits_for_active_recognition_before_starting_installer(
     assert events == []
     assistant._warmup_worker = None
     assert assistant._try_launch_pending_installer()
-    assert events == ["installer", "quit"]
+    assert events == ["close", "installer", "quit"]
 
 
 def test_startup_settings_and_preferences_are_applied(tmp_path: Path) -> None:

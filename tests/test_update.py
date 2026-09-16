@@ -310,4 +310,7 @@ def test_inno_autoupdate_restart_and_metadata_cleanup_are_narrow() -> None:
     assert "{param:AUTOUPDATE|0}" in script
     assert "Check: IsAutoUpdate" in script
     assert "Check: not IsAutoUpdate" in script
+    restart_line = next(line for line in script.splitlines() if "Check: IsAutoUpdate" in line)
+    assert "Flags: nowait;" in restart_line
+    assert "runhidden" not in restart_line
     assert 'Name: "{app}\\_internal\\formulasnip-*.dist-info"' in script

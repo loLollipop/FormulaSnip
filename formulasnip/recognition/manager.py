@@ -1,22 +1,31 @@
 from __future__ import annotations
 
+import logging
 from threading import Lock
 from time import perf_counter
 
 from PIL import Image
 
 from formulasnip.core.preview import is_formula_previewable
+from formulasnip.diagnostics import log_exception
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
 from formulasnip.recognition.paddle_backend import PaddleFormulaBackend
-from formulasnip.recognition.quality import assess_latex, diagnose_image, has_complex_structure
+from formulasnip.recognition.quality import (
+    assess_latex,
+    diagnose_image,
+    has_clean_partial_command,
+    has_complex_structure,
+    has_suspected_derivative_confusion,
+)
 from formulasnip.recognition.rapid_backend import RapidLatexBackend
 
 _BACKEND_TYPES: tuple[type[RecognitionBackend], ...] = (
     RapidLatexBackend,
     PaddleFormulaBackend,
 )
+_LOG = logging.getLogger(__name__)
 
 
 def backend_summaries() -> list[tuple[str, str, bool]]:
@@ -31,18 +40,52 @@ class BackendManager:
     def __init__(self) -> None:
         self._instances: dict[str, RecognitionBackend] = {}
         self._lock = Lock()
+        self._state_lock = Lock()
+        self._closed = False
 
     def recognize(self, image: Image.Image, selected_key: str = "auto") -> RecognitionResult:
         with self._lock:
-            if selected_key != "auto":
-                return _with_quality_warning(self._get_backend(selected_key).recognize(image))
-            return self._recognize_auto(image)
+            _LOG.info("recognition-start mode=%s width=%d height=%d", selected_key, *image.size)
+            try:
+                if selected_key != "auto":
+                    result = _with_quality_warning(self._get_backend(selected_key).recognize(image))
+                else:
+                    result = self._recognize_auto(image)
+            except Exception as exc:
+                log_exception("recognition-failed", exc)
+                raise
+            _LOG.info(
+                "recognition-done backend=%s strategy=%s seconds=%.3f warnings=%d",
+                result.backend_name, result.strategy, result.elapsed_seconds, len(result.warnings),
+            )
+            return result
 
     def warmup(self, key: str) -> None:
         """Warm one backend while sharing its instance and serialization lock."""
 
         with self._lock:
-            self._get_backend(key).warmup()
+            _LOG.info("warmup-start backend=%s", key)
+            try:
+                self._get_backend(key).warmup()
+            except Exception as exc:
+                log_exception("warmup-failed", exc)
+                raise
+            _LOG.info("warmup-done backend=%s", key)
+
+    def close(self) -> None:
+        """Stop external workers even if a model is blocked in native code."""
+
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            backends = tuple(self._instances.values())
+        for backend in backends:
+            try:
+                backend.close()
+            except Exception as exc:
+                log_exception("recognition-service-close-failed", exc)
+        _LOG.info("recognition-services-closed")
 
     def _recognize_auto(self, image: Image.Image) -> RecognitionResult:
         started = perf_counter()
@@ -124,6 +167,7 @@ class BackendManager:
         try:
             paddle_result = self._get_backend("paddle").recognize(image)
         except (BackendUnavailableError, RecognitionError) as exc:
+            log_exception("paddle-review-failed-keeping-rapid", exc)
             warning = f"PP-FormulaNet-S 复核失败，已保留 Rapid 结果：{exc}"
             return RecognitionResult(
                 rapid_result.latex,
@@ -137,6 +181,15 @@ class BackendManager:
         paddle_candidate = _candidate(paddle_result)
         candidates = (rapid_candidate, paddle_candidate)
         winner = _choose_candidate(candidates, prefer_paddle_on_tie=complex_formula)
+        review_warnings: tuple[str, ...] = ()
+        if (
+            winner is paddle_candidate
+            and has_suspected_derivative_confusion(rapid_candidate.latex)
+        ):
+            review_warnings = (
+                "Rapid 候选疑似偏导符号与重音字符混淆；已采用 Paddle 复核结果，"
+                "请对照原图重点校对。",
+            )
         no_preview = not any(candidate.previewable for candidate in candidates)
         if no_preview:
             warning = (
@@ -155,16 +208,19 @@ class BackendManager:
             winner.backend,
             perf_counter() - started,
             strategy,
-            _candidate_warnings(winner, (*image_risks, warning)),
+            _candidate_warnings(winner, (*image_risks, *review_warnings, warning)),
             candidates,
         )
 
     def _get_backend(self, selected_key: str) -> RecognitionBackend:
-        key = self._resolve_key(selected_key)
-        if key not in self._instances:
-            backend_type = next(item for item in _BACKEND_TYPES if item.key == key)
-            self._instances[key] = backend_type()
-        return self._instances[key]
+        with self._state_lock:
+            if self._closed:
+                raise RecognitionError("公式识别服务已关闭。")
+            key = self._resolve_key(selected_key)
+            if key not in self._instances:
+                backend_type = next(item for item in _BACKEND_TYPES if item.key == key)
+                self._instances[key] = backend_type()
+            return self._instances[key]
 
     @staticmethod
     def _resolve_key(selected_key: str) -> str:
@@ -232,6 +288,19 @@ def _choose_candidate(
         return rapid if rapid.previewable else paddle
     rapid_score = assess_latex(rapid.latex).score
     paddle_score = assess_latex(paddle.latex).score
+    if has_suspected_derivative_confusion(rapid.latex):
+        # A tilde inside a fraction can be legitimate notation. Only replace it
+        # when the independent reviewer produced a clean, explicit partial token;
+        # otherwise keep Rapid and surface the existing human-review warning.
+        if (
+            paddle.previewable
+            and not has_clean_partial_command(rapid.latex)
+            and has_clean_partial_command(paddle.latex)
+            and not has_suspected_derivative_confusion(paddle.latex)
+            and paddle_score >= rapid_score
+        ):
+            return paddle
+        return rapid
     if paddle_score > rapid_score:
         return paddle
     if paddle_score < rapid_score:

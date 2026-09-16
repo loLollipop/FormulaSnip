@@ -280,3 +280,84 @@ def test_warmup_reuses_backend_and_failure_can_be_retried(monkeypatch: Any) -> N
 
     assert backend.calls == 2
     assert manager._instances["rapid"] is backend
+
+
+@pytest.mark.parametrize("paddle_latex", (
+    r"\frac{\partial u}{\partial t}",
+    r"\frac{\hat{\partial}u}{\hat{\partial}t}",
+))
+def test_auto_reviews_derivative_confusion_and_keeps_human_warning(
+    monkeypatch: Any, paddle_latex: str
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    rapid_latex = r"\frac{\widetilde C u}{\widetilde Q t}"
+    rapid = FakeBackend(RecognitionResult(rapid_latex, "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult(paddle_latex, "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+    result = manager.recognize(formula_image())
+    assert rapid.calls == paddle.calls == 1
+    assert result.strategy == "auto-reviewed"
+    assert len(result.alternatives) == 2
+    assert result.warnings
+    if r"\hat" not in paddle_latex:
+        assert result.latex == paddle_latex
+        assert any("疑似偏导" in warning for warning in result.warnings)
+    else:
+        assert any("疑似偏导" in warning for warning in result.warnings)
+    assert result.alternatives[0].latex == rapid_latex
+
+
+def test_close_is_idempotent_and_stops_future_backend_creation(monkeypatch: Any) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    closed: list[bool] = []
+
+    class Backend(FakeBackend):
+        def close(self) -> None:
+            closed.append(True)
+
+    manager = BackendManager()
+    backend = Backend(RecognitionResult("x", "Paddle", 0.2))
+    manager._instances["paddle"] = backend  # type: ignore[assignment]
+    manager.close()
+    manager.close()
+    assert closed == [True]
+    with pytest.raises(RecognitionError, match="已关闭"):
+        manager.recognize(formula_image(), "paddle")
+
+
+def test_auto_does_not_replace_legitimate_tilde_without_clean_partial(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    rapid_latex = r"\frac{\tilde{x}}{y}"
+    rapid = FakeBackend(RecognitionResult(rapid_latex, "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult(r"\frac{x}{y}", "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert rapid.calls == paddle.calls == 1
+    assert result.latex == rapid_latex
+    assert result.backend_name == "Rapid"
+    assert any("疑似偏导" in warning for warning in result.warnings)
+
+
+def test_auto_does_not_use_an_unrelated_existing_partial_to_drop_tilde(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, rapid=True, paddle=True)
+    rapid_latex = r"\frac{\tilde{x}}{y}+\frac{\partial u}{\partial t}"
+    paddle_latex = r"\frac{x}{y}+\frac{\partial u}{\partial t}"
+    rapid = FakeBackend(RecognitionResult(rapid_latex, "Rapid", 0.2))
+    paddle = FakeBackend(RecognitionResult(paddle_latex, "Paddle", 0.3))
+    manager = BackendManager()
+    manager._instances = {"rapid": rapid, "paddle": paddle}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert rapid.calls == paddle.calls == 1
+    assert result.latex == rapid_latex
+    assert result.backend_name == "Rapid"
+    assert any("疑似偏导" in warning for warning in result.warnings)

@@ -7,7 +7,10 @@ import pytest
 from PIL import Image
 
 from formulasnip.exceptions import RecognitionError
-from formulasnip.recognition.paddle_backend import PaddleFormulaBackend, _extract_formula
+from formulasnip.recognition.paddle_backend import (
+    _extract_formula,
+    _InProcessPaddleBackend,
+)
 from formulasnip.recognition.rapid_backend import RapidLatexBackend
 
 
@@ -37,7 +40,7 @@ def test_paddle_parses_real_result_shape_and_cleans_style_commands() -> None:
             assert batch_size == 1
             return [Result()]
 
-    backend = PaddleFormulaBackend()
+    backend = _InProcessPaddleBackend()
     backend._model = Model()
     result = backend.recognize(Image.new("RGB", (30, 20), "white"))
 
@@ -50,7 +53,7 @@ def test_paddle_rejects_excessively_long_output() -> None:
         def predict(self, **_kwargs: Any) -> list[dict[str, dict[str, str]]]:
             return [{"res": {"rec_formula": r"\alpha+x" * 130}}]
 
-    backend = PaddleFormulaBackend()
+    backend = _InProcessPaddleBackend()
     backend._model = Model()
 
     with pytest.raises(RecognitionError, match="输出异常"):
@@ -69,7 +72,7 @@ def test_paddle_keeps_legitimate_repeated_math(formula: str) -> None:
         def predict(self, **_kwargs: Any) -> list[dict[str, dict[str, str]]]:
             return [{"res": {"rec_formula": formula}}]
 
-    backend = PaddleFormulaBackend()
+    backend = _InProcessPaddleBackend()
     backend._model = Model()
 
     assert backend.recognize(Image.new("RGB", (30, 20), "white")).latex == formula
@@ -80,7 +83,7 @@ def test_paddle_keeps_legitimate_repeated_text() -> None:
         def predict(self, **_kwargs: Any) -> list[dict[str, dict[str, str]]]:
             return [{"res": {"rec_formula": r"\text{a a a a a a a a}"}}]
 
-    backend = PaddleFormulaBackend()
+    backend = _InProcessPaddleBackend()
     backend._model = Model()
 
     result = backend.recognize(Image.new("RGB", (30, 20), "white"))
@@ -93,15 +96,15 @@ def test_paddle_does_not_treat_an_ordinary_bracket_issue_as_fatal() -> None:
         def predict(self, **_kwargs: Any) -> list[dict[str, dict[str, str]]]:
             return [{"res": {"rec_formula": r"\frac{x}{y"}}]
 
-    backend = PaddleFormulaBackend()
+    backend = _InProcessPaddleBackend()
     backend._model = Model()
 
     assert backend.recognize(Image.new("RGB", (30, 20), "white")).latex == r"\frac{x}{y"
 
 
-@pytest.mark.parametrize("backend_type", (RapidLatexBackend, PaddleFormulaBackend))
+@pytest.mark.parametrize("backend_type", (RapidLatexBackend, _InProcessPaddleBackend))
 def test_backend_warmup_only_loads_model(
-    backend_type: type[RapidLatexBackend] | type[PaddleFormulaBackend],
+    backend_type: type[RapidLatexBackend] | type[_InProcessPaddleBackend],
     monkeypatch: Any,
 ) -> None:
     backend = backend_type()

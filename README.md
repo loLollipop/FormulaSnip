@@ -36,8 +36,8 @@ FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别�
 
 前往 [GitHub Releases](https://github.com/loLollipop/FormulaSnip/releases/latest) 下载最新版本：
 
-- `FormulaSnip-v0.2.2-windows-x64-setup.exe`：安装版，提供安装向导、桌面快捷方式和卸载入口；
-- `FormulaSnip-v0.2.2-windows-x64.zip`：便携版，解压后运行 `FormulaSnip.exe`。
+- `FormulaSnip-v0.2.3-windows-x64-setup.exe`：安装版，提供安装向导、桌面快捷方式和卸载入口；
+- `FormulaSnip-v0.2.3-windows-x64.zip`：便携版，解压后运行 `FormulaSnip.exe`。
 
 首次使用识别引擎时需要联网下载模型，下载完成后即可离线识别。当前安装包尚未进行代码签名，Windows SmartScreen 可能显示风险提示，请仅从本仓库下载。
 

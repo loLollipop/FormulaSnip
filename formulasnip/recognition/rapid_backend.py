@@ -13,6 +13,7 @@ from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
 from formulasnip.recognition.quality import has_fatal_output_issue
+from formulasnip.runtime import configure_runtime
 
 _CONFIG_PATH = Path(__file__).with_name("rapid_config.yaml")
 
@@ -37,6 +38,7 @@ class RapidLatexBackend(RecognitionBackend):
                 f"尚未安装 {self.display_name}。请在项目目录运行：{self.install_hint}"
             )
         try:
+            configure_runtime()
             from rapid_latex_ocr import LaTeXOCR
 
             self._model = LaTeXOCR(config_path=_CONFIG_PATH)

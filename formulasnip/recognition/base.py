@@ -24,3 +24,7 @@ class RecognitionBackend(ABC):
     @abstractmethod
     def warmup(self) -> None:
         """Load local model resources without running inference."""
+
+    def close(self) -> None:
+        """Release external resources; in-process backends need no action."""
+        return

@@ -1,9 +1,12 @@
+import pytest
 from PIL import Image, ImageDraw
 
 from formulasnip.recognition.quality import (
     assess_latex,
     diagnose_image,
+    has_clean_partial_command,
     has_complex_structure,
+    has_suspected_derivative_confusion,
 )
 
 
@@ -84,3 +87,41 @@ def test_image_diagnostics_are_hints() -> None:
     image = Image.new("L", (100, 50), "white")
     ImageDraw.Draw(image).rectangle((0, 10, 20, 30), fill="black")
     assert "公式前景可能触边" in diagnose_image(image)
+
+
+@pytest.mark.parametrize("latex", (
+    r"\frac{\tilde C u}{\tilde Q t}",
+    r"\frac{\widetilde{\sigma} u}{x}",
+    r"\frac{u}{\widetilde C x}",
+    r"\frac{partial u}{partial x}",
+    r"\hat{\partial} u",
+))
+def test_derivative_confusions_are_review_hints_without_rewriting(latex: str) -> None:
+    assert has_suspected_derivative_confusion(latex)
+    assert any("疑似偏导" in issue for issue in assess_latex(latex).issues)
+
+
+@pytest.mark.parametrize("latex", (
+    r"\frac{\partial u}{\partial x}",
+    r"\tilde x + \widetilde\sigma",
+    r"\frac{\text{partial}}{x}",
+    r"\frac{\widehat{x}}{y}",
+    r"\text{\frac{\tilde C}{x}}",
+))
+def test_ordinary_math_and_literal_text_do_not_trigger_derivative_hint(latex: str) -> None:
+    assert not has_suspected_derivative_confusion(latex)
+
+
+@pytest.mark.parametrize(
+    ("latex", "expected"),
+    (
+        (r"\frac{\partial u}{\partial x}", True),
+        (r"\hat{\partial}u", False),
+        (r"\frac{partial u}{partial x}", False),
+        (r"\text{\partial}", False),
+    ),
+)
+def test_clean_partial_command_requires_an_unaccented_math_token(
+    latex: str, expected: bool
+) -> None:
+    assert has_clean_partial_command(latex) is expected
