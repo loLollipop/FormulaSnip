@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from PySide6.QtGui import QIcon, QImage
+
+from formulasnip import __version__
 
 ASSET_DIR = Path(__file__).resolve().parents[1] / "assets"
 APP_ICON_PNG = ASSET_DIR / "formulasnip.png"
@@ -16,11 +17,8 @@ TUTORIAL_FORMULA_LATEX = (
 
 
 def application_version() -> str:
-    """Return the installed package version with a source-tree fallback."""
-    try:
-        return version("formulasnip")
-    except PackageNotFoundError:
-        return "0.1.0"
+    """Return the version embedded in this application build."""
+    return __version__
 
 
 @lru_cache(maxsize=1)

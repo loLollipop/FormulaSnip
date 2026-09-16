@@ -33,13 +33,15 @@ FormulaSnip 是一个面向 Windows 论文写作场景的本地公式识别原�
 
 ### Windows Setup 安装版（推荐）
 
-从 GitHub Releases 下载 `FormulaSnip-v0.1.0-windows-x64-setup.exe`，双击后按向导安装。安装器默认安装到当前用户的本机应用目录，不需要管理员权限，并会创建开始菜单入口和桌面快捷方式；也可以在安装向导中取消桌面快捷方式。
+从 GitHub Releases 下载 `FormulaSnip-v0.2.0-windows-x64-setup.exe`，双击后按向导安装。安装器默认安装到当前用户的本机应用目录，不需要管理员权限，并会创建开始菜单入口和桌面快捷方式；也可以在安装向导中取消桌面快捷方式。
 
-安装完成后可以从桌面或开始菜单启动，Windows“设置 > 应用 > 已安装的应用”中可正常卸载。后续版本沿用相同应用标识，可直接覆盖升级。卸载时会清理应用目录以及 Rapid 模型；Paddle 保存在用户缓存目录中的模型会保留，重新安装后可以继续复用。
+安装完成后可以从桌面或开始菜单启动，Windows“设置 > 应用 > 已安装的应用”中可正常卸载。安装版启动后每 12 小时在后台检查一次稳定版更新；发现新版本时可一键下载、校验并静默覆盖安装，也可在“设置中心 > 常规 > 检查更新”手动检查。源码版和便携版会打开发布页，不会擅自改变安装方式。后续版本沿用相同应用标识，可直接覆盖升级。卸载时会清理应用目录以及 Rapid 模型；Paddle 保存在用户缓存目录中的模型会保留，重新安装后可以继续复用。
+
+当前 Windows 安装包尚未进行代码签名，首次下载或更新时 Microsoft Defender SmartScreen 可能显示风险提示。请只从本项目 GitHub Releases 获取安装包，并核对发布信息；应用内更新也会同时校验 GitHub 提供的大小和 SHA-256 摘要。
 
 ### Windows 便携版
 
-从 GitHub Releases 下载 `FormulaSnip-v0.1.0-windows-x64.zip`，解压整个目录后双击 `FormulaSnip.exe`。不要只复制 EXE 文件；旁边的 `_internal` 目录是运行所需组件。
+从 GitHub Releases 下载 `FormulaSnip-v0.2.0-windows-x64.zip`，解压整个目录后双击 `FormulaSnip.exe`。不要只复制 EXE 文件；旁边的 `_internal` 目录是运行所需组件。
 
 首次使用某个识别引擎时需要联网下载对应模型，完成后可以离线识别。模型权重不直接提交到源码仓库，也不打入发布压缩包。
 
@@ -107,12 +109,12 @@ powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 
 需要先安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)，也可以运行 `winget install --id JRSoftware.InnoSetup --exact`。构建脚本会安装 `packaging` 依赖、生成 `dist\FormulaSnip\FormulaSnip.exe`，并同时创建：
 
-- `dist\FormulaSnip-v0.1.0-windows-x64-setup.exe`：带安装向导、快捷方式和卸载入口的推荐安装版；
-- `dist\FormulaSnip-v0.1.0-windows-x64.zip`：无需安装的便携版。
+- `dist\FormulaSnip-v0.2.0-windows-x64-setup.exe`：带安装向导、快捷方式和卸载入口的推荐安装版；
+- `dist\FormulaSnip-v0.2.0-windows-x64.zip`：无需安装的便携版。
 
 应用本体仍采用目录模式打包，避免大型 AI 运行库在每次启动时临时解压。只需要从已有 `dist\FormulaSnip` 目录重建安装器时，可运行 `powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1`。
 
-当前 v0.1.0 Windows x64 实测：ZIP 约 295.5 MiB，解压后约 799.0 MiB；首次使用下载两个模型后还会增加约 398 MiB。
+上一版 Windows x64 的历史实测为：ZIP 约 295.5 MiB，解压后约 799.0 MiB；首次使用下载两个模型后还会增加约 398 MiB。v0.2.0 的最终体积以 Releases 页面为准。
 
 ## 基准与开发命令
 

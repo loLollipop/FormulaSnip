@@ -21,7 +21,7 @@ if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
     throw "FormulaSnip Windows packages must be built on Windows."
 }
 if ([IntPtr]::Size -ne 8) {
-    throw "FormulaSnip v0.1.0 must be built with a 64-bit Python runtime."
+    throw "FormulaSnip v$appVersion must be built with a 64-bit Python runtime."
 }
 
 Push-Location $projectRoot

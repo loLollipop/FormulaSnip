@@ -754,6 +754,7 @@ class ModeCard(QPushButton):
 class SettingsPanel(QWidget):
     start_requested = Signal()
     preferences_changed = Signal(object)
+    update_check_requested = Signal()
 
     _TUTORIAL_STEPS = (
         (
@@ -984,6 +985,27 @@ class SettingsPanel(QWidget):
         mode_layout.addLayout(mode_copy, 1)
         mode_layout.addWidget(change_button)
         general_layout.addWidget(mode_row)
+
+        update_divider = QFrame()
+        update_divider.setObjectName("CardDivider")
+        update_divider.setFrameShape(QFrame.Shape.HLine)
+        general_layout.addWidget(update_divider)
+        update_row = QWidget()
+        update_row.setObjectName("SettingsRow")
+        update_layout = QHBoxLayout(update_row)
+        update_layout.setContentsMargins(0, 7, 0, 2)
+        update_copy = QVBoxLayout()
+        update_copy.setSpacing(3)
+        update_copy.addWidget(_row_title(f"当前版本 v{application_version()}"))
+        self.update_status_label = _muted_text("自动检查间隔为 12 小时")
+        update_copy.addWidget(self.update_status_label)
+        self.check_update_button = QPushButton("检查更新")
+        self.check_update_button.setObjectName("CompactButton")
+        self.check_update_button.setMinimumSize(96, 40)
+        self.check_update_button.clicked.connect(self.update_check_requested.emit)
+        update_layout.addLayout(update_copy, 1)
+        update_layout.addWidget(self.check_update_button)
+        general_layout.addWidget(update_row)
         layout.addWidget(general)
 
         engines = _card("识别引擎", "默认双引擎 · 本机运行")
@@ -1461,6 +1483,10 @@ class SettingsPanel(QWidget):
 
     def show_recognition_page(self) -> None:
         self._select_page(1)
+
+    def set_update_status(self, message: str, *, checking: bool = False) -> None:
+        self.update_status_label.setText(message)
+        self.check_update_button.setEnabled(not checking)
 
     def _update_tutorial_controls(self) -> None:
         index = self.tutorial_stack.currentIndex()

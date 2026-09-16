@@ -62,4 +62,5 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     assistant = FloatingFormulaAssistant()
     assistant.show()
+    assistant.start_update_checks()
     return app.exec()

@@ -31,6 +31,18 @@ QWidget {{
     font-family: "Microsoft YaHei UI", "Segoe UI";
 }}
 QWidget#SettingsPanel {{ background: {colors['window']}; }}
+QDialog#UpdateDialog {{ background: {colors['surface']}; }}
+QPlainTextEdit#UpdateNotes {{
+    background: {colors['surface_alt']}; color: {colors['text']};
+    border: 1px solid {colors['border']}; border-radius: 9px;
+    padding: 10px; selection-background-color: {colors['accent']};
+}}
+QProgressBar {{
+    background: {colors['surface_alt']}; color: {colors['text']};
+    border: 1px solid {colors['border']}; border-radius: 7px;
+    min-height: 16px; text-align: center;
+}}
+QProgressBar::chunk {{ background: {colors['accent']}; border-radius: 6px; }}
 QWidget#SettingsSidebar {{
     background: {colors['sidebar']};
     border-right: 1px solid {colors['border']};

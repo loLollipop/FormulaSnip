@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import time
+from pathlib import Path
+
 from PySide6.QtCore import (
     QMimeData,
     QObject,
     QPoint,
+    QProcess,
     QRect,
     QSettings,
+    QStandardPaths,
     Qt,
     QThreadPool,
     QTimer,
+    QUrl,
     Signal,
     Slot,
 )
@@ -16,6 +22,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QCursor,
+    QDesktopServices,
     QImage,
     QMouseEvent,
     QPainter,
@@ -38,6 +45,7 @@ from formulasnip.core.latex import latex_to_mathml
 from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.recognition import BackendManager
+from formulasnip.ui.branding import application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
 from formulasnip.ui.preview import render_formula_svg
 from formulasnip.ui.settings import (
@@ -50,8 +58,20 @@ from formulasnip.ui.settings import (
 )
 from formulasnip.ui.snip_overlay import SnipOverlay
 from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.update_dialog import (
+    UpdateCheckWorker,
+    UpdateDialog,
+    UpdateDownloadWorker,
+)
 from formulasnip.ui.widgets import FormulaSvgWidget
 from formulasnip.ui.worker import RecognitionWorker
+from formulasnip.update import (
+    CHECK_INTERVAL_SECONDS,
+    ReleaseInfo,
+    is_installed_build,
+    launch_verified_installer,
+    should_check_for_updates,
+)
 
 ORB_PALETTES = {
     "blue": (RING_PRESETS["blue"], "#1A2434"),
@@ -496,6 +516,17 @@ class FloatingFormulaAssistant(QObject):
         self._pending_error: str | None = None
         self._settings_visible = False
         self._thread_pool = QThreadPool.globalInstance()
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_download_worker: UpdateDownloadWorker | None = None
+        self._update_dialog: UpdateDialog | None = None
+        self._update_check_manual_requested = False
+        self._pending_update_install: tuple[Path, ReleaseInfo] | None = None
+        from PySide6.QtCore import QTimer as RepeatingTimer
+
+        self._update_timer = RepeatingTimer(self)
+        self._update_timer.setInterval(CHECK_INTERVAL_SECONDS * 1000)
+        self._update_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._update_timer.timeout.connect(self.check_for_updates)
 
         self.orb.capture_requested.connect(self.start_capture)
         self.orb.settings_requested.connect(self.open_settings)
@@ -504,12 +535,152 @@ class FloatingFormulaAssistant(QObject):
         self.panel.result_consumed.connect(self._result_consumed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
+        self.settings_panel.update_check_requested.connect(
+            lambda: self.check_for_updates(manual=True)
+        )
 
     def show(self) -> None:
         if self.preferences.show_settings_on_startup:
             self.open_settings()
         else:
             self.enter_floating_mode()
+
+    def start_update_checks(self) -> None:
+        if not self._update_timer.isActive():
+            self._update_timer.start()
+        QTimer.singleShot(1500, self.check_for_updates)
+
+    def _restart_update_timer(self) -> None:
+        if self._update_timer.isActive():
+            self._update_timer.start()
+
+    @Slot()
+    def check_for_updates(self, *, manual: bool = False) -> None:
+        if self._update_check_worker is not None:
+            if manual:
+                self._update_check_manual_requested = True
+                self.settings_panel.set_update_status("正在检查更新…", checking=True)
+            return
+        now = int(time.time())
+        last_check = self.settings_store.value("updates/last_check_utc")
+        if not should_check_for_updates(last_check, now_seconds=now, manual=manual):
+            return
+        if manual:
+            self.settings_panel.set_update_status("正在检查更新…", checking=True)
+        self._update_check_manual_requested = manual
+        worker = UpdateCheckWorker(application_version())
+        worker.signals.available.connect(
+            lambda release, requested=manual: self._update_available(release, requested)
+        )
+        worker.signals.no_update.connect(
+            lambda requested=manual: self._update_not_available(requested)
+        )
+        worker.signals.failed.connect(
+            lambda message, requested=manual: self._update_check_failed(message, requested)
+        )
+        self._update_check_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _update_available(self, release: ReleaseInfo, manual: bool) -> None:
+        self._update_check_worker = None
+        manual = manual or self._update_check_manual_requested
+        self._update_check_manual_requested = False
+        self._restart_update_timer()
+        self.settings_store.setValue("updates/last_check_utc", int(time.time()))
+        self.settings_store.sync()
+        if manual:
+            self.settings_panel.set_update_status(f"发现新版本 v{release.version}")
+        dialog = UpdateDialog(application_version(), release)
+        dialog.update_requested.connect(lambda: self._begin_update(release))
+        self._update_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    @Slot()
+    def _update_not_available(self, manual: bool) -> None:
+        self._update_check_worker = None
+        manual = manual or self._update_check_manual_requested
+        self._update_check_manual_requested = False
+        self._restart_update_timer()
+        self.settings_store.setValue("updates/last_check_utc", int(time.time()))
+        self.settings_store.sync()
+        if manual:
+            self.settings_panel.set_update_status("已是最新版本")
+
+    @Slot(str)
+    def _update_check_failed(self, message: str, manual: bool) -> None:
+        self._update_check_worker = None
+        manual = manual or self._update_check_manual_requested
+        self._update_check_manual_requested = False
+        self._restart_update_timer()
+        if manual:
+            self.settings_panel.set_update_status(f"检查失败：{message}")
+
+    def _begin_update(self, release: ReleaseInfo) -> None:
+        dialog = self._update_dialog
+        if dialog is None or self._update_download_worker is not None:
+            return
+        if not is_installed_build():
+            QDesktopServices.openUrl(QUrl(release.page_url))
+            dialog.show_source_build_message()
+            return
+        cache_root = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.CacheLocation
+        )
+        if not cache_root:
+            dialog.show_error("无法找到用户缓存目录。")
+            return
+        dialog.show_downloading()
+        worker = UpdateDownloadWorker(release, Path(cache_root) / "updates")
+        worker.signals.progress.connect(dialog.set_download_progress)
+        worker.signals.finished.connect(
+            lambda path, selected=release: self._update_downloaded(path, selected)
+        )
+        worker.signals.failed.connect(self._update_download_failed)
+        self._update_download_worker = worker
+        self._thread_pool.start(worker)
+
+    @Slot(object)
+    def _update_downloaded(self, path: Path, release: ReleaseInfo) -> None:
+        self._update_download_worker = None
+        self._pending_update_install = (Path(path), release)
+        self._try_launch_pending_installer()
+
+    def _try_launch_pending_installer(self) -> bool:
+        pending = self._pending_update_install
+        if pending is None:
+            return False
+        dialog = self._update_dialog
+        if self._worker is not None or self._capture_pending or self._overlay is not None:
+            if dialog is not None:
+                dialog.show_waiting_for_recognition()
+            return False
+        path, release = pending
+        self._pending_update_install = None
+        try:
+            started = launch_verified_installer(
+                path,
+                release.asset,
+                start_detached=QProcess.startDetached,
+            )
+        except Exception as exc:
+            if dialog is not None:
+                dialog.show_error(f"安装包校验失败：{exc}")
+            return False
+        if not started:
+            if dialog is not None:
+                dialog.show_error("无法启动更新安装程序。")
+            return False
+        QApplication.quit()
+        return True
+
+    @Slot(str)
+    def _update_download_failed(self, message: str) -> None:
+        self._update_download_worker = None
+        if self._update_dialog is not None:
+            self._update_dialog.show_error(f"更新失败：{message}")
 
     @Slot()
     def open_settings(self) -> None:
@@ -546,7 +717,12 @@ class FloatingFormulaAssistant(QObject):
 
     @Slot()
     def start_capture(self) -> None:
-        if self._worker is not None or self._capture_pending or self._overlay is not None:
+        if (
+            self._pending_update_install is not None
+            or self._worker is not None
+            or self._capture_pending
+            or self._overlay is not None
+        ):
             return
         self._capture_pending = True
         self.panel.hide()
@@ -558,12 +734,16 @@ class FloatingFormulaAssistant(QObject):
         if screen is None:
             self._capture_pending = False
             self.orb.show()
+            if self._try_launch_pending_installer():
+                return
             self.panel.show_error("没有找到可截图的屏幕。", self.orb.geometry())
             return
         screenshot = screen.grabWindow(0)
         if screenshot.isNull():
             self._capture_pending = False
             self.orb.show()
+            if self._try_launch_pending_installer():
+                return
             self.panel.show_error("屏幕截图失败。", self.orb.geometry())
             return
         self._overlay = SnipOverlay(screen, screenshot)
@@ -600,6 +780,8 @@ class FloatingFormulaAssistant(QObject):
         self._overlay = None
         self.orb.show()
         self.orb.raise_()
+        if self._try_launch_pending_installer():
+            return
         if self._last_result is not None and not self._settings_visible:
             self.panel.show_result(self._last_result, self.orb.geometry())
 
@@ -610,6 +792,8 @@ class FloatingFormulaAssistant(QObject):
         self._pending_error = None
         self.orb.set_busy(False)
         self.orb.set_result_available(True)
+        if self._try_launch_pending_installer():
+            return
         if self._settings_visible:
             self._pending_result = True
             return
@@ -619,6 +803,8 @@ class FloatingFormulaAssistant(QObject):
     def _recognition_failed(self, message: str) -> None:
         self._worker = None
         self.orb.set_busy(False)
+        if self._try_launch_pending_installer():
+            return
         if self._settings_visible:
             self._pending_error = message
             return

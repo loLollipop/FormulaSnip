@@ -31,6 +31,7 @@ from formulasnip.ui.settings import (
 )
 from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, SnipOverlay
 from formulasnip.ui.styles import apply_application_theme
+from formulasnip.update import ReleaseInfo, UpdateAsset
 
 
 def _application() -> QApplication:
@@ -217,7 +218,7 @@ def test_v4_settings_center_matches_desktop_layout_and_navigation(tmp_path: Path
     assert panel.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
     assert panel.brand_logo.pixmap() is not None
     assert not panel.brand_logo.pixmap().isNull()
-    assert "v0.1.0" in panel.brand_edition.text()
+    assert "v0.2.0" in panel.brand_edition.text()
     assert all(button.accessibleName() for button in panel.color_buttons.values())
     panel.hide()
 
@@ -377,6 +378,73 @@ def test_settings_close_returns_to_floating_mode(tmp_path: Path) -> None:
     assert assistant.orb.isVisible()
     assistant.orb.close()
     assistant.panel.close()
+
+
+def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    requests: list[bool] = []
+    panel.update_check_requested.connect(lambda: requests.append(True))
+
+    panel.check_update_button.click()
+
+    assert requests == [True]
+    assert panel.update_status_label.text() == "自动检查间隔为 12 小时"
+    panel.hide()
+
+
+def test_manual_request_during_automatic_check_restores_update_button(
+    tmp_path: Path,
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._update_check_worker = object()  # type: ignore[assignment]
+
+    assistant.check_for_updates(manual=True)
+    assert not assistant.settings_panel.check_update_button.isEnabled()
+
+    assistant._update_not_available(False)
+    assert assistant.settings_panel.check_update_button.isEnabled()
+    assert assistant.settings_panel.update_status_label.text() == "已是最新版本"
+
+
+def test_update_waits_for_active_recognition_before_starting_installer(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    installer.write_bytes(b"setup")
+    asset = UpdateAsset(
+        installer.name,
+        "https://example.invalid",
+        installer.stat().st_size,
+        "0" * 64,
+    )
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    events: list[str] = []
+    monkeypatch.setattr(
+        floating,
+        "launch_verified_installer",
+        lambda *args, **kwargs: events.append("installer") or True,
+    )
+    monkeypatch.setattr(
+        floating.QApplication,
+        "quit",
+        lambda: events.append("quit"),
+    )
+    assistant._worker = object()  # type: ignore[assignment]
+
+    assistant._update_downloaded(installer, release)
+    assert events == []
+    assert assistant._pending_update_install == (installer, release)
+
+    assistant.start_capture()
+    assert not assistant._capture_pending
+
+    assistant._worker = None
+    assert assistant._try_launch_pending_installer()
+    assert events == ["installer", "quit"]
 
 
 def test_startup_settings_and_preferences_are_applied(tmp_path: Path) -> None:
