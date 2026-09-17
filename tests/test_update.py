@@ -1,28 +1,37 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 
 from formulasnip.update import (
     INSTALLER_ARGUMENTS,
+    LATEST_RELEASE_API,
+    LATEST_RELEASE_MANIFEST,
+    MAX_MANIFEST_BYTES,
     REQUEST_TIMEOUT,
     ReleaseInfo,
     UpdateAsset,
     UpdateError,
+    _fetch_release_manifest,
     download_installer,
     fetch_latest_release,
     is_installed_build,
     is_newer_version,
     launch_verified_installer,
+    parse_manifest,
     parse_release,
     parse_version,
     should_check_for_updates,
     validate_asset_url,
     verify_installer,
 )
+
+MANIFEST_NAME = "FormulaSnip-update.json"
 
 
 def _payload(
@@ -53,6 +62,53 @@ def _payload(
     }
 
 
+def _manifest(
+    *,
+    version: str = "0.3.0",
+    tag: str | None = None,
+    name: str | None = None,
+    size: int = 123,
+    sha256: str = "a" * 64,
+    notes: str = "changes",
+) -> dict[str, Any]:
+    resolved_tag = tag if tag is not None else f"v{version}"
+    return {
+        "schema_version": 1,
+        "version": version,
+        "tag": resolved_tag,
+        "notes": notes,
+        "asset": {
+            "name": name or f"FormulaSnip-v{version}-windows-x64-setup.exe",
+            "size": size,
+            "sha256": sha256,
+        },
+    }
+
+
+def _manifest_responses(
+    payload: object | None = None,
+    *,
+    tag: str = "v0.3.0",
+) -> list[_Response]:
+    tagged_url = (
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/{tag}/{MANIFEST_NAME}"
+    )
+    asset_url = (
+        "https://release-assets.githubusercontent.com/"
+        "github-production-release-asset/1371591206/manifest-asset?signed=1"
+    )
+    body = json.dumps(_manifest() if payload is None else payload).encode()
+    return [
+        _Response(url=LATEST_RELEASE_MANIFEST, status_code=302, location=tagged_url),
+        _Response(url=tagged_url, status_code=302, location=asset_url),
+        _Response(
+            content=body,
+            url=asset_url,
+            content_length=len(body),
+        ),
+    ]
+
+
 def test_version_comparison_and_release_policy() -> None:
     assert parse_version("v2.10.3", tag=True) == (2, 10, 3)
     assert is_newer_version("0.2.1", "0.2.0")
@@ -60,6 +116,8 @@ def test_version_comparison_and_release_policy() -> None:
     for invalid in ("0.3.0", "v0.3", "v0.3.0-beta", "v01.3.0"):
         with pytest.raises(UpdateError):
             parse_version(invalid, tag=True)
+    with pytest.raises(UpdateError):
+        parse_version("v" + "9" * 5_000 + ".0.0", tag=True)
 
     assert parse_release(_payload(draft=True), "0.2.0") is None
     assert parse_release(_payload(prerelease=True), "0.2.0") is None
@@ -125,11 +183,13 @@ class _Response:
         content_length: int | None = None,
         status_code: int = 200,
         location: str | None = None,
+        raise_error: requests.RequestException | None = None,
     ) -> None:
         self._payload = payload
         self._content = content
         self.url = url
         self.status_code = status_code
+        self.raise_error = raise_error
         self.headers = {}
         if content_length is not None:
             self.headers["Content-Length"] = str(content_length)
@@ -138,7 +198,10 @@ class _Response:
         self.closed = False
 
     def raise_for_status(self) -> None:
-        return
+        if self.raise_error is not None:
+            raise self.raise_error
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}")
 
     def json(self) -> object:
         return self._payload
@@ -160,16 +223,128 @@ class _Client:
 
     def get(self, url: str, **kwargs: Any) -> _Response:
         self.calls.append((url, kwargs))
-        return self.responses[min(len(self.calls) - 1, len(self.responses) - 1)]
+        if len(self.calls) > len(self.responses):
+            raise AssertionError(f"Unexpected request: {url}")
+        return self.responses[len(self.calls) - 1]
 
 
-def test_fetch_parses_json_and_sets_timeouts() -> None:
-    response = _Response(payload=_payload())
-    client = _Client(response)
+def test_manifest_schema_constructs_trusted_download_url() -> None:
+    release = parse_manifest(
+        _manifest(sha256="A" * 64),
+        resolved_tag="v0.3.0",
+        current_version="0.2.0",
+    )
+    assert isinstance(release, ReleaseInfo)
+    assert release.version == "0.3.0"
+    assert release.asset.url == (
+        "https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    )
+    assert release.asset.sha256 == "a" * 64
+
+
+def test_static_manifest_success_does_not_call_release_api() -> None:
+    client = _Client(_manifest_responses())
     release = fetch_latest_release("0.2.0", client=client)
     assert release is not None
-    assert client.calls[0][1]["timeout"] == REQUEST_TIMEOUT
-    assert client.calls[0][1]["allow_redirects"] is False
+    assert len(client.calls) == 3
+    assert all(url != LATEST_RELEASE_API for url, _ in client.calls)
+
+
+def test_manifest_follows_complete_redirect_chain_with_safety_options() -> None:
+    responses = _manifest_responses()
+    client = _Client(responses)
+
+    release = _fetch_release_manifest("0.2.0", client=client)
+
+    assert release is not None
+    assert [call[0] for call in client.calls] == [response.url for response in responses]
+    assert all(call[1]["timeout"] == REQUEST_TIMEOUT for call in client.calls)
+    assert all(call[1]["stream"] is True for call in client.calls)
+    assert all(call[1]["allow_redirects"] is False for call in client.calls)
+    assert all(response.closed for response in responses)
+
+
+def test_manifest_rejects_tag_mismatch() -> None:
+    with pytest.raises(UpdateError, match="does not match"):
+        parse_manifest(
+            _manifest(tag="v0.3.1"),
+            resolved_tag="v0.3.0",
+            current_version="0.2.0",
+        )
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://[bad",
+        "http://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        + MANIFEST_NAME,
+        "https://user:pass@github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        + MANIFEST_NAME,
+        "https://github.com:444/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        + MANIFEST_NAME,
+        "https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        + MANIFEST_NAME
+        + "?unexpected=1",
+        "https://evil.example/releases/download/v0.3.0/" + MANIFEST_NAME,
+    ],
+)
+def test_manifest_rejects_malicious_first_redirect(location: str) -> None:
+    response = _Response(
+        url=LATEST_RELEASE_MANIFEST,
+        status_code=302,
+        location=location,
+    )
+    with pytest.raises(UpdateError):
+        _fetch_release_manifest("0.2.0", client=_Client(response))
+    assert response.closed
+
+
+@pytest.mark.parametrize("failure", ["oversized", "non-json", "not-found"])
+def test_manifest_rejects_invalid_responses(failure: str) -> None:
+    responses = _manifest_responses()
+    if failure == "oversized":
+        responses[-1] = _Response(
+            content=b"{}",
+            url=responses[-1].url,
+            content_length=MAX_MANIFEST_BYTES + 1,
+        )
+    elif failure == "non-json":
+        responses[-1] = _Response(content=b"not-json", url=responses[-1].url)
+    else:
+        responses[-1] = _Response(url=responses[-1].url, status_code=404)
+
+    with pytest.raises(UpdateError):
+        _fetch_release_manifest("0.2.0", client=_Client(responses))
+    assert all(response.closed for response in responses)
+
+
+def test_static_failure_falls_back_to_release_api() -> None:
+    static_failure = _Response(url=LATEST_RELEASE_MANIFEST, status_code=404)
+    api_response = _Response(payload=_payload(), url=LATEST_RELEASE_API)
+    client = _Client([static_failure, api_response])
+
+    release = fetch_latest_release("0.2.0", client=client)
+
+    assert release is not None
+    assert release.version == "0.3.0"
+    assert [url for url, _ in client.calls] == [LATEST_RELEASE_MANIFEST, LATEST_RELEASE_API]
+    assert static_failure.closed
+    assert api_response.closed
+
+
+def test_both_update_channels_fail_with_friendly_error() -> None:
+    static_failure = _Response(url=LATEST_RELEASE_MANIFEST, status_code=404)
+    api_failure = _Response(url=LATEST_RELEASE_API, status_code=403)
+    client = _Client([static_failure, api_failure])
+
+    with pytest.raises(UpdateError, match="无法检查更新"):
+        fetch_latest_release("0.2.0", client=client)
+
+    assert len(client.calls) == 2
+    assert static_failure.closed
+    assert api_failure.closed
 
 
 def test_download_streams_verifies_and_atomically_renames(tmp_path: Path) -> None:

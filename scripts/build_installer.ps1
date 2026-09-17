@@ -111,3 +111,21 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
 
 $installer = Get-Item -LiteralPath $installerPath
 Write-Output "Installer: $($installer.FullName) ($([Math]::Round($installer.Length / 1MB, 1)) MiB)"
+
+$manifestPath = Join-Path $projectRoot "dist\FormulaSnip-update.json"
+$installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifest = [ordered]@{
+    schema_version = 1
+    version = $appVersion
+    tag = "v$appVersion"
+    notes = ""
+    asset = [ordered]@{
+        name = $installer.Name
+        size = $installer.Length
+        sha256 = $installerHash
+    }
+}
+$manifestJson = $manifest | ConvertTo-Json -Depth 3
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
+Write-Output "Update manifest: $manifestPath"

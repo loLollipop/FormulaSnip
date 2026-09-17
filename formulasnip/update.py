@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sys
@@ -16,11 +17,17 @@ import requests
 from formulasnip import __version__
 
 LATEST_RELEASE_API = "https://api.github.com/repos/loLollipop/FormulaSnip/releases/latest"
+LATEST_RELEASE_MANIFEST = (
+    "https://github.com/loLollipop/FormulaSnip/releases/latest/download/"
+    "FormulaSnip-update.json"
+)
 RELEASES_URL = "https://github.com/loLollipop/FormulaSnip/releases"
 CHECK_INTERVAL_SECONDS = 12 * 60 * 60
 REQUEST_TIMEOUT = (5.0, 30.0)
 MAX_RELEASE_NOTES_LENGTH = 4_000
+MAX_MANIFEST_BYTES = 64 * 1024
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024 * 1024
+MAX_MANIFEST_REDIRECTS = 2
 MAX_DOWNLOAD_REDIRECTS = 2
 INSTALLER_ARGUMENTS = (
     "/VERYSILENT",
@@ -40,6 +47,12 @@ _INSTALLER_PATTERN = re.compile(
     r"-windows-x64-setup\.exe$"
 )
 _DIGEST_PATTERN = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
+_MANIFEST_DIGEST_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+_TAGGED_MANIFEST_PATH_PATTERN = re.compile(
+    r"^/loLollipop/FormulaSnip/releases/download/"
+    r"(v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))/"
+    r"FormulaSnip-update\.json$"
+)
 _REDIRECT_PATH_PATTERN = re.compile(
     r"^/github-production-release-asset/\d+/[^/]+$"
 )
@@ -83,7 +96,11 @@ def parse_version(value: str, *, tag: bool = False) -> tuple[int, int, int]:
     if match is None:
         kind = "tag" if tag else "version"
         raise UpdateError(f"Invalid {kind}: {value!r}")
-    return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+    try:
+        return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+    except ValueError as exc:
+        kind = "tag" if tag else "version"
+        raise UpdateError(f"Invalid {kind}: {value!r}") from exc
 
 
 def is_newer_version(candidate: str, current: str = __version__) -> bool:
@@ -184,10 +201,181 @@ def parse_release(payload: object, current_version: str = __version__) -> Releas
     )
 
 
-def fetch_latest_release(
-    current_version: str = __version__,
+def _validate_manifest_url(url: str, *, stage: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise UpdateError("The update manifest URL has an invalid port.") from exc
+    if parsed.scheme != "https" or parsed.username or parsed.password or port:
+        raise UpdateError("The update manifest URL is not a trusted HTTPS URL.")
+    if parsed.fragment:
+        raise UpdateError("The update manifest URL contains an unexpected fragment.")
+
+    if stage == "latest":
+        expected = urlsplit(LATEST_RELEASE_MANIFEST)
+        if parsed.hostname != "github.com" or parsed.path != expected.path or parsed.query:
+            raise UpdateError("The update manifest latest URL is invalid.")
+        return None
+    if stage == "tagged":
+        if parsed.hostname != "github.com" or parsed.query:
+            raise UpdateError("The update manifest did not resolve to a tagged release.")
+        match = _TAGGED_MANIFEST_PATH_PATTERN.fullmatch(parsed.path)
+        if match is None:
+            raise UpdateError("The update manifest did not resolve to a tagged release.")
+        return match.group(1)
+    if stage == "asset":
+        if (
+            parsed.hostname != "release-assets.githubusercontent.com"
+            or _REDIRECT_PATH_PATTERN.fullmatch(parsed.path) is None
+        ):
+            raise UpdateError("The update manifest redirect host is not trusted.")
+        return None
+    raise UpdateError("The update manifest redirect state is invalid.")
+
+
+def _read_manifest_response(response: Any) -> object:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_size = int(content_length)
+        except (TypeError, ValueError) as exc:
+            raise UpdateError("The update manifest has an invalid Content-Length.") from exc
+        if declared_size < 0 or declared_size > MAX_MANIFEST_BYTES:
+            raise UpdateError("The update manifest is too large.")
+
+    content = bytearray()
+    for chunk in response.iter_content(chunk_size=16 * 1024):
+        if not chunk:
+            continue
+        if len(content) + len(chunk) > MAX_MANIFEST_BYTES:
+            raise UpdateError("The update manifest is too large.")
+        content.extend(chunk)
+    try:
+        return json.loads(bytes(content))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpdateError("The update manifest is not valid JSON.") from exc
+
+
+def parse_manifest(
+    payload: object,
     *,
-    client: HttpClient = requests,
+    resolved_tag: str,
+    current_version: str = __version__,
+) -> ReleaseInfo | None:
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "schema_version",
+        "version",
+        "tag",
+        "notes",
+        "asset",
+    }:
+        raise UpdateError("The update manifest has an invalid schema.")
+    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1:
+        raise UpdateError("The update manifest schema version is unsupported.")
+
+    version = payload.get("version")
+    tag = payload.get("tag")
+    notes = payload.get("notes")
+    if not isinstance(version, str) or not isinstance(tag, str):
+        raise UpdateError("The update manifest version or tag is missing.")
+    version_tuple = parse_version(version)
+    parse_version(tag, tag=True)
+    if tag != f"v{version}" or tag != resolved_tag:
+        raise UpdateError("The update manifest tag does not match the resolved release.")
+    if not isinstance(notes, str):
+        raise UpdateError("The update manifest release notes are invalid.")
+
+    asset = payload.get("asset")
+    if not isinstance(asset, Mapping) or set(asset) != {"name", "size", "sha256"}:
+        raise UpdateError("The update manifest asset has an invalid schema.")
+    expected_name = installer_name(version)
+    name = asset.get("name")
+    size = asset.get("size")
+    sha256 = asset.get("sha256")
+    if name != expected_name:
+        raise UpdateError("The update manifest installer filename is invalid.")
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_INSTALLER_BYTES:
+        raise UpdateError("The update manifest installer size is invalid.")
+    if not isinstance(sha256, str) or _MANIFEST_DIGEST_PATTERN.fullmatch(sha256) is None:
+        raise UpdateError("The update manifest installer SHA-256 is invalid.")
+    if version_tuple <= parse_version(current_version):
+        return None
+
+    url = f"{RELEASES_URL}/download/{tag}/{expected_name}"
+    validate_asset_url(url, tag=tag, name=expected_name)
+    return ReleaseInfo(
+        version=version,
+        tag=tag,
+        notes=notes[:MAX_RELEASE_NOTES_LENGTH],
+        asset=UpdateAsset(expected_name, url, size, sha256.lower()),
+    )
+
+
+def _fetch_release_manifest(
+    current_version: str,
+    *,
+    client: HttpClient,
+) -> ReleaseInfo | None:
+    current_url = LATEST_RELEASE_MANIFEST
+    resolved_tag: str | None = None
+    stages = ("latest", "tagged", "asset")
+    for redirect_count in range(MAX_MANIFEST_REDIRECTS + 1):
+        response: Any = None
+        try:
+            stage = stages[redirect_count]
+            _validate_manifest_url(current_url, stage=stage)
+            response = client.get(
+                current_url,
+                headers={"Accept": "application/json", "User-Agent": "FormulaSnip-Updater"},
+                timeout=REQUEST_TIMEOUT,
+                stream=True,
+                allow_redirects=False,
+            )
+            response_url = str(getattr(response, "url", current_url) or current_url)
+            response_tag = _validate_manifest_url(response_url, stage=stage)
+            if response_tag is not None:
+                resolved_tag = response_tag
+            status_code = int(getattr(response, "status_code", 0))
+            if 300 <= status_code < 400:
+                location = response.headers.get("Location")
+                if not isinstance(location, str) or not location:
+                    raise UpdateError("The update manifest redirect is missing its destination.")
+                if redirect_count >= MAX_MANIFEST_REDIRECTS:
+                    raise UpdateError("The update manifest used too many redirects.")
+                try:
+                    next_url = urljoin(current_url, location)
+                except ValueError as exc:
+                    raise UpdateError(
+                        "The update manifest redirect URL is invalid."
+                    ) from exc
+                next_tag = _validate_manifest_url(next_url, stage=stages[redirect_count + 1])
+                if next_tag is not None:
+                    resolved_tag = next_tag
+                response.close()
+                current_url = next_url
+                continue
+            response.raise_for_status()
+            if stage != "asset" or resolved_tag is None:
+                raise UpdateError("The update manifest did not follow the expected redirects.")
+            payload = _read_manifest_response(response)
+            return parse_manifest(
+                payload,
+                resolved_tag=resolved_tag,
+                current_version=current_version,
+            )
+        except requests.RequestException as exc:
+            raise UpdateError("Unable to download the update manifest.") from exc
+        finally:
+            if response is not None and callable(getattr(response, "close", None)):
+                response.close()
+    raise UpdateError("The update manifest used too many redirects.")
+
+
+def _fetch_release_api(
+    current_version: str,
+    *,
+    client: HttpClient,
 ) -> ReleaseInfo | None:
     response: Any = None
     try:
@@ -203,11 +391,27 @@ def fetch_latest_release(
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
-        raise UpdateError("Unable to check for updates.") from exc
+        raise UpdateError("Unable to check the GitHub release API.") from exc
     finally:
         if response is not None and callable(getattr(response, "close", None)):
             response.close()
     return parse_release(payload, current_version)
+
+
+def fetch_latest_release(
+    current_version: str = __version__,
+    *,
+    client: HttpClient = requests,
+) -> ReleaseInfo | None:
+    try:
+        return _fetch_release_manifest(current_version, client=client)
+    except UpdateError:
+        try:
+            return _fetch_release_api(current_version, client=client)
+        except UpdateError as api_error:
+            raise UpdateError(
+                "无法检查更新：静态更新清单和 GitHub API 均不可用，请稍后重试。"
+            ) from api_error
 
 
 def should_check_for_updates(
