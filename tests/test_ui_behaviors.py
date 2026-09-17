@@ -471,7 +471,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.3" in panel.update_version_label.text()
+    assert "v0.2.4" in panel.update_version_label.text()
     assert all(
         dot.property("available") == "false"
         for dot in panel.engine_status_dots.values()
