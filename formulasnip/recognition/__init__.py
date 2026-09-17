@@ -1,4 +1,4 @@
 from formulasnip.recognition.manager import BackendManager, backend_summaries
-from formulasnip.recognition.paddle_backend import PaddleFormulaBackend
+from formulasnip.recognition.mathcraft_backend import MathCraftBackend
 
-__all__ = ["BackendManager", "PaddleFormulaBackend", "backend_summaries"]
+__all__ = ["BackendManager", "MathCraftBackend", "backend_summaries"]

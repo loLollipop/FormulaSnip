@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from threading import Lock
 from time import perf_counter
 
@@ -11,11 +12,12 @@ from formulasnip.diagnostics import log_exception
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
-from formulasnip.recognition.paddle_backend import PaddleFormulaBackend
+from formulasnip.recognition.mathcraft_backend import MathCraftBackend
 from formulasnip.recognition.quality import (
     assess_latex,
     diagnose_image,
     has_clean_partial_command,
+    has_complex_image_layout,
     has_complex_structure,
     has_suspected_derivative_confusion,
 )
@@ -23,7 +25,7 @@ from formulasnip.recognition.rapid_backend import RapidLatexBackend
 
 _BACKEND_TYPES: tuple[type[RecognitionBackend], ...] = (
     RapidLatexBackend,
-    PaddleFormulaBackend,
+    MathCraftBackend,
 )
 _LOG = logging.getLogger(__name__)
 
@@ -61,16 +63,15 @@ class BackendManager:
             return result
 
     def warmup(self, key: str) -> None:
-        """Warm one backend while sharing its instance and serialization lock."""
+        """Warm one backend without blocking requests that use another engine."""
 
-        with self._lock:
-            _LOG.info("warmup-start backend=%s", key)
-            try:
-                self._get_backend(key).warmup()
-            except Exception as exc:
-                log_exception("warmup-failed", exc)
-                raise
-            _LOG.info("warmup-done backend=%s", key)
+        _LOG.info("warmup-start backend=%s", key)
+        try:
+            self._get_backend(key).warmup()
+        except Exception as exc:
+            log_exception("warmup-failed", exc)
+            raise
+        _LOG.info("warmup-done backend=%s", key)
 
     def close(self) -> None:
         """Stop external workers even if a model is blocked in native code."""
@@ -90,7 +91,7 @@ class BackendManager:
     def _recognize_auto(self, image: Image.Image) -> RecognitionResult:
         started = perf_counter()
         if not RapidLatexBackend.is_available():
-            for key in ("paddle",):
+            for key in ("mathcraft",):
                 backend_type = next(item for item in _BACKEND_TYPES if item.key == key)
                 if backend_type.is_available():
                     result = self._get_backend(key).recognize(image)
@@ -113,7 +114,7 @@ class BackendManager:
         try:
             rapid_result = self._get_backend("rapid").recognize(image)
         except (BackendUnavailableError, RecognitionError):
-            for key in ("paddle",):
+            for key in ("mathcraft",):
                 backend_type = next(item for item in _BACKEND_TYPES if item.key == key)
                 if not backend_type.is_available():
                     continue
@@ -137,22 +138,24 @@ class BackendManager:
         rapid_candidate = _candidate(rapid_result)
         image_risks = diagnose_image(image)
         complex_formula = has_complex_structure(rapid_result.latex)
+        complex_layout = has_complex_image_layout(image)
         should_review = bool(
             rapid_candidate.issues
             or image_risks
             or complex_formula
+            or complex_layout
             or not rapid_candidate.previewable
         )
-        if not should_review or not PaddleFormulaBackend.is_available():
+        if not should_review or not MathCraftBackend.is_available():
             warnings = list(_candidate_warnings(rapid_candidate, image_risks))
-            if should_review and not PaddleFormulaBackend.is_available():
+            if should_review and not MathCraftBackend.is_available():
                 if rapid_candidate.previewable:
                     warnings.append(
-                        "检测到复核条件，但 PP-FormulaNet-S 未安装，保留 Rapid 结果。"
+                        "检测到复核条件，但 MathCraft OCR 未安装，保留 Rapid 结果。"
                     )
                 else:
                     warnings.append(
-                        "Rapid 结果无法预览，且 PP-FormulaNet-S 未安装；"
+                        "Rapid 结果无法预览，且 MathCraft OCR 未安装；"
                         "可在结果框中继续修改 LaTeX。"
                     )
             return RecognitionResult(
@@ -165,10 +168,10 @@ class BackendManager:
             )
 
         try:
-            paddle_result = self._get_backend("paddle").recognize(image)
+            mathcraft_result = self._get_backend("mathcraft").recognize(image)
         except (BackendUnavailableError, RecognitionError) as exc:
-            log_exception("paddle-review-failed-keeping-rapid", exc)
-            warning = f"PP-FormulaNet-S 复核失败，已保留 Rapid 结果：{exc}"
+            log_exception("mathcraft-review-failed-keeping-rapid", exc)
+            warning = f"MathCraft OCR 复核失败，已保留 Rapid 结果：{exc}"
             return RecognitionResult(
                 rapid_result.latex,
                 rapid_result.backend_name,
@@ -178,37 +181,42 @@ class BackendManager:
                 (rapid_candidate,),
             )
 
-        paddle_candidate = _candidate(paddle_result)
-        candidates = (rapid_candidate, paddle_candidate)
-        winner = _choose_candidate(candidates, prefer_paddle_on_tie=complex_formula)
-        review_warnings: tuple[str, ...] = ()
-        if (
-            winner is paddle_candidate
-            and has_suspected_derivative_confusion(rapid_candidate.latex)
-        ):
-            review_warnings = (
-                "Rapid 候选疑似偏导符号与重音字符混淆；已采用 Paddle 复核结果，"
-                "请对照原图重点校对。",
+        mathcraft_candidate = _candidate(mathcraft_result)
+        candidates = (rapid_candidate, mathcraft_candidate)
+        winner = _choose_candidate(candidates)
+        review_warnings: list[str] = []
+        candidates_disagree = (
+            _candidate_content_key(rapid_candidate.latex)
+            != _candidate_content_key(mathcraft_candidate.latex)
+        )
+        derivative_confusion = (
+            has_suspected_derivative_confusion(rapid_candidate.latex)
+            and has_clean_partial_command(mathcraft_candidate.latex)
+        )
+        if candidates_disagree and derivative_confusion:
+            review_warnings.append(
+                "两个引擎结果不一致；Rapid 疑似把偏导符号识别为重音字符，"
+                "已采用精确候选，复杂公式请重点校对。"
+            )
+        elif candidates_disagree:
+            review_warnings.append(
+                "两个引擎结果不一致；已采用精确候选，复杂公式请重点校对。"
             )
         no_preview = not any(candidate.previewable for candidate in candidates)
         if no_preview:
-            warning = (
-                "两个引擎均未生成可预览候选；已按质量评分保留"
+            review_warnings.append(
+                "两个引擎均未生成可预览候选；已按候选质量规则保留"
                 f" {winner.backend} 结果，请在结果框中修改 LaTeX。"
             )
             strategy = "auto-reviewed-no-preview"
         else:
-            warning = (
-                f"智能模式已用 PP-FormulaNet-S 复核，选择 {winner.backend}；"
-                "请与原公式核对采用结果。"
-            )
             strategy = "auto-reviewed"
         return RecognitionResult(
             winner.latex,
             winner.backend,
             perf_counter() - started,
             strategy,
-            _candidate_warnings(winner, (*image_risks, *review_warnings, warning)),
+            _candidate_warnings(winner, (*image_risks, *review_warnings)),
             candidates,
         )
 
@@ -281,32 +289,54 @@ def _with_quality_warning(result: RecognitionResult) -> RecognitionResult:
 
 
 def _choose_candidate(
-    candidates: tuple[RecognitionCandidate, ...], *, prefer_paddle_on_tie: bool
+    candidates: tuple[RecognitionCandidate, ...],
 ) -> RecognitionCandidate:
-    rapid, paddle = candidates
-    if rapid.previewable != paddle.previewable:
-        return rapid if rapid.previewable else paddle
+    rapid, mathcraft = candidates
     rapid_score = assess_latex(rapid.latex).score
-    paddle_score = assess_latex(paddle.latex).score
-    if has_suspected_derivative_confusion(rapid.latex):
-        # A tilde inside a fraction can be legitimate notation. Only replace it
-        # when the independent reviewer produced a clean, explicit partial token;
-        # otherwise keep Rapid and surface the existing human-review warning.
+    mathcraft_score = assess_latex(mathcraft.latex).score
+    rapid_severe = _has_severe_issue(rapid)
+    mathcraft_severe = _has_severe_issue(mathcraft)
+    if rapid_severe != mathcraft_severe:
+        return rapid if not rapid_severe else mathcraft
+    if rapid_severe and mathcraft_severe:
+        return mathcraft if mathcraft_score > rapid_score else rapid
+    if _candidate_content_key(rapid.latex) != _candidate_content_key(mathcraft.latex):
         if (
-            paddle.previewable
-            and not has_clean_partial_command(rapid.latex)
-            and has_clean_partial_command(paddle.latex)
-            and not has_suspected_derivative_confusion(paddle.latex)
-            and paddle_score >= rapid_score
+            has_suspected_derivative_confusion(rapid.latex)
+            and not has_clean_partial_command(mathcraft.latex)
         ):
-            return paddle
-        return rapid
-    if paddle_score > rapid_score:
-        return paddle
-    if paddle_score < rapid_score:
-        return rapid
-    if len(paddle.issues) < len(rapid.issues):
-        return paddle
-    if len(paddle.issues) > len(rapid.issues):
-        return rapid
-    return paddle if prefer_paddle_on_tie else rapid
+            return rapid
+        return mathcraft
+    return rapid
+
+
+def _candidate_content_key(latex: str) -> str:
+    """Compare harmless formatting variants without claiming algebraic equivalence."""
+
+    without_sizing = re.sub(r"\\(?:left|right)(?![A-Za-z])", "", latex)
+
+    def normalize_space(match: re.Match[str]) -> str:
+        prefix = without_sizing[: match.start()]
+        suffix = without_sizing[match.end() :]
+        if re.search(r"\\[A-Za-z]+$", prefix) and re.match(r"[A-Za-z]", suffix):
+            return " "
+        return ""
+
+    return re.sub(r"\s+", normalize_space, without_sizing).strip()
+
+
+def _has_severe_issue(candidate: RecognitionCandidate) -> bool:
+    severe_markers = (
+        "括号不配对",
+        "缺少反斜杠",
+        "重复运算符",
+        "环境开始与结束不匹配",
+        r"\left 与 \right",
+        "重复关系符",
+        "异常连续重复",
+        "异常重复片段",
+        "输出异常",
+    )
+    return any(
+        marker in issue for issue in candidate.issues for marker in severe_markers
+    )

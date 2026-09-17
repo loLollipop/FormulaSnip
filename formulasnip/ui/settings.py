@@ -56,7 +56,7 @@ from formulasnip.ui.branding import (
 )
 from formulasnip.ui.styles import apply_application_theme
 
-RECOGNITION_MODES = ("auto", "rapid", "paddle")
+RECOGNITION_MODES = ("auto", "rapid", "mathcraft")
 ORB_COLORS = ("blue", "green", "orange")
 RESULT_THEMES = ("dark", "light")
 DEFAULT_RING_COLOR = "#5D83F3"
@@ -193,10 +193,16 @@ class FloatingPreferences:
                 logo = str(Path(stored_logo).expanduser().resolve())
             except OSError:
                 logo = ""
-        recognition_mode = _choice(
-            settings.value("recognition/mode"), RECOGNITION_MODES, "auto"
-        )
-        if recognition_mode == "paddle" and not _backend_is_available("paddle"):
+        stored_mode = settings.value("recognition/mode")
+        if stored_mode == "paddle":
+            recognition_mode = (
+                "mathcraft" if _backend_is_available("mathcraft") else "auto"
+            )
+            settings.setValue("recognition/mode", recognition_mode)
+            settings.sync()
+        else:
+            recognition_mode = _choice(stored_mode, RECOGNITION_MODES, "auto")
+        if recognition_mode == "mathcraft" and not _backend_is_available("mathcraft"):
             recognition_mode = "auto"
         return cls(
             recognition_mode=recognition_mode,
@@ -1130,17 +1136,17 @@ class SettingsPanel(QWidget):
         page, layout = self._page_shell()
         self.mode_combo = QComboBox()
         self.mode_combo.setVisible(False)
-        paddle_available = _backend_is_available("paddle")
+        mathcraft_available = _backend_is_available("mathcraft")
         self.mode_combo.addItem("智能（推荐）", "auto")
         self.mode_combo.addItem("快速", "rapid")
-        paddle_label = "精确"
-        if not paddle_available:
-            paddle_label += "（未安装）"
-        self.mode_combo.addItem(paddle_label, "paddle")
-        if not paddle_available:
-            paddle_item = self.mode_combo.model().item(self.mode_combo.count() - 1)
-            if paddle_item is not None:
-                paddle_item.setEnabled(False)
+        mathcraft_label = "精确"
+        if not mathcraft_available:
+            mathcraft_label += "（未安装）"
+        self.mode_combo.addItem(mathcraft_label, "mathcraft")
+        if not mathcraft_available:
+            mathcraft_item = self.mode_combo.model().item(self.mode_combo.count() - 1)
+            if mathcraft_item is not None:
+                mathcraft_item.setEnabled(False)
         self.mode_combo.currentIndexChanged.connect(self._mode_combo_changed)
         layout.addWidget(self.mode_combo)
 
@@ -1160,13 +1166,13 @@ class SettingsPanel(QWidget):
                 "1–2 s",
             ),
             (
-                "paddle",
+                "mathcraft",
                 "精确",
-                "已内置" if paddle_available else "安装缺失",
-                "PP-FormulaNet-S",
+                "已内置" if mathcraft_available else "安装缺失",
+                "MathCraft OCR",
                 (
-                    "0.7 s"
-                    if paddle_available
+                    "约 1–4 s"
+                    if mathcraft_available
                     else "未安装"
                 ),
             ),
@@ -1176,7 +1182,7 @@ class SettingsPanel(QWidget):
         self.mode_cards: dict[str, ModeCard] = {}
         for key, title, tag, body, meta in modes:
             mode_card = ModeCard(key, title, tag, body, meta)
-            mode_card.setEnabled(key != "paddle" or paddle_available)
+            mode_card.setEnabled(key != "mathcraft" or mathcraft_available)
             mode_card.selected.connect(self._select_recognition_mode)
             self.mode_card_group.addButton(mode_card)
             self.mode_cards[key] = mode_card
@@ -1397,7 +1403,7 @@ class SettingsPanel(QWidget):
         summaries = {
             "auto": ("智能", "推荐", "Rapid 优先 · 必要时复核"),
             "rapid": ("快速", "轻量", "只运行 RapidLaTeXOCR"),
-            "paddle": ("精确", "已内置", "只运行 PP-FormulaNet-S"),
+            "mathcraft": ("精确", "已内置", "只运行 MathCraft OCR"),
         }
         name, tag, meta = summaries.get(selected, summaries["auto"])
         self.overview_mode_name.setText(name)

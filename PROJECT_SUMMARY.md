@@ -25,8 +25,8 @@ FormulaSnip 是一个只识别单个数学公式的 Windows 本地桌面原型�
 - LaTeX 或 MathML 复制成功后自动收起结果面板，便于直接切回 Word/MathType 粘贴；
 - 截图遮罩已调亮，并使用高对比自定义十字光标；
 - RapidLaTeXOCR 快速后端：CPU/ONNX、懒加载和模型缓存，直接接收 RGB NumPy，减少一次 PNG 转码；
-- PP-FormulaNet-S 默认精确后端：CPU/Paddle、懒加载，可单独选择；
-- 智能模式：Rapid 优先，只有复杂结构、图片风险或输出风险命中时才调用 Paddle 复核；
+- MathCraft OCR 0.3.1 默认精确后端：CPU/ONNX、可复用隔离子进程、懒加载，可单独选择；
+- 智能模式：Rapid 优先，只有复杂结构、图片风险或输出风险命中时才调用 MathCraft 复核；
 - 候选选择：检查括号、裸命令、重复运算符、异常长度和重复片段；后台保留候选供下拉切换，界面只用 SVG 显示当前采用的电子公式；
 - Rapid 解码上限从上游 512 缩到 128，原约 59.6 秒的退化样例现在约 3.5 秒即可拒绝；
 - 可扩展 benchmark CLI、带 SHA-256/来源/许可校验的 manifest 和两张 CC0 合成样本；
@@ -43,7 +43,7 @@ FormulaSnip 是一个只识别单个数学公式的 Windows 本地桌面原型�
 - RapidLaTeXOCR 轻量且易部署，适合作为默认快速后端，但维护活跃度和模型权重许可仍需关注；
 - pix2tex 社区最大，但 PyTorch 依赖、Windows 安装问题和与 Rapid 的模型同源性降低了集成收益；
 - UniMERNet 对复杂和手写公式有吸引力，但 tiny 权重约 410 MiB，连同 PyTorch 不符合默认体积目标；
-- PaddleOCR/PP-FormulaNet 维护最活跃，PP-FormulaNet-S 在困难积分样例上与 Rapid 形成互补，因此与 Rapid 一起默认安装；
+- MathCraft OCR 使用 ONNX Runtime CPU，公式模型体积约 103.8 MiB；六张真实公式图验证覆盖偏导、梯度和复杂分式，因此与 Rapid 一起默认安装；
 - Surya 已偏统一文档 VLM/server，体积、运行方式和模型许可不适合此单公式产品。
 
 完整证据与链接见 [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md)。
@@ -51,24 +51,24 @@ FormulaSnip 是一个只识别单个数学公式的 Windows 本地桌面原型�
 ## 本机验证
 
 - 默认 Rapid 环境及模型约 720.8 MiB；
-- Rapid 与 Paddle 一起安装后，环境 1,278.8 MiB，Paddle 模型缓存 227.4 MiB，合计约 1,506 MiB（1.47 GiB）；
-- 双曲线实测保留 Rapid 快路径，未无条件启动 Paddle；
-- 积分实测触发 Paddle 复核，并保留 Rapid/Paddle 两个候选；
-- PP-FormulaNet-S 初始化约 9.6 秒，warm 推理约 0.67–0.76 秒；
+- 普通干净公式保留 Rapid 快路径，不会无条件启动 MathCraft；
+- 复杂结构、图像风险和异常输出触发 MathCraft 复核，并保留 Rapid/MathCraft 两个候选；
+- MathCraft 公式模型约 103.8 MiB，实测 warm CPU 推理约 0.8–3.5 秒；
+- MathCraft 运行在可复用 spawn 子进程中，通过共享内存传图；超时或原生崩溃不会拖垮 GUI，下一次调用会重建进程；
 - 自动化测试、Ruff、wheel/sdist 打包与内容检查以本轮最终验证记录为准。
 
 ## 为什么默认安装两个引擎
 
-Paddle 的额外成本主要来自约 376.8 MiB 的推理框架、相关依赖和 227.4 MiB 模型。双引擎安装后实测约 1.47 GiB，体积高于原先约 0.8 GB 的 Rapid 单引擎方案，但可以让智能复核与精确模式开箱可用。
+MathCraft 的额外成本主要来自 ONNX Runtime、Transformers/Tokenizers 相关依赖和约 103.8 MiB 的公式模型。应用不随安装包分发模型权重，首次使用时下载，以控制发行包体积并保留可审计的模型缓存。
 
-默认安装两个引擎不会让普通公式每次都跑两个模型。智能模式只在风险条件命中时复核；用户也可以直接选择 Rapid 或 Paddle。
+默认安装两个引擎不会让普通公式每次都跑两个模型。智能模式只在风险条件命中时复核；用户也可以直接选择 Rapid 或 MathCraft。
 
 ## 当前边界与下一步
 
 - 当前两张合成 benchmark 只证明路由与回归机制可运行，不足以量化总体准确率提升；
 - 下一步最有价值的输入是用户本次试用失败的原图，以及人工确认的正确 LaTeX；
 - 应扩充到 100–300 个真实使用分布样本，再报告严格 exact、渲染等价、人工修正率、p50/p95 延迟和升级率；
-- 当前 Windows 发行包不捆绑 Rapid 与 Paddle 模型权重；两者由上游组件首次使用时下载；
+- 当前 Windows 发行包不捆绑 Rapid 与 MathCraft 模型权重；两者由上游组件首次使用时下载；
 - Word/MathType 剪贴板交换、异 DPI 多显示器和无 Python 干净电脑上的 EXE 仍需继续扩大实机验收。
 
 ## V4 验证

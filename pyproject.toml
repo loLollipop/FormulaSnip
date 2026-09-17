@@ -21,10 +21,7 @@ dependencies = [
   # rapid-latex-ocr imports requests for model downloads but omits it from
   # the package metadata.
   "requests>=2.32,<3",
-  "paddleocr>=3.3,<4",
-  "paddlepaddle>=3.3,<4; sys_platform == 'win32'",
-  "tokenizers>=0.20,<1",
-  "ftfy>=6.3,<7",
+  "mathcraft-ocr[cpu]==0.3.1",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +54,11 @@ include = [
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.uv]
+# MathCraft 0.3.1 declares NumPy 2 although its ONNX CPU inference path is
+# compatible with NumPy 1. RapidLaTeXOCR 0.0.9 still pins NumPy below 2.
+override-dependencies = ["numpy>=1.26,<2"]
 
 [tool.ruff]
 line-length = 100

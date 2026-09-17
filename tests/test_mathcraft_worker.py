@@ -12,8 +12,8 @@ from PIL import Image
 
 from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import RecognitionError
-from formulasnip.recognition.paddle_backend import PaddleFormulaBackend
-from formulasnip.recognition.paddle_worker import PaddleWorkerClient
+from formulasnip.recognition.mathcraft_backend import MathCraftBackend
+from formulasnip.recognition.mathcraft_worker import MathCraftWorkerClient
 
 
 class Connection:
@@ -93,13 +93,13 @@ class Context:
 
 
 READY = ("ready", 0, None)
-RESULT = RecognitionResult("x+y", "Paddle", 0.2)
+RESULT = RecognitionResult("x+y", "MathCraft", 0.2)
 
 
 def test_worker_warmup_and_inference_reuse_one_process_with_unique_ids() -> None:
     context = Context([[READY, ("result", 1, RESULT), ("result", 2, RESULT)]])
-    client = PaddleWorkerClient(context=context)
-    backend = PaddleFormulaBackend(client=client)
+    client = MathCraftWorkerClient(context=context)
+    backend = MathCraftBackend(client=client)
     try:
         backend.warmup()
         backend.warmup()
@@ -125,7 +125,7 @@ def test_crash_or_protocol_failure_disposes_generation_and_next_call_restarts(
     response: Any,
 ) -> None:
     context = Context([[READY, response], [READY, ("result", 2, RESULT)]])
-    client = PaddleWorkerClient(context=context)
+    client = MathCraftWorkerClient(context=context)
     with pytest.raises(RecognitionError):
         client.recognize(Image.new("RGB", (5, 4)))
     assert context.processes[0].closed
@@ -140,7 +140,9 @@ def test_crash_or_protocol_failure_disposes_generation_and_next_call_restarts(
 @pytest.mark.parametrize("startup", (True, False))
 def test_timeouts_terminate_and_allow_retry(startup: bool) -> None:
     context = Context([[] if startup else [READY], [READY]])
-    client = PaddleWorkerClient(context=context, startup_timeout=0.005, recognition_timeout=0.005)
+    client = MathCraftWorkerClient(
+        context=context, startup_timeout=0.005, recognition_timeout=0.005
+    )
     with pytest.raises(RecognitionError, match="超时"):
         if startup:
             client.warmup()
@@ -154,7 +156,7 @@ def test_timeouts_terminate_and_allow_retry(startup: bool) -> None:
 @pytest.mark.parametrize("fail_start", (True, False))
 def test_start_failure_or_startup_error_is_reported_and_cleaned(fail_start: bool) -> None:
     context = Context([[("error", 0, "初始化失败")]], fail_start=fail_start)
-    client = PaddleWorkerClient(context=context)
+    client = MathCraftWorkerClient(context=context)
     with pytest.raises(RecognitionError, match="初始化失败|无法启动"):
         client.warmup()
     assert context.parents[0].closed
@@ -163,7 +165,7 @@ def test_start_failure_or_startup_error_is_reported_and_cleaned(fail_start: bool
 
 
 def test_close_is_idempotent_and_prevents_future_start() -> None:
-    client = PaddleWorkerClient(context=Context([]))
+    client = MathCraftWorkerClient(context=Context([]))
     client.close()
     client.close()
     with pytest.raises(RecognitionError, match="已关闭"):
@@ -172,7 +174,7 @@ def test_close_is_idempotent_and_prevents_future_start() -> None:
 
 def test_close_interrupts_an_inflight_native_call_without_waiting_for_deadline() -> None:
     context = Context([[READY]])
-    client = PaddleWorkerClient(context=context, recognition_timeout=60)
+    client = MathCraftWorkerClient(context=context, recognition_timeout=60)
     client.warmup()
     waiting = Event()
     errors: list[Exception] = []
@@ -219,7 +221,9 @@ def test_real_spawn_child_abrupt_exit_does_not_kill_parent() -> None:
             kwargs["target"] = _spawned_crashing_worker
             return self.context.Process(**kwargs)
 
-    client = PaddleWorkerClient(context=SpawnContext(), startup_timeout=15, recognition_timeout=5)
+    client = MathCraftWorkerClient(
+        context=SpawnContext(), startup_timeout=15, recognition_timeout=5
+    )
     parent_pid = os.getpid()
     try:
         with pytest.raises(RecognitionError, match="意外退出"):

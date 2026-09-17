@@ -49,6 +49,7 @@ from formulasnip.core.latex import latex_to_mathml
 from formulasnip.domain import RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.recognition import BackendManager
+from formulasnip.recognition.quality import assess_latex
 from formulasnip.ui.branding import application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
 from formulasnip.ui.preview import render_formula_svg
@@ -413,7 +414,10 @@ class FloatingResultPanel(QWidget):
                 adopted_issues = candidate.issues
                 adopted_previewable = candidate.previewable
                 break
-        if adopted_previewable is False:
+        if result.warnings:
+            self.quality_label.setText("\n".join(dict.fromkeys(result.warnings)))
+            self.quality_label.setProperty("warning", True)
+        elif adopted_previewable is False:
             self.quality_label.setText(
                 next(
                     (
@@ -427,19 +431,6 @@ class FloatingResultPanel(QWidget):
             self.quality_label.setProperty("warning", True)
         elif adopted_issues:
             self.quality_label.setText("识别结果需要人工校对：" + "；".join(adopted_issues))
-            self.quality_label.setProperty("warning", True)
-        elif quality_warning := next(
-            (
-                warning
-                for warning in result.warnings
-                if any(
-                    marker in warning
-                    for marker in ("未安装", "失败", "需要人工校对", "疑似偏导")
-                )
-            ),
-            None,
-        ):
-            self.quality_label.setText(quality_warning)
             self.quality_label.setProperty("warning", True)
         else:
             self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
@@ -559,17 +550,41 @@ class FloatingResultPanel(QWidget):
             )
             self.preview_stack.setCurrentWidget(self.preview_message)
             if edited:
-                self.quality_label.setText("预览生成失败，可继续修改 LaTeX 后重试。")
+                warnings = ["预览生成失败，可继续修改 LaTeX 后重试。"]
+                warnings.extend(self._persistent_result_warnings())
+                self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
                 self.quality_label.setProperty("warning", True)
                 self.status_label.setText("预览生成失败，可继续修改")
                 _refresh_style(self.quality_label)
             return
         self.preview_stack.setCurrentWidget(self.preview_frame)
         if edited:
-            self.quality_label.setText("电子公式预览已更新，请核对后复制")
-            self.quality_label.setProperty("warning", False)
+            report = assess_latex(latex)
+            warnings = list(self._persistent_result_warnings())
+            if report.issues:
+                warnings.insert(0, "识别结果需要人工校对：" + "；".join(report.issues))
+            if warnings:
+                self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
+                self.quality_label.setProperty("warning", True)
+            else:
+                self.quality_label.setText("电子公式预览已更新，请核对后复制")
+                self.quality_label.setProperty("warning", False)
             self.status_label.setText("预览已更新")
             _refresh_style(self.quality_label)
+
+    def _persistent_result_warnings(self) -> tuple[str, ...]:
+        if self._result is None:
+            return ()
+        text_dependent_markers = (
+            "识别结果需要人工校对",
+            "当前识别结果无法生成电子公式预览",
+            "两个引擎均未生成可预览候选",
+        )
+        return tuple(
+            warning
+            for warning in self._result.warnings
+            if not any(marker in warning for marker in text_dependent_markers)
+        )
 
     @Slot()
     def _dismiss_result(self) -> None:
@@ -650,11 +665,11 @@ class FloatingFormulaAssistant(QObject):
 
         if self._warmup_worker is not None:
             return
-        keys = (
-            ("paddle",)
-            if self.preferences.recognition_mode == "paddle"
-            else ("rapid",)
-        )
+        keys = {
+            "auto": ("rapid", "mathcraft"),
+            "rapid": ("rapid",),
+            "mathcraft": ("mathcraft",),
+        }.get(self.preferences.recognition_mode, ("rapid", "mathcraft"))
         worker = ModelWarmupWorker(self.manager, keys)
         worker.signals.started.connect(
             lambda key: self.settings_panel.set_engine_status(key, "started")

@@ -16,8 +16,9 @@ _LITERAL_GROUP = re.compile(
 )
 _VERB = re.compile(r"\\verb\*?([^\sA-Za-z])")
 _COMPLEX_STRUCTURE = re.compile(
-    r"\\(?:int|iint|iiint|oint|sum|prod|lim)(?![A-Za-z])"
-    r"|\\begin\s*\{(?:matrix|pmatrix|bmatrix|cases)\}"
+    r"\\(?:int|iint|iiint|oint|sum|prod|lim|partial|nabla)(?![A-Za-z])"
+    r"|\\begin\s*\{(?:matrix|pmatrix|bmatrix|cases|aligned|align\*?|array|"
+    r"gathered|split|multline\*?)\}"
 )
 _TOKEN = re.compile(r"\\[A-Za-z]+|[A-Za-z0-9]+|\S")
 _BARE_PARTIAL = re.compile(r"(?<!\\)\bpartial\b")
@@ -26,8 +27,8 @@ _ACCENTED_PARTIAL = re.compile(
     r"(?:\{\s*)*\\partial(?![A-Za-z])"
 )
 _FRACTION = re.compile(r"\\(?:frac|dfrac|tfrac)(?![A-Za-z])\s*\{")
-_TILDE_SYMBOL = re.compile(
-    r"\\(?:tilde|widetilde)(?![A-Za-z])\s*"
+_ACCENT_SYMBOL = re.compile(
+    r"\\(?:tilde|widetilde|hat|widehat|bar|overline|dot|ddot)(?![A-Za-z])\s*"
     r"(?:\{\s*(?:[A-Za-z]|\\[A-Za-z]+)\s*\}|[A-Za-z]|\\[A-Za-z]+)"
 )
 _PARTIAL_COMMAND = re.compile(r"\\partial(?![A-Za-z])")
@@ -100,8 +101,52 @@ def diagnose_image(image: Image.Image) -> tuple[str, ...]:
     return tuple(issues)
 
 
+def has_complex_image_layout(image: Image.Image) -> bool:
+    """Conservatively route visibly two-dimensional or long formula crops.
+
+    This signal is independent of OCR text, so a complex formula that Rapid
+    collapses to a short, syntactically valid expression can still be reviewed.
+    """
+
+    gray = image.convert("L")
+    width, height = gray.size
+    if width < 3 or height < 3:
+        return False
+    pixels = gray.load()
+    corners = sorted(
+        (
+            pixels[0, 0],
+            pixels[width - 1, 0],
+            pixels[0, height - 1],
+            pixels[width - 1, height - 1],
+        )
+    )
+    background = (corners[1] + corners[2]) / 2
+    foreground = gray.point(
+        lambda value: 255 if abs(value - background) > 35 else 0,
+        mode="1",
+    )
+    bounds = foreground.getbbox()
+    if bounds is None:
+        return False
+    foreground_width = bounds[2] - bounds[0]
+    foreground_height = bounds[3] - bounds[1]
+    return foreground_height >= 44 or (
+        foreground_width >= 180 and foreground_height >= 30
+    )
+
+
 def has_complex_structure(latex: str) -> bool:
-    return _COMPLEX_STRUCTURE.search(latex) is not None
+    value = _mask_literal_contexts(latex)
+    if _COMPLEX_STRUCTURE.search(value) is not None:
+        return True
+    # Multiple fractions commonly represent derivatives or nested PDE terms.
+    fractions = sum(
+        1
+        for match in _FRACTION.finditer(value)
+        if _is_active_command(value, match.start())
+    )
+    return fractions >= 2
 
 
 def has_suspected_derivative_confusion(latex: str) -> bool:
@@ -123,7 +168,7 @@ def has_suspected_derivative_confusion(latex: str) -> bool:
             end = _matching_group_end(value, opening)
             if end is None:
                 break
-            if _TILDE_SYMBOL.search(value[opening + 1 : end]):
+            if _ACCENT_SYMBOL.search(value[opening + 1 : end]):
                 return True
             opening = end + 1
             while opening < len(value) and value[opening].isspace():

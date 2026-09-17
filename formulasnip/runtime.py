@@ -51,7 +51,5 @@ def _configure_windowed_subprocesses() -> None:
 
 
 def configure_runtime() -> None:
-    # Must run before replacing absent GUI streams or importing model libraries.
     _configure_windowed_subprocesses()
     _configure_windowed_streams()
-    os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"

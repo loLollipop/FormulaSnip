@@ -1,8 +1,8 @@
-"""A reusable spawn worker keeps Paddle native failures outside the GUI.
+"""A reusable spawn worker keeps MathCraft native failures outside the GUI.
 
 The manager serializes calls. A duplex pipe has no queue feeder thread to join
 after a child crash; every response carries the request ID. Only the child loads
-Paddle. A failed generation is discarded and the next call starts a fresh one.
+MathCraft. A failed generation is discarded and the next call starts a fresh one.
 """
 
 from __future__ import annotations
@@ -131,15 +131,15 @@ def _worker_main(connection: Any) -> None:
     configure_runtime()
     initialize_logging(worker=True)
     # Import here, after runtime setup, and never construct this backend in Qt.
-    from formulasnip.recognition.paddle_backend import _InProcessPaddleBackend
+    from formulasnip.recognition.mathcraft_backend import _InProcessMathCraftBackend
 
     try:
-        backend = _InProcessPaddleBackend()
+        backend = _InProcessMathCraftBackend()
         try:
             backend.warmup()
         except Exception as exc:
-            log_exception("paddle-startup-failed", exc)
-            connection.send(("error", 0, "PP-FormulaNet-S 初始化失败，请检查模型下载后重试。"))
+            log_exception("mathcraft-startup-failed", exc)
+            connection.send(("error", 0, "MathCraft OCR 初始化失败，请检查模型下载后重试。"))
             return
         connection.send(("ready", 0, None))
         while True:
@@ -155,23 +155,23 @@ def _worker_main(connection: Any) -> None:
                     image = Image.frombytes("RGB", size, bytes(memory.buf))
                 finally:
                     memory.close()
-                _LOG.info("paddle-inference-start width=%d height=%d", *size)
+                _LOG.info("mathcraft-inference-start width=%d height=%d", *size)
                 result = backend.recognize(image)
-                _LOG.info("paddle-inference-done seconds=%.3f", result.elapsed_seconds)
+                _LOG.info("mathcraft-inference-done seconds=%.3f", result.elapsed_seconds)
                 connection.send(("result", request_id, result))
             except Exception as exc:
-                log_exception("paddle-recognition-failed", exc)
+                log_exception("mathcraft-recognition-failed", exc)
                 connection.send((
-                    "error", request_id, "PP-FormulaNet-S 识别失败，请调整截图后重试。"
+                    "error", request_id, "MathCraft OCR 识别失败，请调整截图后重试。"
                 ))
     except (EOFError, OSError):
         pass  # The GUI closed or was terminated.
     finally:
         connection.close()
-        _LOG.info("paddle-worker-stop")
+        _LOG.info("mathcraft-worker-stop")
 
 
-class PaddleWorkerClient:
+class MathCraftWorkerClient:
     def __init__(
         self,
         *,
@@ -212,7 +212,7 @@ class PaddleWorkerClient:
                 if response[0] == "error":
                     raise RecognitionError(response[2])
                 if response[0] != "result" or not isinstance(response[2], RecognitionResult):
-                    raise RecognitionError("PP-FormulaNet-S 返回异常，下一次识别将自动重启。")
+                    raise RecognitionError("MathCraft OCR 返回异常，下一次识别将自动重启。")
                 return response[2]
             except (OSError, EOFError, AttributeError, ValueError, MemoryError) as exc:
                 self._dispose()
@@ -236,34 +236,34 @@ class PaddleWorkerClient:
             try:
                 parent, child = self._context.Pipe(duplex=True)
                 process = self._context.Process(
-                    target=_worker_main, args=(child,), name="FormulaSnip-Paddle", daemon=True
+                    target=_worker_main, args=(child,), name="FormulaSnip-MathCraft", daemon=True
                 )
             except (OSError, MemoryError) as exc:
                 for connection in (parent, child):
                     if connection is not None:
                         connection.close()
-                log_exception("paddle-process-create-failed", exc)
-                raise RecognitionError("无法创建 PP-FormulaNet-S 进程，请释放内存后重试。") from exc
+                log_exception("mathcraft-process-create-failed", exc)
+                raise RecognitionError("无法创建 MathCraft OCR 进程，请释放内存后重试。") from exc
             self._connection, self._process = parent, process
             try:
                 process.start()
                 self._job_handle = _assign_kill_on_close_job(process)
                 if sys.platform == "win32" and self._job_handle is None:
-                    _LOG.warning("paddle-worker-job-protection-unavailable")
+                    _LOG.warning("mathcraft-worker-job-protection-unavailable")
             except Exception as exc:
-                log_exception("paddle-process-start-failed", exc)
+                log_exception("mathcraft-process-start-failed", exc)
                 self._dispose()
-                raise RecognitionError("无法启动 PP-FormulaNet-S 识别进程，请稍后重试。") from exc
+                raise RecognitionError("无法启动 MathCraft OCR 识别进程，请稍后重试。") from exc
             finally:
                 child.close()
-            _LOG.info("paddle-worker-start pid=%s", process.pid)
+            _LOG.info("mathcraft-worker-start pid=%s", process.pid)
         try:
             response = self._receive(0, self._startup_timeout)
             if response[0] == "error":
                 raise RecognitionError(response[2])
             if response[0] != "ready":
-                raise RecognitionError("PP-FormulaNet-S 初始化响应异常，请重试。")
-            _LOG.info("paddle-worker-ready")
+                raise RecognitionError("MathCraft OCR 初始化响应异常，请重试。")
+            _LOG.info("mathcraft-worker-ready")
         except (OSError, EOFError, AttributeError, ValueError) as exc:
             self._dispose()
             raise self._crash_error() from exc
@@ -278,9 +278,9 @@ class PaddleWorkerClient:
             remaining = deadline - monotonic()
             if remaining <= 0:
                 _LOG.warning(
-                    "paddle-worker-timeout stage=%s", "startup" if request_id == 0 else "infer"
+                    "mathcraft-worker-timeout stage=%s", "startup" if request_id == 0 else "infer"
                 )
-                raise RecognitionError("PP-FormulaNet-S 响应超时，下一次识别将自动重启。")
+                raise RecognitionError("MathCraft OCR 响应超时，下一次识别将自动重启。")
             if connection.poll(min(remaining, 0.1)):
                 response = connection.recv()
                 if (
@@ -288,16 +288,16 @@ class PaddleWorkerClient:
                     or len(response) != 3
                     or response[1] != request_id
                 ):
-                    raise RecognitionError("PP-FormulaNet-S 响应不匹配，下一次识别将自动重启。")
+                    raise RecognitionError("MathCraft OCR 响应不匹配，下一次识别将自动重启。")
                 return response
             if not process.is_alive():
-                _LOG.error("paddle-worker-unexpected-exit code=%s", process.exitcode)
+                _LOG.error("mathcraft-worker-unexpected-exit code=%s", process.exitcode)
                 raise self._crash_error()
 
     @staticmethod
     def _crash_error() -> RecognitionError:
         return RecognitionError(
-            "PP-FormulaNet-S 识别进程意外退出（可能内存不足或模型运行异常）；"
+            "MathCraft OCR 识别进程意外退出（可能内存不足或模型运行异常）；"
             "软件仍可使用，下一次识别将自动重启。"
         )
 
@@ -334,7 +334,7 @@ class PaddleWorkerClient:
                             process.join(1.0)
                         except (OSError, ValueError):
                             pass
-                    _LOG.info("paddle-worker-exit code=%s", process.exitcode)
+                    _LOG.info("mathcraft-worker-exit code=%s", process.exitcode)
             finally:
                 if connection is not None:
                     with suppress(OSError, ValueError):

@@ -39,14 +39,13 @@ Additional license texts that are absent from upstream wheels are preserved in
   not currently include a separately verified redistribution license in this
   project. FormulaSnip does not claim redistribution rights for those weights.
   Source: https://github.com/RapidAI/RapidLaTeXOCR
-- PaddleOCR / PP-FormulaNet-S: PaddleOCR code and the official Hugging Face
-  model card report Apache-2.0. Its dependencies are installed by default and
-  its model is downloaded by Paddle's own runtime on first use.
-  Sources: https://github.com/PaddlePaddle/PaddleOCR and
-  https://huggingface.co/PaddlePaddle/PP-FormulaNet-S
-The Windows release intentionally excludes separately cached Paddle model files
-and removes Rapid model weights from the packaged Python distribution. Each
-upstream component downloads its model on first use. Before redistributing a
-release that embeds model files, generate a complete dependency and model SBOM,
-include every required license text, and obtain clarification for model files
-whose redistribution terms are not explicit.
+- MathCraft OCR 0.3.1 is GPL-3.0-only. The wheel includes the complete license
+  text in its distribution metadata; it is the same license version included
+  in FormulaSnip's root `LICENSE`. FormulaSnip uses only its ONNX CPU formula
+  profile. Source: https://github.com/SakuraMathcraft/LaTeXSnipper
+
+The Windows release intentionally excludes separately cached MathCraft and
+Rapid model files. Each upstream component downloads its model on first use.
+Before redistributing a release that embeds model files, generate a complete
+dependency and model SBOM, include every required license text, and obtain
+clarification for model files whose redistribution terms are not explicit.

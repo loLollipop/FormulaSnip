@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QSettings, Qt
@@ -170,11 +172,11 @@ def test_result_panel_surfaces_derivative_review_warning() -> None:
     panel = FloatingResultPanel()
     result = RecognitionResult(
         r"\frac{\partial u}{\partial t}",
-        "Paddle",
+        "MathCraft",
         0.2,
         strategy="auto-reviewed",
         warnings=(
-            "智能模式已用 PP-FormulaNet-S 复核。",
+            "智能模式已用 MathCraft OCR 复核。",
             "Rapid 候选疑似偏导符号与重音字符混淆，请对照原图重点校对。",
         ),
     )
@@ -183,6 +185,50 @@ def test_result_panel_surfaces_derivative_review_warning() -> None:
 
     assert "疑似偏导" in panel.quality_label.text()
     assert panel.quality_label.property("warning") is True
+    panel.close()
+    application.processEvents()
+
+
+def test_result_panel_surfaces_all_manager_risk_and_disagreement_warnings() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    result = RecognitionResult(
+        "x+y",
+        "MathCraft",
+        0.2,
+        strategy="auto-reviewed",
+        warnings=(
+            "公式前景可能触边",
+            "两个引擎结果不一致；复杂公式请重点校对。",
+        ),
+    )
+
+    panel.show_result(result, QRect(20, 20, 68, 68))
+
+    assert "触边" in panel.quality_label.text()
+    assert "两个引擎结果不一致" in panel.quality_label.text()
+    assert panel.quality_label.property("warning") is True
+    panel.close()
+    application.processEvents()
+
+
+def test_editing_only_spacing_preserves_image_and_disagreement_warnings() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    result = RecognitionResult(
+        "x+y",
+        "MathCraft",
+        0.2,
+        strategy="auto-reviewed",
+        warnings=("公式前景可能触边", "两个引擎结果不一致，请重点校对。"),
+    )
+    panel.show_result(result, QRect(20, 20, 68, 68))
+
+    panel.latex_view.setPlainText(" x + y ")
+    panel._refresh_edited_preview()
+
+    assert "触边" in panel.quality_label.text()
+    assert "两个引擎结果不一致" in panel.quality_label.text()
     panel.close()
     application.processEvents()
 
@@ -255,7 +301,7 @@ def test_model_warmup_worker_continues_after_failure() -> None:
             if key == "rapid":
                 raise RuntimeError("boom")
 
-    worker = ModelWarmupWorker(Manager(), ("rapid", "paddle"))  # type: ignore[arg-type]
+    worker = ModelWarmupWorker(Manager(), ("rapid", "mathcraft"))  # type: ignore[arg-type]
     worker.signals.started.connect(lambda key: events.append(("started", key)))
     worker.signals.succeeded.connect(lambda key: events.append(("succeeded", key)))
     worker.signals.failed.connect(
@@ -268,8 +314,8 @@ def test_model_warmup_worker_continues_after_failure() -> None:
     assert events == [
         ("started", "rapid"),
         ("failed", "rapid", "boom"),
-        ("started", "paddle"),
-        ("succeeded", "paddle"),
+        ("started", "mathcraft"),
+        ("succeeded", "mathcraft"),
         ("finished",),
     ]
 
@@ -287,7 +333,7 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
             self.started.append(worker)
 
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
-    assistant.preferences = FloatingPreferences("paddle", "blue", "dark", True)
+    assistant.preferences = FloatingPreferences("mathcraft", "blue", "dark", True)
     pool = Pool()
     assistant._thread_pool = pool  # type: ignore[assignment]
 
@@ -296,12 +342,12 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
 
     assert len(pool.started) == 1
     worker = pool.started[0]
-    assert worker.backend_keys == ("paddle",)
+    assert worker.backend_keys == ("mathcraft",)
     assert assistant._warmup_worker is worker
-    worker.signals.started.emit("paddle")
-    assert assistant.settings_panel.engine_status_labels["paddle"].text() == "正在初始化"
-    worker.signals.succeeded.emit("paddle")
-    assert assistant.settings_panel.engine_status_labels["paddle"].text() == "已初始化"
+    worker.signals.started.emit("mathcraft")
+    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "正在初始化"
+    worker.signals.succeeded.emit("mathcraft")
+    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "已初始化"
     worker.signals.failed.emit("rapid", "offline")
     assert "初始化失败" in assistant.settings_panel.engine_status_labels["rapid"].text()
     worker.signals.finished.emit()
@@ -342,7 +388,7 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
     apply_application_theme("dark")
 
 
-def test_auto_startup_only_warms_rapid_and_shutdown_closes_manager(
+def test_auto_startup_warms_both_engines_and_shutdown_closes_manager(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     _application()
@@ -352,9 +398,33 @@ def test_auto_startup_only_warms_rapid_and_shutdown_closes_manager(
     monkeypatch.setattr(assistant._thread_pool, "start", started.append)
     monkeypatch.setattr(assistant.manager, "close", lambda: closed.append(True))
     assistant.start_model_warmup()
-    assert started[0].backend_keys == ("rapid",)
+    assert started[0].backend_keys == ("rapid", "mathcraft")
     assistant.shutdown()
     assert closed == [True]
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (
+        ("auto", ("rapid", "mathcraft")),
+        ("rapid", ("rapid",)),
+        ("mathcraft", ("mathcraft",)),
+    ),
+)
+def test_startup_warmup_keys_match_mode(
+    tmp_path: Path, monkeypatch: Any, mode: str, expected: tuple[str, ...]
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant.preferences = FloatingPreferences(mode, "blue", "dark", True)
+    started: list[Any] = []
+    monkeypatch.setattr(assistant._thread_pool, "start", started.append)
+
+    assistant.start_model_warmup()
+
+    assert started[0].backend_keys == expected
+    assistant._warmup_worker = None
+    assistant.shutdown()
 
 
 def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Path) -> None:
@@ -463,7 +533,7 @@ def test_mode_cards_replace_visible_combo_and_persist_selection(tmp_path: Path) 
     panel.preferences_changed.connect(changed.append)
 
     assert panel.mode_combo.isHidden()
-    assert set(panel.mode_cards) == {"auto", "rapid", "paddle"}
+    assert set(panel.mode_cards) == {"auto", "rapid", "mathcraft"}
     panel.mode_cards["rapid"].click()
 
     assert panel.mode_combo.currentData() == "rapid"
@@ -508,28 +578,45 @@ def test_legacy_preferences_migrate_to_ring_and_global_theme(tmp_path: Path) -> 
     assert settings.value("appearance/theme") == "light"
 
 
-def test_unavailable_paddle_mode_falls_back_and_cannot_be_selected(
+def test_legacy_mode_migrates_to_auto_when_mathcraft_is_unavailable(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     monkeypatch.setattr(
         settings_ui,
         "backend_summaries",
-        lambda: (("rapid", "Rapid", True), ("paddle", "Paddle", False)),
+        lambda: (("rapid", "Rapid", True), ("mathcraft", "MathCraft", False)),
     )
     settings = _settings(tmp_path)
     settings.setValue("recognition/mode", "paddle")
 
     preferences = FloatingPreferences.load(settings)
     panel = SettingsPanel(settings, preferences)
-    paddle_index = panel.mode_combo.findData("paddle")
-    paddle_item = panel.mode_combo.model().item(paddle_index)
+    mathcraft_index = panel.mode_combo.findData("mathcraft")
+    mathcraft_item = panel.mode_combo.model().item(mathcraft_index)
 
     assert preferences.recognition_mode == "auto"
     assert panel.mode_combo.currentData() == "auto"
-    assert paddle_item is not None
-    assert not paddle_item.isEnabled()
-    assert not panel.mode_cards["paddle"].isEnabled()
+    assert mathcraft_item is not None
+    assert not mathcraft_item.isEnabled()
+    assert not panel.mode_cards["mathcraft"].isEnabled()
     panel.close()
+
+
+def test_legacy_mode_migrates_to_mathcraft_when_available(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr(
+        settings_ui,
+        "backend_summaries",
+        lambda: (("rapid", "Rapid", True), ("mathcraft", "MathCraft", True)),
+    )
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/mode", "paddle")
+
+    preferences = FloatingPreferences.load(settings)
+
+    assert preferences.recognition_mode == "mathcraft"
+    assert settings.value("recognition/mode") == "mathcraft"
 
 
 def test_ring_color_validation_is_strict_and_canonical() -> None:
@@ -739,14 +826,14 @@ def test_selected_recognition_mode_is_passed_to_worker(
 
     monkeypatch.setattr(floating, "RecognitionWorker", FakeWorker)
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
-    assistant.preferences = FloatingPreferences("paddle", "blue", "dark", True)
+    assistant.preferences = FloatingPreferences("mathcraft", "blue", "dark", True)
     assistant._thread_pool = Pool()  # type: ignore[assignment]
     pixmap = QPixmap(80, 40)
     pixmap.fill(Qt.GlobalColor.white)
 
     assistant._captured(pixmap)
 
-    assert created[0][2] == "paddle"
+    assert created[0][2] == "mathcraft"
     assistant._worker = None
     assistant.orb.close()
     assistant.panel.close()

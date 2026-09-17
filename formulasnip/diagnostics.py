@@ -42,7 +42,7 @@ def initialize_logging(*, worker: bool = False) -> None:
         directory = Path(base) / "FormulaSnip" / "logs"
         directory.mkdir(parents=True, exist_ok=True)
         handler = _QuietRotatingHandler(
-            directory / ("paddle-worker.log" if worker else "application.log"),
+            directory / ("mathcraft-worker.log" if worker else "application.log"),
             maxBytes=1_000_000,
             backupCount=2,
             encoding="utf-8",

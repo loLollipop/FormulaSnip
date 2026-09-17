@@ -5,6 +5,7 @@ from formulasnip.recognition.quality import (
     assess_latex,
     diagnose_image,
     has_clean_partial_command,
+    has_complex_image_layout,
     has_complex_structure,
     has_suspected_derivative_confusion,
 )
@@ -77,7 +78,28 @@ def test_quality_allows_legitimate_repeated_math() -> None:
 def test_complex_structure_detection() -> None:
     assert has_complex_structure(r"\int_0^1 x dx")
     assert has_complex_structure(r"\begin{cases}x&x>0\end{cases}")
+    assert has_complex_structure(r"\frac{u}{x}+\frac{v}{y}")
+    assert has_complex_structure(r"\partial_t u+\nabla u")
+    assert has_complex_structure(r"\begin{aligned}x&=y\end{aligned}")
     assert not has_complex_structure(r"x+y")
+
+
+@pytest.mark.parametrize(
+    "latex",
+    (
+        r"\partial_t u",
+        r"\nabla u",
+        r"\frac{a}{b}+\frac{c}{d}",
+        r"\begin{align}x&=y\end{align}",
+        r"\begin{aligned}x&=y\end{aligned}",
+        r"\begin{array}{cc}a&b\end{array}",
+        r"\begin{gathered}x=y\end{gathered}",
+        r"\begin{split}x=y\end{split}",
+        r"\begin{multline}x=y\end{multline}",
+    ),
+)
+def test_all_precision_routing_structures_are_complex(latex: str) -> None:
+    assert has_complex_structure(latex)
 
 
 def test_image_diagnostics_are_hints() -> None:
@@ -89,12 +111,24 @@ def test_image_diagnostics_are_hints() -> None:
     assert "公式前景可能触边" in diagnose_image(image)
 
 
+def test_complex_image_layout_uses_foreground_not_rapid_text() -> None:
+    simple = Image.new("L", (180, 60), "white")
+    ImageDraw.Draw(simple).rectangle((20, 20, 150, 40), fill="black")
+    assert not has_complex_image_layout(simple)
+
+    long_two_dimensional = Image.new("L", (260, 90), "white")
+    ImageDraw.Draw(long_two_dimensional).rectangle((20, 20, 230, 65), fill="black")
+    assert has_complex_image_layout(long_two_dimensional)
+
+
 @pytest.mark.parametrize("latex", (
     r"\frac{\tilde C u}{\tilde Q t}",
     r"\frac{\widetilde{\sigma} u}{x}",
     r"\frac{u}{\widetilde C x}",
     r"\frac{partial u}{partial x}",
     r"\hat{\partial} u",
+    r"\frac{\hat C u}{\bar Q t}",
+    r"\frac{\overline{x}}{\ddot y}",
 ))
 def test_derivative_confusions_are_review_hints_without_rewriting(latex: str) -> None:
     assert has_suspected_derivative_confusion(latex)
@@ -105,7 +139,6 @@ def test_derivative_confusions_are_review_hints_without_rewriting(latex: str) ->
     r"\frac{\partial u}{\partial x}",
     r"\tilde x + \widetilde\sigma",
     r"\frac{\text{partial}}{x}",
-    r"\frac{\widehat{x}}{y}",
     r"\text{\frac{\tilde C}{x}}",
 ))
 def test_ordinary_math_and_literal_text_do_not_trigger_derivative_hint(latex: str) -> None:

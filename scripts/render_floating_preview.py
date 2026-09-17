@@ -36,7 +36,7 @@ def main() -> None:
     panel = FloatingResultPanel()
     result = RecognitionResult(
         TUTORIAL_FORMULA_LATEX,
-        "PP-FormulaNet-S（CPU）",
+        "MathCraft OCR（CPU）",
         0.71,
         "auto-reviewed",
     )

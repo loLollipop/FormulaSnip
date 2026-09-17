@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_dynamic_libs,
+    copy_metadata,
+)
 
 
 project_root = Path(SPECPATH)
@@ -21,12 +26,20 @@ datas = [
     (str(project_root / "uv.lock"), "."),
 ]
 binaries = []
-hiddenimports = ["PySide6.QtSvgWidgets"]
+hiddenimports = [
+    "PySide6.QtSvgWidgets",
+    # MathCraft loads these formula-profile classes through Transformers'
+    # lazy module registry, which static analysis cannot see.
+    "transformers.models.auto.tokenization_auto",
+    "transformers.models.trocr.processing_trocr",
+    "transformers.models.vit.image_processing_vit",
+    "transformers.models.xlm_roberta.tokenization_xlm_roberta_fast",
+    "transformers.tokenization_utils_fast",
+]
 
 # Preserve the metadata and license files for the shipped dependency graph.
-# Recursive collection also supports libraries (notably PaddleX) that query
-# package versions at runtime.  The dictionary removes duplicates introduced
-# by overlapping dependency trees.
+# Recursive collection supports libraries that query package versions at
+# runtime. The dictionary removes duplicates from overlapping dependency trees.
 metadata = {}
 for distribution_name in (
     "formulasnip",
@@ -37,63 +50,21 @@ for distribution_name in (
     "matplotlib",
     "rapid-latex-ocr",
     "requests",
-    "paddleocr",
-    "paddlepaddle",
-    "paddlex",
+    "mathcraft-ocr",
+    "rapidocr",
+    "transformers",
     "tokenizers",
-    "ftfy",
+    "huggingface-hub",
+    "safetensors",
+    "omegaconf",
+    "PyYAML",
+    "numpy",
     "onnxruntime",
-    "opencv-contrib-python",
     "opencv-python",
-    "pypdfium2",
-    "pandas",
 ):
     for source, destination in copy_metadata(distribution_name, recursive=True):
         metadata[destination] = source
 datas.extend((source, destination) for destination, source in metadata.items())
-
-
-# collect_all() imports every package while discovering hidden modules.  Paddle's
-# optional compiler/TensorRT and PaddleX's training/serving trees are not part of
-# FormulaSnip's CPU inference path; some of them also crash PyInstaller's isolated
-# collector on Windows.  Keep discovery on the two production backends only.
-_EXCLUDED_SUBMODULE_PREFIXES = {
-    "paddle": (
-        "paddle.dataset",
-        "paddle.distributed",
-        "paddle.hapi",
-        "paddle.incubate",
-        "paddle.jit",
-        "paddle.optimizer",
-        "paddle.profiler",
-        "paddle.quantization",
-        "paddle.tensorrt",
-    ),
-    "paddleocr": (
-        "paddleocr._api_client",
-        "paddleocr._cli",
-        "paddleocr._doc2md",
-        "paddleocr._pipelines",
-    ),
-    "paddlex": (
-        "paddlex.inference.serving",
-        "paddlex.modules",
-        "paddlex.repo_apis",
-        "paddlex.repo_manager",
-    ),
-}
-
-
-def production_submodule(package_name: str):
-    excluded_prefixes = _EXCLUDED_SUBMODULE_PREFIXES.get(package_name, ())
-
-    def include(module_name: str) -> bool:
-        return not any(
-            module_name == prefix or module_name.startswith(f"{prefix}.")
-            for prefix in excluded_prefixes
-        )
-
-    return include
 
 
 def is_rapid_model_file(source: str) -> bool:
@@ -101,27 +72,61 @@ def is_rapid_model_file(source: str) -> bool:
     return "/rapid_latex_ocr/models/" in normalized
 
 
+def is_downloadable_model_file(source: str) -> bool:
+    """Keep runtime-downloaded OCR weights out of redistributed builds."""
+
+    normalized = source.replace("\\", "/").lower()
+    return normalized.endswith(".onnx") and any(
+        path in normalized
+        for path in (
+            "/mathcraft_ocr/",
+            "/rapidocr/models/",
+            "/onnxruntime/datasets/",
+        )
+    )
+
+
 for package_name in (
     "rapid_latex_ocr",
     "latex2mathml",
-    "paddleocr",
-    "paddlex",
-    "paddle",
-    "onnxruntime",
-    "matplotlib",
+    "mathcraft_ocr",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(
         package_name,
         include_py_files=False,
-        filter_submodules=production_submodule(package_name),
     )
     if package_name == "rapid_latex_ocr":
         package_datas = [
             item for item in package_datas if not is_rapid_model_file(item[0])
         ]
+    package_datas = [
+        item for item in package_datas if not is_downloadable_model_file(item[0])
+    ]
     datas.extend(package_datas)
     binaries.extend(package_binaries)
     hiddenimports.extend(package_hiddenimports)
+
+# Runtime dependencies already have PyInstaller hooks or are reached through
+# MathCraft's static imports. Collect their non-Python resources and native
+# libraries without pulling optional training, CLI, test, Torch, or GPU trees.
+for package_name in (
+    "rapidocr",
+    "transformers",
+    "tokenizers",
+    "huggingface_hub",
+    "safetensors",
+    "omegaconf",
+    "yaml",
+    "cv2",
+    "onnxruntime",
+    "matplotlib",
+):
+    package_datas = collect_data_files(package_name, include_py_files=False)
+    package_datas = [
+        item for item in package_datas if not is_downloadable_model_file(item[0])
+    ]
+    datas.extend(package_datas)
+    binaries.extend(collect_dynamic_libs(package_name))
 
 
 analysis = Analysis(

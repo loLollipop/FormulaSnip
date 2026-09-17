@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from importlib.util import find_spec
 from pathlib import Path
+from threading import Lock
 from time import perf_counter
 from typing import Any
 
@@ -25,6 +26,7 @@ class RapidLatexBackend(RecognitionBackend):
 
     def __init__(self) -> None:
         self._model: Any | None = None
+        self._load_lock = Lock()
 
     @classmethod
     def is_available(cls) -> bool:
@@ -33,20 +35,23 @@ class RapidLatexBackend(RecognitionBackend):
     def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
-        if not self.is_available():
-            raise BackendUnavailableError(
-                f"尚未安装 {self.display_name}。请在项目目录运行：{self.install_hint}"
-            )
-        try:
-            configure_runtime()
-            from rapid_latex_ocr import LaTeXOCR
+        with self._load_lock:
+            if self._model is not None:
+                return self._model
+            if not self.is_available():
+                raise BackendUnavailableError(
+                    f"尚未安装 {self.display_name}。请在项目目录运行：{self.install_hint}"
+                )
+            try:
+                configure_runtime()
+                from rapid_latex_ocr import LaTeXOCR
 
-            self._model = LaTeXOCR(config_path=_CONFIG_PATH)
-        except Exception as exc:
-            raise RecognitionError(
-                "RapidLaTeXOCR 初始化失败。第一次使用需要联网下载模型，之后可以离线运行。"
-            ) from exc
-        return self._model
+                self._model = LaTeXOCR(config_path=_CONFIG_PATH)
+            except Exception as exc:
+                raise RecognitionError(
+                    "RapidLaTeXOCR 初始化失败。第一次使用需要联网下载模型，之后可以离线运行。"
+                ) from exc
+            return self._model
 
     def recognize(self, image: Image.Image) -> RecognitionResult:
         rgb_array = np.ascontiguousarray(np.asarray(image.convert("RGB"), dtype=np.uint8))

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from typing import Any
@@ -54,9 +53,15 @@ def test_source_console_and_non_windows_processes_are_unchanged(
     assert subprocess.Popen is original
 
 
-def test_runtime_disables_model_source_check_before_model_imports(
+def test_configure_runtime_applies_both_windowed_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "False")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        runtime, "_configure_windowed_subprocesses", lambda: calls.append("subprocesses")
+    )
+    monkeypatch.setattr(runtime, "_configure_windowed_streams", lambda: calls.append("streams"))
+
     runtime.configure_runtime()
-    assert os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] == "True"
+
+    assert calls == ["subprocesses", "streams"]

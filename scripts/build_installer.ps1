@@ -60,14 +60,17 @@ if (
 ) {
     throw "Rapid model weights were found in the portable directory. Remove them or rebuild before creating a redistributable installer."
 }
-$paddleWeights = Get-ChildItem `
+$mathCraftWeights = Get-ChildItem `
     -LiteralPath $applicationDirectory `
     -Recurse `
     -File `
-    -Filter "inference.pdiparams" |
+    -Filter "*.onnx" |
+    Where-Object {
+        $_.FullName -match '[\\/](mathcraft_ocr|rapidocr|onnxruntime[\\/]datasets)[\\/]'
+    } |
     Select-Object -First 1
-if ($null -ne $paddleWeights) {
-    throw "Paddle model weights were found in the portable directory: $($paddleWeights.FullName)"
+if ($null -ne $mathCraftWeights) {
+    throw "MathCraft/RapidOCR model weights were found in the portable directory: $($mathCraftWeights.FullName)"
 }
 
 if (-not $IsccPath) {

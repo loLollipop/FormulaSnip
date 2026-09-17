@@ -104,7 +104,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the FormulaSnip recognition benchmark.")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument(
-        "--backend", choices=("auto", "rapid", "paddle", "fake"), default="auto"
+        "--backend", choices=("auto", "rapid", "mathcraft", "fake"), default="auto"
     )
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--output", type=Path)

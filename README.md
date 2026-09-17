@@ -19,7 +19,7 @@ FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别�
 ## 功能
 
 - 点击悬浮球，框选并识别公式；
-- 内置 RapidLaTeXOCR 与 PP-FormulaNet-S 双识别引擎；
+- 内置 RapidLaTeXOCR 与 MathCraft OCR 0.3.1 CPU 双识别引擎；
 - 提供智能、快速、精确三种识别模式；
 - 显示 SVG 电子公式预览，方便识别后校对；
 - 一键复制 LaTeX 或 MathML，复制后自动收起结果面板；
@@ -57,7 +57,7 @@ FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别�
 |---|---|
 | 智能 | 默认模式，先快速识别，复杂公式或疑似异常结果再由第二引擎复核 |
 | 快速 | 使用 RapidLaTeXOCR，适合清晰、结构简单的公式 |
-| 精确 | 使用 PP-FormulaNet-S，适合复杂公式 |
+| 精确 | 使用 MathCraft OCR CPU，适合复杂公式 |
 
 公式识别无法保证完全正确，请在粘贴前核对电子公式预览。
 
