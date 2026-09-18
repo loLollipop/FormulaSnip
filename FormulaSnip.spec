@@ -24,6 +24,9 @@ datas = [
 binaries = []
 hiddenimports = [
     "PySide6.QtSvgWidgets",
+    # Figure.savefig resolves output backends by format at runtime, so the SVG
+    # canvas used by mathtext is not visible to PyInstaller's static analysis.
+    "matplotlib.backends.backend_svg",
     # MathCraft loads these formula-profile classes through Transformers'
     # lazy module registry, which static analysis cannot see.
     "transformers.models.auto.tokenization_auto",

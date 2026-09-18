@@ -918,6 +918,70 @@ def test_model_list_is_loaded_from_configured_upstream_and_sorted() -> None:
     assert response.closed is True
 
 
+def test_loopback_http_model_request_ignores_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_requests: list[str | None] = []
+    proxy_requests: list[str] = []
+
+    class LocalHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            local_requests.append(self.headers.get("Authorization"))
+            content = json.dumps({"data": [{"id": "local-vision"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            pass
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            proxy_requests.append(self.path)
+            content = json.dumps({"data": [{"id": "proxy-intercepted"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            pass
+
+    local_server = ThreadingHTTPServer(("127.0.0.1", 0), LocalHandler)
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    local_server.daemon_threads = True
+    proxy_server.daemon_threads = True
+    local_thread = threading.Thread(target=local_server.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    local_thread.start()
+    proxy_thread.start()
+    proxy_url = f"http://127.0.0.1:{proxy_server.server_port}"
+    for variable in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(variable, proxy_url)
+    for variable in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(variable, "")
+
+    try:
+        models = list_compatible_models(
+            "loopback-secret-token",
+            f"http://127.0.0.1:{local_server.server_port}/v1",
+        )
+    finally:
+        local_server.shutdown()
+        proxy_server.shutdown()
+        local_server.server_close()
+        proxy_server.server_close()
+        local_thread.join(timeout=2)
+        proxy_thread.join(timeout=2)
+
+    assert models == ("local-vision",)
+    assert local_requests == ["Bearer loopback-secret-token"]
+    assert proxy_requests == []
+
+
 def test_model_access_check_runs_tiny_multimodal_request() -> None:
     client = FakeClient(
         post_response=FakeResponse(200, _chat_payload("x"))

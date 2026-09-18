@@ -25,6 +25,18 @@ def test_quality_allows_negative_arrow_and_control_words() -> None:
     assert assess_latex(r"-x + \sqrt{x} \longrightarrow y").issues == ()
 
 
+@pytest.mark.parametrize(
+    "latex",
+    (r"\text{(}", r"\operatorname{foo(}", r"\verb|(|"),
+)
+def test_quality_ignores_delimiters_in_literal_contexts(latex: str) -> None:
+    assert "括号不配对" not in assess_latex(latex).issues
+
+
+def test_quality_still_detects_real_unbalanced_grouping() -> None:
+    assert "括号不配对" in assess_latex(r"\frac{x}{y").issues
+
+
 def test_quality_checks_environments_and_left_right_pairs() -> None:
     valid = (
         r"\begin{cases}\begin{matrix}a & b \\ c & d\end{matrix}\end{cases}"
@@ -122,13 +134,9 @@ def test_complex_image_layout_uses_foreground_not_rapid_text() -> None:
 
 
 @pytest.mark.parametrize("latex", (
-    r"\frac{\tilde C u}{\tilde Q t}",
-    r"\frac{\widetilde{\sigma} u}{x}",
-    r"\frac{u}{\widetilde C x}",
     r"\frac{partial u}{partial x}",
     r"\hat{\partial} u",
-    r"\frac{\hat C u}{\bar Q t}",
-    r"\frac{\overline{x}}{\ddot y}",
+    r"\widetilde\partial_t u",
 ))
 def test_derivative_confusions_are_review_hints_without_rewriting(latex: str) -> None:
     assert has_suspected_derivative_confusion(latex)
@@ -137,6 +145,11 @@ def test_derivative_confusions_are_review_hints_without_rewriting(latex: str) ->
 
 @pytest.mark.parametrize("latex", (
     r"\frac{\partial u}{\partial x}",
+    r"\frac{\tilde C u}{\tilde Q t}",
+    r"\frac{\widetilde{\sigma} u}{x}",
+    r"\frac{u}{\widetilde C x}",
+    r"\frac{\hat C u}{\bar Q t}",
+    r"\frac{\overline{x}}{\ddot y}",
     r"\tilde x + \widetilde\sigma",
     r"\frac{\text{partial}}{x}",
     r"\text{\frac{\tilde C}{x}}",

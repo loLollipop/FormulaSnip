@@ -11,9 +11,9 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage, QPixmap
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QScrollArea, QSystemTrayIcon
 
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
@@ -618,7 +618,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.6" in panel.update_version_label.text()
+    assert "v0.2.7" in panel.update_version_label.text()
     assert all(
         dot.property("available") == "false"
         for dot in panel.engine_status_dots.values()
@@ -1198,8 +1198,9 @@ def test_system_tray_activation_routes_and_protects_active_capture(
     tray.activated.emit(QSystemTrayIcon.ActivationReason.Context)
     assert activations == ["double-click"]
 
+    trigger_timeout = QSignalSpy(assistant._tray_trigger_timer.timeout)
     tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
-    QTest.qWait(QApplication.doubleClickInterval() + 20)
+    assert trigger_timeout.wait(QApplication.doubleClickInterval() + 1000)
     assert activations == ["double-click", "trigger"]
 
     monkeypatch.undo()
@@ -1207,7 +1208,7 @@ def test_system_tray_activation_routes_and_protects_active_capture(
     assistant._worker = object()  # type: ignore[assignment]
     assistant._tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
     assistant._tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
-    QTest.qWait(QApplication.doubleClickInterval() + 20)
+    assert not assistant._tray_trigger_timer.isActive()
     assert assistant.settings_panel.isVisible()
     assert assistant._capture_pending is False
     assistant._worker = None
@@ -1681,6 +1682,11 @@ def test_recognition_terminal_signals_release_worker_and_image(
         settings=_settings(tmp_path),
         manager=Manager(),  # type: ignore[arg-type]
     )
+    # A one-thread pool makes the sentinel run on the same Qt pool thread as
+    # the worker. The global pool can choose another idle thread and leave the
+    # completed Python runnable in the original thread's bounded cache.
+    assistant._thread_pool = QThreadPool()
+    assistant._thread_pool.setMaxThreadCount(1)
     assistant.preferences = FloatingPreferences(
         ai_correction_enabled=terminal == "cancel",
     )

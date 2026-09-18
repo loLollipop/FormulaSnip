@@ -27,10 +27,6 @@ _ACCENTED_PARTIAL = re.compile(
     r"(?:\{\s*)*\\partial(?![A-Za-z])"
 )
 _FRACTION = re.compile(r"\\(?:frac|dfrac|tfrac)(?![A-Za-z])\s*\{")
-_ACCENT_SYMBOL = re.compile(
-    r"\\(?:tilde|widetilde|hat|widehat|bar|overline|dot|ddot)(?![A-Za-z])\s*"
-    r"(?:\{\s*(?:[A-Za-z]|\\[A-Za-z]+)\s*\}|[A-Za-z]|\\[A-Za-z]+)"
-)
 _PARTIAL_COMMAND = re.compile(r"\\partial(?![A-Za-z])")
 DERIVATIVE_CONFUSION_ISSUE = "疑似偏导符号与重音字符混淆，请对照原图"
 
@@ -47,7 +43,7 @@ def assess_latex(latex: str) -> QualityReport:
     issues: list[str] = []
     penalties: list[int] = []
     structural_latex = _mask_literal_contexts(latex)
-    if _has_unbalanced_delimiters(latex):
+    if _has_unbalanced_delimiters(structural_latex):
         issues.append("括号不配对")
         penalties.append(25)
     bare = sorted(set(_BARE_COMMAND.findall(latex)))
@@ -152,30 +148,13 @@ def has_complex_structure(latex: str) -> bool:
 def has_suspected_derivative_confusion(latex: str) -> bool:
     """Flag model confusions, never repair symbols or assert math correctness.
 
-    Tildes on single symbols inside fractions are ambiguous (legitimate ratios
-    also exist). They warrant comparison, while ordinary tildes outside fractions
-    and text mentioning `partial` do not. No image identity or target text is used.
+    Only direct evidence is considered: a bare ``partial`` token or a
+    ``\\partial`` command decorated with an accent. Ordinary accented symbols and
+    text mentioning ``partial`` do not trigger this hint.
     """
 
     value = _mask_literal_contexts(latex)
-    if _BARE_PARTIAL.search(value) or _ACCENTED_PARTIAL.search(value):
-        return True
-    for match in _FRACTION.finditer(value):
-        if not _is_active_command(value, match.start()):
-            continue
-        opening = match.end() - 1
-        for _argument in range(2):
-            end = _matching_group_end(value, opening)
-            if end is None:
-                break
-            if _ACCENT_SYMBOL.search(value[opening + 1 : end]):
-                return True
-            opening = end + 1
-            while opening < len(value) and value[opening].isspace():
-                opening += 1
-            if opening >= len(value) or value[opening] != "{":
-                break
-    return False
+    return bool(_BARE_PARTIAL.search(value) or _ACCENTED_PARTIAL.search(value))
 
 
 def has_clean_partial_command(latex: str) -> bool:

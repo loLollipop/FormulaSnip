@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 from typing import Any
 
 import pytest
 import requests
+from PySide6.QtCore import Qt
 
 from formulasnip.update import (
     INSTALLER_ARGUMENTS,
@@ -452,6 +455,72 @@ def test_cancelled_download_cleans_partial_and_stops_progress(tmp_path: Path) ->
     assert response.closed
 
 
+def test_cancelled_cached_installer_verification_preserves_complete_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import formulasnip.update as update_module
+
+    content = b"complete cached installer"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    destination = tmp_path / name
+    destination.write_bytes(content)
+    asset = UpdateAsset(
+        name,
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+
+    def cancel_during_hash(
+        _path: Path,
+        _cancel_event: object,
+    ) -> str:
+        raise UpdateCancelled("cancelled during hash")
+
+    monkeypatch.setattr(update_module, "_sha256_file", cancel_during_hash)
+
+    with pytest.raises(UpdateCancelled):
+        download_installer(
+            asset,
+            tmp_path,
+            cancel_event=UpdateCancellation(),
+        )
+
+    assert destination.read_bytes() == content
+
+
+def test_successful_cached_installer_prunes_only_older_formula_installers(
+    tmp_path: Path,
+) -> None:
+    content = b"current cached installer"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    destination = tmp_path / name
+    destination.write_bytes(content)
+    old_installer = tmp_path / "FormulaSnip-v0.2.6-windows-x64-setup.exe"
+    old_installer.write_bytes(b"old")
+    newer_installer = tmp_path / "FormulaSnip-v0.4.0-windows-x64-setup.exe"
+    newer_installer.write_bytes(b"newer")
+    unrelated = tmp_path / "AnotherApp-v1.0.0-windows-x64-setup.exe"
+    unrelated.write_bytes(b"keep")
+    partial = tmp_path / ".FormulaSnip-v0.2.5-windows-x64-setup.exe.part"
+    partial.write_bytes(b"keep partial")
+    asset = UpdateAsset(
+        name,
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+
+    assert download_installer(asset, tmp_path) == destination
+
+    assert destination.read_bytes() == content
+    assert not old_installer.exists()
+    assert newer_installer.read_bytes() == b"newer"
+    assert unrelated.read_bytes() == b"keep"
+    assert partial.read_bytes() == b"keep partial"
+
+
 def test_cancelled_update_worker_emits_no_completion_signal(monkeypatch: Any) -> None:
     from formulasnip.ui import update_dialog
 
@@ -469,9 +538,14 @@ def test_cancelled_update_worker_emits_no_completion_signal(monkeypatch: Any) ->
     monkeypatch.setattr(update_dialog, "fetch_latest_release", blocking_fetch)
     worker = update_dialog.UpdateCheckWorker("0.2.0")
     emitted: list[str] = []
-    worker.signals.available.connect(lambda _release: emitted.append("available"))
-    worker.signals.no_update.connect(lambda: emitted.append("none"))
-    worker.signals.failed.connect(lambda _message: emitted.append("failed"))
+    direct = Qt.ConnectionType.DirectConnection
+    worker.signals.available.connect(
+        lambda _release: emitted.append("available"), type=direct
+    )
+    worker.signals.no_update.connect(lambda: emitted.append("none"), type=direct)
+    worker.signals.failed.connect(
+        lambda _message: emitted.append("failed"), type=direct
+    )
     thread = Thread(target=worker.run)
     thread.start()
     assert entered.wait(1.0)
@@ -481,6 +555,133 @@ def test_cancelled_update_worker_emits_no_completion_signal(monkeypatch: Any) ->
 
     assert not thread.is_alive()
     assert emitted == []
+
+
+def test_update_check_worker_abandons_blocked_dns_after_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from formulasnip.ui import update_dialog
+
+    dns_entered = Event()
+    release_dns = Event()
+    late_call_done = Event()
+
+    def blocking_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
+        dns_entered.set()
+        assert release_dns.wait(2.0)
+        return []
+
+    def dns_blocked_fetch(
+        _version: str, *, cancel_event: UpdateCancellation
+    ) -> ReleaseInfo | None:
+        del cancel_event
+        try:
+            socket.getaddrinfo("github.com", 443)
+            return None
+        finally:
+            late_call_done.set()
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocking_getaddrinfo)
+    monkeypatch.setattr(update_dialog, "fetch_latest_release", dns_blocked_fetch)
+    worker = update_dialog.UpdateCheckWorker("0.2.0")
+    emitted: list[str] = []
+    worker.signals.available.connect(lambda _release: emitted.append("available"))
+    worker.signals.no_update.connect(lambda: emitted.append("none"))
+    worker.signals.failed.connect(lambda _message: emitted.append("failed"))
+    runnable = Thread(target=worker.run, daemon=True)
+    runnable.start()
+
+    try:
+        assert dns_entered.wait(1.0)
+        started = monotonic()
+        worker.cancel()
+        runnable.join(0.5)
+        elapsed = monotonic() - started
+
+        assert not runnable.is_alive()
+        assert elapsed < 0.5
+        assert emitted == []
+    finally:
+        release_dns.set()
+        runnable.join(1.0)
+
+    assert late_call_done.wait(1.0)
+    assert emitted == []
+
+
+def test_update_download_worker_abandons_blocked_dns_after_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from formulasnip.ui import update_dialog
+
+    dns_entered = Event()
+    release_dns = Event()
+    late_call_done = Event()
+
+    def blocking_getaddrinfo(*_args: object, **_kwargs: object) -> list[object]:
+        dns_entered.set()
+        assert release_dns.wait(2.0)
+        return []
+
+    def dns_blocked_download(
+        asset: UpdateAsset,
+        cache_directory: Path,
+        *,
+        progress: Any,
+        cancel_event: UpdateCancellation,
+    ) -> Path:
+        del cancel_event
+        try:
+            socket.getaddrinfo("github.com", 443)
+            progress(asset.size, asset.size)
+            return cache_directory / asset.name
+        finally:
+            late_call_done.set()
+
+    monkeypatch.setattr(socket, "getaddrinfo", blocking_getaddrinfo)
+    monkeypatch.setattr(update_dialog, "download_installer", dns_blocked_download)
+    asset = UpdateAsset(
+        "FormulaSnip-v0.3.0-windows-x64-setup.exe",
+        "https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/"
+        "FormulaSnip-v0.3.0-windows-x64-setup.exe",
+        1,
+        "0" * 64,
+    )
+    release = ReleaseInfo("0.3.0", "v0.3.0", "changes", asset)
+    worker = update_dialog.UpdateDownloadWorker(release, tmp_path)
+    emitted: list[str] = []
+    direct = Qt.ConnectionType.DirectConnection
+    worker.signals.progress.connect(
+        lambda _received, _total: emitted.append("progress"), type=direct
+    )
+    worker.signals.finished.connect(
+        lambda _path: emitted.append("finished"), type=direct
+    )
+    worker.signals.failed.connect(
+        lambda _message: emitted.append("failed"), type=direct
+    )
+    runnable = Thread(target=worker.run, daemon=True)
+    runnable.start()
+
+    try:
+        assert dns_entered.wait(1.0)
+        started = monotonic()
+        worker.cancel()
+        runnable.join(0.5)
+        elapsed = monotonic() - started
+
+        assert not runnable.is_alive()
+        assert elapsed < 0.5
+        assert emitted == []
+        assert worker.completed_path is None
+    finally:
+        release_dns.set()
+        runnable.join(1.0)
+
+    assert late_call_done.wait(1.0)
+    assert emitted == []
+    assert worker.completed_path is None
 
 
 def test_cached_installer_size_and_hash_are_both_checked(tmp_path: Path) -> None:

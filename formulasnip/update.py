@@ -819,7 +819,10 @@ def _download_installer(
             _raise_if_cancelled(cancel_event)
             if progress is not None:
                 progress(asset.size, asset.size)
+            _prune_retired_installers(cache_directory, asset.name)
             return destination
+        except UpdateCancelled:
+            raise
         except UpdateError:
             destination.unlink(missing_ok=True)
     response: Any = None
@@ -866,6 +869,7 @@ def _download_installer(
         _raise_if_cancelled(cancel_event)
         os.replace(partial, destination)
         verify_installer(destination, asset, cancel_event=cancel_event)
+        _prune_retired_installers(cache_directory, asset.name)
         return destination
     except requests.RequestException as exc:
         _raise_if_cancelled(cancel_event)
@@ -877,3 +881,28 @@ def _download_installer(
         partial.unlink(missing_ok=True)
         if response is not None and callable(getattr(response, "close", None)):
             response.close()
+
+
+def _prune_retired_installers(cache_directory: Path, current_name: str) -> None:
+    """Best-effort cleanup of older FormulaSnip installers in the update cache."""
+
+    current_match = _INSTALLER_PATTERN.fullmatch(current_name)
+    if current_match is None:
+        return
+    current_version = parse_version(current_match.group(1))
+    try:
+        entries = tuple(cache_directory.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name == current_name or not entry.is_file():
+            continue
+        candidate_match = _INSTALLER_PATTERN.fullmatch(entry.name)
+        if candidate_match is None:
+            continue
+        if parse_version(candidate_match.group(1)) >= current_version:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            continue

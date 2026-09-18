@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "formulasnip"
-version = "0.2.6"
+version = "0.2.7"
 description = "Offline Windows formula snipping and recognition prototype"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"

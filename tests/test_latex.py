@@ -106,12 +106,8 @@ def _mathml_tokens(mathml: str) -> list[tuple[str, str, dict[str, str]]]:
 
 
 def test_mathml_materializes_mathtype_operator_spacing() -> None:
-    tokens = _mathml_tokens(latex_to_mathml(r"a\!=\!b+c"))
+    tokens = _mathml_tokens(latex_to_mathml(r"a=b+c"))
 
-    assert not any(
-        name == "mspace" and attributes["width"].startswith(("-", "negative"))
-        for name, _text, attributes in tokens
-    )
     assert ("mo", "=", {"lspace": "0em", "rspace": "0em"}) in tokens
     assert ("mo", "+", {"lspace": "0em", "rspace": "0em"}) in tokens
     widths = [
@@ -120,6 +116,30 @@ def test_mathml_materializes_mathtype_operator_spacing() -> None:
         if name == "mspace"
     ]
     assert widths == ["0.278em", "0.278em", "0.222em", "0.222em"]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_widths"),
+    (
+        (r"a+b", ["0.222em", "0.222em"]),
+        (r"a\!+b", ["negativethinmathspace", "0.222em"]),
+        (r"a+\!b", ["0.222em", "negativethinmathspace"]),
+        (r"a\!+\!b", ["negativethinmathspace", "negativethinmathspace"]),
+        (r"a\;+\;b", ["0.278em", "0.278em"]),
+    ),
+)
+def test_mathml_preserves_explicit_operator_spacing_per_side(
+    source: str,
+    expected_widths: list[str],
+) -> None:
+    tokens = _mathml_tokens(latex_to_mathml(source))
+
+    assert [
+        attributes["width"]
+        for name, _text, attributes in tokens
+        if name == "mspace"
+    ] == expected_widths
+    assert ("mo", "+", {"lspace": "0em", "rspace": "0em"}) in tokens
 
 
 def test_mathml_does_not_space_prefix_minus_or_fences() -> None:
@@ -174,7 +194,7 @@ def test_mathml_respects_explicit_ord_and_materializes_unknown_mathbin() -> None
 
 
 def test_mathml_materializes_spacing_inside_display_style() -> None:
-    tokens = _mathml_tokens(latex_to_mathml(r"\displaystyle a\!=\!b"))
+    tokens = _mathml_tokens(latex_to_mathml(r"\displaystyle a=b"))
 
     assert ("mo", "=", {"lspace": "0em", "rspace": "0em"}) in tokens
     assert [

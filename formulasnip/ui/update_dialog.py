@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event, Thread
+from typing import TypeVar
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -23,6 +25,43 @@ from formulasnip.update import (
     download_installer,
     fetch_latest_release,
 )
+
+_CANCELLATION_POLL_SECONDS = 0.02
+_ResultT = TypeVar("_ResultT")
+
+
+def _run_abandonable(
+    operation: Callable[[], _ResultT],
+    cancellation: UpdateCancellation,
+    *,
+    thread_name: str,
+) -> _ResultT:
+    """Run blocking network work without pinning its QThreadPool thread on cancel."""
+    if cancellation.is_set():
+        raise UpdateCancelled("Update operation cancelled.")
+    completed = Event()
+    results: list[_ResultT] = []
+    failures: list[Exception] = []
+
+    def invoke() -> None:
+        try:
+            results.append(operation())
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            completed.set()
+
+    Thread(target=invoke, name=thread_name, daemon=True).start()
+    while not completed.wait(_CANCELLATION_POLL_SECONDS):
+        if cancellation.is_set():
+            raise UpdateCancelled("Update operation cancelled.")
+    if cancellation.is_set():
+        raise UpdateCancelled("Update operation cancelled.")
+    if failures:
+        raise failures[0]
+    if not results:
+        raise RuntimeError("The background update operation returned no result.")
+    return results[0]
 
 
 def format_size(size: int) -> str:
@@ -140,9 +179,13 @@ class UpdateCheckWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            release = fetch_latest_release(
-                self.current_version,
-                cancel_event=self._cancellation,
+            release = _run_abandonable(
+                lambda: fetch_latest_release(
+                    self.current_version,
+                    cancel_event=self._cancellation,
+                ),
+                self._cancellation,
+                thread_name="FormulaSnip-UpdateCheck",
             )
         except UpdateCancelled:
             return
@@ -186,11 +229,15 @@ class UpdateDownloadWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            path = download_installer(
-                self.release.asset,
-                self.cache_directory,
-                progress=self._publish_progress,
-                cancel_event=self._cancellation,
+            path = _run_abandonable(
+                lambda: download_installer(
+                    self.release.asset,
+                    self.cache_directory,
+                    progress=self._publish_progress,
+                    cancel_event=self._cancellation,
+                ),
+                self._cancellation,
+                thread_name="FormulaSnip-UpdateDownload",
             )
         except UpdateCancelled:
             return

@@ -174,11 +174,14 @@ def _space_mathml_row(row: ET.Element) -> None:
             index += 1
             continue
 
-        while rewritten and _is_negative_mspace(rewritten[-1]):
-            rewritten.pop()
+        has_explicit_left_space = bool(
+            rewritten and _local_name(rewritten[-1].tag) == "mspace"
+        )
+        has_explicit_right_space = bool(
+            index + 1 < len(children)
+            and _local_name(children[index + 1].tag) == "mspace"
+        )
         index += 1
-        while index < len(children) and _is_negative_mspace(children[index]):
-            index += 1
 
         if _local_name(child.tag) == "mi" and operator in {"±", "∓"}:
             child.tag = _qualified_name("mo")
@@ -186,13 +189,11 @@ def _space_mathml_row(row: ET.Element) -> None:
         right_space = _positive_operator_space(child.get("rspace"), spacing)
         child.set("lspace", "0em")
         child.set("rspace", "0em")
-        rewritten.extend(
-            (
-                _mathml_space(left_space),
-                child,
-                _mathml_space(right_space),
-            )
-        )
+        if not has_explicit_left_space:
+            rewritten.append(_mathml_space(left_space))
+        rewritten.append(child)
+        if not has_explicit_right_space:
+            rewritten.append(_mathml_space(right_space))
     row[:] = rewritten
 
 
@@ -252,13 +253,6 @@ def _positive_operator_space(value: str | None, fallback: str) -> str:
     if value and not value.strip().lower().startswith(("-", "negative")):
         return value
     return fallback
-
-
-def _is_negative_mspace(element: ET.Element) -> bool:
-    if _local_name(element.tag) != "mspace":
-        return False
-    width = element.get("width", "").strip().lower()
-    return width.startswith(("-", "negative"))
 
 
 def _mathml_space(width: str) -> ET.Element:

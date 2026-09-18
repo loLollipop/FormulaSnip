@@ -534,6 +534,8 @@ def _request_json_response(
     owned_session: requests.Session | None = None
     if client is requests:
         owned_session = requests.Session()
+        if _is_loopback_http_url(url):
+            owned_session.trust_env = False
         adapter = _CancellableHTTPAdapter(tracker)
         owned_session.mount("http://", adapter)
         owned_session.mount("https://", adapter)
@@ -611,6 +613,15 @@ def _request_json_response(
     if error is not None:
         raise error
     return state["payload"]
+
+
+def _is_loopback_http_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    return (
+        parsed.scheme.casefold() == "http"
+        and parsed.hostname is not None
+        and parsed.hostname.casefold() in _LOCAL_HTTP_HOSTS
+    )
 
 
 def _bounded_request_timeout(deadline: float) -> tuple[float, float]:

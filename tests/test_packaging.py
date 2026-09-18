@@ -24,6 +24,12 @@ def test_pyinstaller_collects_mathcraft_runtime_without_legacy_engine() -> None:
     assert "rapid-latex-ocr" not in spec
 
 
+def test_pyinstaller_collects_runtime_selected_svg_backend() -> None:
+    spec = (ROOT / "FormulaSnip.spec").read_text(encoding="utf-8")
+
+    assert '"matplotlib.backends.backend_svg"' in spec
+
+
 def test_installer_rejects_accidentally_packaged_onnx_weights() -> None:
     installer = (ROOT / "scripts" / "build_installer.ps1").read_text(encoding="utf-8")
 

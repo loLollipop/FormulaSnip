@@ -11,6 +11,48 @@ $installerScript = Join-Path $projectRoot "installer\FormulaSnip.iss"
 $pyprojectPath = Join-Path $projectRoot "pyproject.toml"
 $maximumReleaseNotesLength = 4000
 
+function Get-SingleVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+        throw "Version source was not found: $LiteralPath"
+    }
+    $resolvedPath = (Resolve-Path -LiteralPath $LiteralPath).Path
+    $content = [System.IO.File]::ReadAllText(
+        $resolvedPath,
+        [System.Text.Encoding]::UTF8
+    )
+    $matches = [System.Text.RegularExpressions.Regex]::Matches(
+        $content,
+        $Pattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline
+    )
+    if ($matches.Count -ne 1) {
+        throw "Unable to read exactly one version from $Label."
+    }
+    return $matches[0].Groups[1].Value
+}
+
+$appVersion = Get-SingleVersion `
+    -LiteralPath $pyprojectPath `
+    -Pattern '^version\s*=\s*"([^"]+)"\s*$' `
+    -Label "pyproject.toml"
+$packageVersion = Get-SingleVersion `
+    -LiteralPath (Join-Path $projectRoot "formulasnip\__init__.py") `
+    -Pattern '^__version__\s*=\s*"([^"]+)"\s*$' `
+    -Label "formulasnip/__init__.py"
+$installerVersion = Get-SingleVersion `
+    -LiteralPath $installerScript `
+    -Pattern '^\s*#define\s+AppVersion\s+"([^"]+)"\s*$' `
+    -Label "installer/FormulaSnip.iss"
+if ($appVersion -ne $packageVersion -or $appVersion -ne $installerVersion) {
+    throw "Version mismatch: pyproject.toml=$appVersion, formulasnip/__init__.py=$packageVersion, installer/FormulaSnip.iss=$installerVersion."
+}
+
 if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
     throw "FormulaSnip installers must be built on Windows."
 }
@@ -29,12 +71,6 @@ Copy-Item `
     -Destination $applicationDirectory `
     -Recurse `
     -Force
-
-$versionMatch = Select-String -LiteralPath $pyprojectPath -Pattern '^version = "([^"]+)"$'
-if ($null -eq $versionMatch -or $versionMatch.Matches.Count -ne 1) {
-    throw "Unable to read one project version from pyproject.toml."
-}
-$appVersion = $versionMatch.Matches[0].Groups[1].Value
 
 if ([string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
     $ReleaseNotesPath = Join-Path $projectRoot "RELEASE_NOTES.md"
