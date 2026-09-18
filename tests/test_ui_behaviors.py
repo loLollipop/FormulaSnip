@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import os
+import time
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -8,15 +11,16 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QSettings, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea, QSystemTrayIcon
 
-from formulasnip.domain import RecognitionResult
+from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.ui import floating
 from formulasnip.ui import settings as settings_ui
+from formulasnip.ui import worker as worker_module
 from formulasnip.ui.branding import application_icon, tutorial_formula_image
 from formulasnip.ui.floating import (
     FloatingFormulaAssistant,
@@ -47,6 +51,23 @@ def _settings(tmp_path: Path) -> QSettings:
     return settings
 
 
+class FakeApiKeyStore:
+    def __init__(self, key: str | None = None) -> None:
+        self.key = key
+
+    def load(self) -> str | None:
+        return self.key
+
+    def has_key(self) -> bool:
+        return self.key is not None
+
+    def save(self, value: str) -> None:
+        self.key = value
+
+    def delete(self) -> None:
+        self.key = None
+
+
 class MouseRelease:
     @staticmethod
     def button() -> Qt.MouseButton:
@@ -55,6 +76,22 @@ class MouseRelease:
     @staticmethod
     def position() -> QPointF:
         return QPointF(40, 40)
+
+
+class FakeCloseEvent:
+    def __init__(self, *, spontaneous: bool) -> None:
+        self._spontaneous = spontaneous
+        self.accepted = False
+        self.ignored = False
+
+    def spontaneous(self) -> bool:
+        return self._spontaneous
+
+    def accept(self) -> None:
+        self.accepted = True
+
+    def ignore(self) -> None:
+        self.ignored = True
 
 
 def test_overlay_is_lighter_uses_visible_cursor_and_preserves_cancel_semantics() -> None:
@@ -150,6 +187,120 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     application.processEvents()
 
 
+def test_result_panel_switches_disagreeing_local_and_ai_candidates(
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    local = RecognitionCandidate("x", "MathCraft", 0.2, source="local")
+    ai = RecognitionCandidate("y", "AI · vision-model", 0.3, source="ai")
+    result = RecognitionResult(
+        "y",
+        ai.backend,
+        0.35,
+        "ai-parallel",
+        ("本地与 AI 结果不一致，可切换对照后复制。",),
+        (local, ai),
+        "different",
+    )
+    drafts: list[str] = []
+    sources: list[str] = []
+    panel.draft_changed.connect(drafts.append)
+    panel.source_changed.connect(sources.append)
+    converted: list[str] = []
+    monkeypatch.setattr(
+        floating,
+        "latex_to_mathml",
+        lambda latex: converted.append(latex) or f"<math><mi>{latex}</mi></math>",
+    )
+
+    panel.show_result(result, QRect(20, 20, 68, 68))
+    assert panel.source_switch.isVisible()
+    assert panel.ai_result_button.isChecked()
+    assert panel.latex_view.toPlainText() == "y"
+    assert "AI · vision-model" in panel.backend_label.text()
+
+    panel.local_result_button.click()
+    assert panel.latex_view.toPlainText() == "x"
+    assert "MathCraft" in panel.backend_label.text()
+    assert sources == ["local"]
+    assert panel.svg_preview.renderer().isValid()
+    panel.latex_view.setPlainText("edited")
+    assert panel.source_switch.isVisible()
+    panel.local_result_button.click()
+    assert panel.latex_view.toPlainText() == "x"
+    assert drafts[-1] == "x"
+
+    panel.ai_result_button.click()
+    assert sources == ["local", "ai"]
+    panel.copy_mathml_button.click()
+    assert converted == ["y"]
+    assert QApplication.clipboard().text() == "<math><mi>y</mi></math>"
+    QApplication.clipboard().clear()
+    panel.close()
+    application.processEvents()
+
+
+def test_result_panel_restores_explicit_local_source_for_edited_draft() -> None:
+    panel = FloatingResultPanel()
+    local = RecognitionCandidate("local-x", "MathCraft", 0.2, source="local")
+    ai = RecognitionCandidate("ai-y", "AI · vision-model", 0.3, source="ai")
+    result = RecognitionResult(
+        ai.latex,
+        ai.backend,
+        0.35,
+        "ai-parallel",
+        ("本地与 AI 结果不一致，可切换对照后复制。",),
+        (local, ai),
+        "different",
+    )
+
+    panel.show_result(
+        result,
+        QRect(20, 20, 68, 68),
+        draft="local-edited",
+        source="local",
+    )
+
+    assert panel.local_result_button.isChecked()
+    assert not panel.ai_result_button.isChecked()
+    assert panel.latex_view.toPlainText() == "local-edited"
+    assert "MathCraft" in panel.backend_label.text()
+    panel.close()
+
+
+def test_result_error_clears_status_from_previous_result() -> None:
+    panel = FloatingResultPanel()
+    anchor = QRect(20, 20, 68, 68)
+    panel.show_result(RecognitionResult("x", "Rapid", 0.1), anchor)
+    panel.latex_view.setPlainText("edited")
+    panel._refresh_edited_preview()
+    assert panel.status_label.text() == "预览已更新"
+
+    panel.show_error("识别失败", anchor)
+
+    assert panel.status_label.text() == ""
+    panel.close()
+
+
+@pytest.mark.parametrize("comparison", ("equivalent", "not_compared"))
+def test_result_panel_hides_source_switch_without_a_real_disagreement(
+    comparison: str,
+) -> None:
+    panel = FloatingResultPanel()
+    alternatives = (
+        RecognitionCandidate("x", "MathCraft", 0.1, source="local"),
+        RecognitionCandidate("x", "AI", 0.1, source="ai"),
+    )
+    panel.show_result(
+        RecognitionResult("x", "AI", 0.1, alternatives=alternatives, comparison=comparison),
+        QRect(20, 20, 68, 68),
+    )
+
+    assert panel.source_switch.isHidden()
+    panel.close()
+
+
 def test_mathml_conversion_failure_keeps_result_visible(monkeypatch: Any) -> None:
     application = _application()
     panel = FloatingResultPanel()
@@ -174,11 +325,7 @@ def test_result_panel_surfaces_derivative_review_warning() -> None:
         r"\frac{\partial u}{\partial t}",
         "MathCraft",
         0.2,
-        strategy="auto-reviewed",
-        warnings=(
-            "智能模式已用 MathCraft OCR 复核。",
-            "Rapid 候选疑似偏导符号与重音字符混淆，请对照原图重点校对。",
-        ),
+        warnings=("识别结果疑似偏导符号混淆，请对照原图重点校对。",),
     )
 
     panel.show_result(result, QRect(20, 20, 68, 68))
@@ -298,10 +445,10 @@ def test_model_warmup_worker_continues_after_failure() -> None:
 
     class Manager:
         def warmup(self, key: str) -> None:
-            if key == "rapid":
+            if key == "broken":
                 raise RuntimeError("boom")
 
-    worker = ModelWarmupWorker(Manager(), ("rapid", "mathcraft"))  # type: ignore[arg-type]
+    worker = ModelWarmupWorker(Manager(), ("broken", "mathcraft"))  # type: ignore[arg-type]
     worker.signals.started.connect(lambda key: events.append(("started", key)))
     worker.signals.succeeded.connect(lambda key: events.append(("succeeded", key)))
     worker.signals.failed.connect(
@@ -312,8 +459,8 @@ def test_model_warmup_worker_continues_after_failure() -> None:
     worker.run()
 
     assert events == [
-        ("started", "rapid"),
-        ("failed", "rapid", "boom"),
+        ("started", "broken"),
+        ("failed", "broken", "boom"),
         ("started", "mathcraft"),
         ("succeeded", "mathcraft"),
         ("finished",),
@@ -348,8 +495,8 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
     assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "正在初始化"
     worker.signals.succeeded.emit("mathcraft")
     assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "已初始化"
-    worker.signals.failed.emit("rapid", "offline")
-    assert "初始化失败" in assistant.settings_panel.engine_status_labels["rapid"].text()
+    worker.signals.failed.emit("mathcraft", "offline")
+    assert "初始化失败" in assistant.settings_panel.engine_status_labels["mathcraft"].text()
     worker.signals.finished.emit()
     assert assistant._warmup_worker is None
     assistant.orb.close()
@@ -388,7 +535,7 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
     apply_application_theme("dark")
 
 
-def test_auto_startup_warms_both_engines_and_shutdown_closes_manager(
+def test_startup_warms_mathcraft_and_shutdown_closes_manager(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     _application()
@@ -398,7 +545,7 @@ def test_auto_startup_warms_both_engines_and_shutdown_closes_manager(
     monkeypatch.setattr(assistant._thread_pool, "start", started.append)
     monkeypatch.setattr(assistant.manager, "close", lambda: closed.append(True))
     assistant.start_model_warmup()
-    assert started[0].backend_keys == ("rapid", "mathcraft")
+    assert started[0].backend_keys == ("mathcraft",)
     assistant.shutdown()
     assert closed == [True]
 
@@ -406,8 +553,8 @@ def test_auto_startup_warms_both_engines_and_shutdown_closes_manager(
 @pytest.mark.parametrize(
     ("mode", "expected"),
     (
-        ("auto", ("rapid", "mathcraft")),
-        ("rapid", ("rapid",)),
+        ("auto", ("mathcraft",)),
+        ("rapid", ("mathcraft",)),
         ("mathcraft", ("mathcraft",)),
     ),
 )
@@ -471,7 +618,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.5" in panel.update_version_label.text()
+    assert "v0.2.6" in panel.update_version_label.text()
     assert all(
         dot.property("available") == "false"
         for dot in panel.engine_status_dots.values()
@@ -525,28 +672,61 @@ def test_appearance_page_uses_reference_stage_and_swatch_sizes(tmp_path: Path) -
     panel.hide()
 
 
-def test_mode_cards_replace_visible_combo_and_persist_selection(tmp_path: Path) -> None:
+def test_recognition_page_only_shows_mathcraft(tmp_path: Path) -> None:
     _application()
     settings = _settings(tmp_path)
     panel = SettingsPanel(settings, FloatingPreferences())
-    changed: list[FloatingPreferences] = []
-    panel.preferences_changed.connect(changed.append)
-
     assert panel.mode_combo.isHidden()
-    assert set(panel.mode_cards) == {"auto", "rapid", "mathcraft"}
-    panel.mode_cards["rapid"].click()
-
-    assert panel.mode_combo.currentData() == "rapid"
-    assert panel.mode_cards["rapid"].isChecked()
-    assert settings.value("recognition/mode") == "rapid"
-    assert changed[-1].recognition_mode == "rapid"
-    assert panel.overview_mode_name.text() == "快速"
-    assert panel.overview_mode_tag.text() == "轻量"
-    assert panel.mode_summary_label.text() == "只运行 RapidLaTeXOCR"
+    assert set(panel.mode_cards) == {"mathcraft"}
+    assert panel.mode_combo.currentData() == "mathcraft"
+    assert panel.mode_cards["mathcraft"].isChecked()
+    assert panel.overview_mode_name.text() == "MathCraft OCR"
+    assert panel.overview_mode_tag.text() == "CPU"
+    assert panel.mode_summary_label.text() == "本地单引擎公式识别"
     assert panel.mode_summary_label.isHidden()
+    assert "Rapid" not in "".join(
+        widget.text() for widget in panel.findChildren(settings_ui.QLabel)
+    )
     assert panel.recognition_page.findChild(
         settings_ui.QWidget, "RecognitionTriggerCard"
     ) is None
+    panel.hide()
+
+
+def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
+    tmp_path: Path,
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    key_store = FakeApiKeyStore()
+    panel = SettingsPanel(
+        settings,
+        FloatingPreferences(),
+        api_key_store=key_store,  # type: ignore[arg-type]
+    )
+
+    assert panel.ai_correction_toggle.isChecked() is False
+    assert panel.ai_correction_toggle.isEnabled() is False
+    panel.ai_api_key_input.setText("unit-test-token")
+    panel.ai_save_key_button.click()
+    assert key_store.key == "unit-test-token"
+    assert panel.ai_api_key_input.text() == ""
+    assert panel.ai_correction_toggle.isEnabled() is True
+    assert "Windows 凭据管理器" in panel.ai_key_status_label.text()
+
+    panel.ai_correction_toggle.click()
+    assert panel.preferences.ai_correction_enabled is True
+    assert settings.value("recognition/ai_correction_enabled") is True
+    assert all(
+        "unit-test-token" not in str(settings.value(key))
+        for key in settings.allKeys()
+    )
+
+    panel.ai_delete_key_button.click()
+    assert key_store.key is None
+    assert panel.ai_correction_toggle.isChecked() is False
+    assert panel.preferences.ai_correction_enabled is False
+    assert settings.value("recognition/ai_correction_enabled") is False
     panel.hide()
 
 
@@ -578,45 +758,231 @@ def test_legacy_preferences_migrate_to_ring_and_global_theme(tmp_path: Path) -> 
     assert settings.value("appearance/theme") == "light"
 
 
-def test_legacy_mode_migrates_to_auto_when_mathcraft_is_unavailable(
-    tmp_path: Path, monkeypatch: Any
+@pytest.mark.parametrize("stored_mode", ("auto", "rapid", "paddle", "unknown"))
+def test_legacy_mode_migrates_to_mathcraft_and_persists(
+    tmp_path: Path, monkeypatch: Any, stored_mode: str
 ) -> None:
     monkeypatch.setattr(
         settings_ui,
         "backend_summaries",
-        lambda: (("rapid", "Rapid", True), ("mathcraft", "MathCraft", False)),
+        lambda: (("mathcraft", "MathCraft", False),),
     )
     settings = _settings(tmp_path)
-    settings.setValue("recognition/mode", "paddle")
+    settings.setValue("recognition/mode", stored_mode)
 
     preferences = FloatingPreferences.load(settings)
     panel = SettingsPanel(settings, preferences)
     mathcraft_index = panel.mode_combo.findData("mathcraft")
     mathcraft_item = panel.mode_combo.model().item(mathcraft_index)
 
-    assert preferences.recognition_mode == "auto"
-    assert panel.mode_combo.currentData() == "auto"
+    assert settings.value("recognition/mode") == "mathcraft"
+    assert panel.mode_combo.currentData() == "mathcraft"
     assert mathcraft_item is not None
     assert not mathcraft_item.isEnabled()
     assert not panel.mode_cards["mathcraft"].isEnabled()
     panel.close()
 
 
-def test_legacy_mode_migrates_to_mathcraft_when_available(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
-    monkeypatch.setattr(
-        settings_ui,
-        "backend_summaries",
-        lambda: (("rapid", "Rapid", True), ("mathcraft", "MathCraft", True)),
-    )
+def test_preferences_save_always_writes_mathcraft(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    settings.setValue("recognition/mode", "paddle")
+    preferences = FloatingPreferences("rapid")
+    preferences.save(settings)
 
-    preferences = FloatingPreferences.load(settings)
-
-    assert preferences.recognition_mode == "mathcraft"
     assert settings.value("recognition/mode") == "mathcraft"
+
+
+def test_ai_provider_preferences_round_trip_without_api_key(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    preferences = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://gateway.example/v1/",
+        ai_model="vision-model",
+    )
+
+    preferences.save(settings)
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.ai_correction_enabled is True
+    assert loaded.ai_base_url == "https://gateway.example/v1"
+    assert loaded.ai_model == "vision-model"
+    assert all("key" not in key.casefold() for key in settings.allKeys())
+
+
+def test_unsafe_ai_provider_url_is_not_persisted(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://gateway.example/v1?api_key=secret"
+    ).save(settings)
+
+    assert settings.value("recognition/ai_base_url") == "https://api.openai.com/v1"
+    assert settings.value("recognition/ai_correction_enabled") is False
+
+
+def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/ai_correction_enabled", True)
+    settings.setValue("recognition/ai_base_url", "http://remote.example/v1")
+    settings.setValue("recognition/ai_model", "vision-model")
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.ai_correction_enabled is False
+    assert loaded.ai_base_url == "https://api.openai.com/v1"
+    assert settings.value("recognition/ai_correction_enabled") is False
+
+
+def test_stale_model_list_does_not_overwrite_new_provider_config(
+    tmp_path: Path,
+) -> None:
+    _application()
+    panel = SettingsPanel(
+        _settings(tmp_path),
+        FloatingPreferences(),
+        api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
+    )
+
+    class PendingWorker:
+        action = "list"
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    worker = PendingWorker()
+    panel._ai_model_worker = worker  # type: ignore[assignment]
+    panel._ai_active_context = (
+        "list",
+        "https://first.example/v1",
+        "gpt-5.6-luna",
+        0,
+    )
+    panel.ai_refresh_models_button.setEnabled(False)
+    panel.ai_test_connection_button.setEnabled(False)
+    panel.ai_base_url_input.setText("https://second.example/v1")
+
+    assert worker.cancelled is True
+    assert panel._ai_model_worker is None
+    assert panel.ai_refresh_models_button.isEnabled()
+    assert panel.ai_test_connection_button.isEnabled()
+    assert "已取消" in panel.ai_connection_status_label.text()
+
+    replacement_worker = PendingWorker()
+    panel._ai_model_worker = replacement_worker  # type: ignore[assignment]
+    panel._ai_active_context = (
+        "list",
+        "https://second.example/v1",
+        "gpt-5.6-luna",
+        0,
+    )
+    panel.ai_refresh_models_button.setEnabled(False)
+    panel.ai_test_connection_button.setEnabled(False)
+    panel._set_ai_connection_status("正在执行新请求")
+
+    panel._ai_model_request_succeeded(  # type: ignore[arg-type]
+        worker, ("first-only-model",)
+    )
+    panel._ai_model_request_finished(worker)  # type: ignore[arg-type]
+
+    assert panel.ai_model_combo.findText("first-only-model") == -1
+    assert panel._ai_model_worker is replacement_worker
+    assert not panel.ai_refresh_models_button.isEnabled()
+    assert not panel.ai_test_connection_button.isEnabled()
+    assert panel.ai_connection_status_label.text() == "正在执行新请求"
+    panel.cancel_ai_request()
+    panel.hide()
+
+
+@pytest.mark.parametrize("terminal", ("success", "failure", "cancel"))
+def test_ai_model_request_terminal_releases_workers(
+    terminal: str,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    panel = SettingsPanel(
+        _settings(tmp_path),
+        FloatingPreferences(),
+        api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
+    )
+
+    def request_models(*_args: Any, **kwargs: Any) -> tuple[str, ...]:
+        if terminal == "cancel":
+            assert kwargs["cancel_event"].is_set()
+            raise settings_ui.AICorrectionError("request cancelled")
+        if terminal == "failure":
+            raise settings_ui.AICorrectionError("request failed")
+        return ("vision-model",)
+
+    monkeypatch.setattr(worker_module, "list_compatible_models", request_models)
+
+    class Pool:
+        worker: Any = None
+
+        def start(self, worker: Any) -> None:
+            self.worker = worker
+            if terminal != "cancel":
+                worker.run()
+
+    pool = Pool()
+
+    class ThreadPool:
+        globalInstance = staticmethod(lambda: pool)  # noqa: N815
+
+    monkeypatch.setattr(settings_ui, "QThreadPool", ThreadPool)
+    worker_refs: list[weakref.ReferenceType[Any]] = []
+
+    for _ in range(20):
+        panel._start_ai_model_request("list")
+        worker = pool.worker
+        assert worker is not None
+        worker_refs.append(weakref.ref(worker))
+        if terminal == "cancel":
+            panel.cancel_ai_request()
+            worker.run()
+        pool.worker = None
+        del worker
+
+    application.processEvents()
+    gc.collect()
+
+    assert sum(worker_ref() is not None for worker_ref in worker_refs) == 0
+    panel.hide()
+
+
+def test_replacing_ai_key_cancels_active_recognition_without_preference_change(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    key_store = FakeApiKeyStore("initial-placeholder")
+    monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/ai_correction_enabled", True)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    initial_preferences = assistant.preferences
+
+    class ActiveWorker:
+        cancel_count = 0
+
+        def cancel(self) -> None:
+            self.cancel_count += 1
+
+    worker = ActiveWorker()
+    assistant._worker = worker  # type: ignore[assignment]
+    assistant.settings_panel.ai_api_key_input.setText("replacement-placeholder")
+    assistant.settings_panel.ai_save_key_button.click()
+
+    assert worker.cancel_count == 1
+    assert assistant._worker is worker
+    assert assistant.preferences == initial_preferences
+    assert all(
+        "placeholder" not in str(settings.value(key)) for key in settings.allKeys()
+    )
+    assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
 
 
 def test_ring_color_validation_is_strict_and_canonical() -> None:
@@ -705,6 +1071,271 @@ def test_settings_close_returns_to_floating_mode(tmp_path: Path) -> None:
     assistant.panel.close()
 
 
+def test_system_tray_uses_branding_and_expected_menu(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: True),
+    )
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+
+    tray = assistant._tray_icon
+    menu = assistant._tray_menu
+    assert tray is not None
+    assert menu is not None
+    assert tray.isVisible()
+    assert tray.icon().cacheKey() == application_icon().cacheKey()
+    assert tray.toolTip() == "FormulaSnip 公式识别"
+    assert [action.text() for action in menu.actions()] == [
+        "开始识别",
+        "显示悬浮球",
+        "打开设置",
+        "检查更新",
+        "",
+        "退出软件",
+    ]
+    assert menu.actions()[4].isSeparator()
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_system_tray_actions_route_to_existing_workflows(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: True),
+    )
+    scheduled: list[Any] = []
+    monkeypatch.setattr(
+        floating.QTimer,
+        "singleShot",
+        lambda _milliseconds, callback: scheduled.append(callback),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assert assistant._tray_menu is not None
+    actions = {
+        action.text(): action
+        for action in assistant._tray_menu.actions()
+        if not action.isSeparator()
+    }
+
+    assistant.open_settings()
+    actions["开始识别"].trigger()
+    assert assistant.settings_panel.isHidden()
+    assert assistant._capture_pending is True
+    assert scheduled == [assistant._show_screen_overlay]
+    assistant._capture_cancelled()
+
+    assistant.open_settings()
+    actions["显示悬浮球"].trigger()
+    assert assistant.settings_panel.isHidden()
+    assert assistant.orb.isVisible()
+
+    actions["打开设置"].trigger()
+    assert assistant.settings_panel.isVisible()
+    assert assistant.orb.isHidden()
+
+    update_requests: list[bool] = []
+    monkeypatch.setattr(
+        assistant,
+        "check_for_updates",
+        lambda *, manual=False: update_requests.append(manual),
+    )
+    assistant.enter_floating_mode()
+    actions["检查更新"].trigger()
+    assert assistant.settings_panel.isVisible()
+    assert update_requests == [True]
+
+    quit_requests: list[bool] = []
+    monkeypatch.setattr(
+        floating.QApplication,
+        "quit",
+        lambda: quit_requests.append(True),
+    )
+    actions["退出软件"].trigger()
+    assert quit_requests == [True]
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_system_tray_activation_routes_and_protects_active_capture(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: True),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    tray = assistant._tray_icon
+    assert tray is not None
+    activations: list[str] = []
+    monkeypatch.setattr(
+        assistant,
+        "_show_floating_from_tray",
+        lambda: activations.append("trigger"),
+    )
+    monkeypatch.setattr(
+        assistant,
+        "_start_capture_from_tray",
+        lambda: activations.append("double-click"),
+    )
+
+    tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
+    tray.activated.emit(QSystemTrayIcon.ActivationReason.DoubleClick)
+    tray.activated.emit(QSystemTrayIcon.ActivationReason.Context)
+    assert activations == ["double-click"]
+
+    tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
+    QTest.qWait(QApplication.doubleClickInterval() + 20)
+    assert activations == ["double-click", "trigger"]
+
+    monkeypatch.undo()
+    assistant.open_settings()
+    assistant._worker = object()  # type: ignore[assignment]
+    assistant._tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    assistant._tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
+    QTest.qWait(QApplication.doubleClickInterval() + 20)
+    assert assistant.settings_panel.isVisible()
+    assert assistant._capture_pending is False
+    assistant._worker = None
+
+    assistant._capture_pending = True
+    assistant._tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    assert assistant.settings_panel.isVisible()
+    assert assistant.orb.isHidden()
+    assistant._capture_pending = False
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_system_tray_unavailable_falls_back_without_error(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: False),
+    )
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant.show()
+
+    assert assistant._tray_icon is None
+    assert assistant._tray_menu is None
+    assert assistant.settings_panel.isVisible()
+
+    assistant.enter_floating_mode()
+    quit_requests: list[bool] = []
+    monkeypatch.setattr(
+        floating.QApplication,
+        "quit",
+        lambda: quit_requests.append(True),
+    )
+    event = FakeCloseEvent(spontaneous=True)
+    assistant.orb.closeEvent(event)  # type: ignore[arg-type]
+
+    assert event.ignored is True
+    assert event.accepted is False
+    assert quit_requests == [True]
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_spontaneous_orb_close_hides_to_available_system_tray(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: True),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant.enter_floating_mode()
+    assert assistant.orb.isVisible()
+    quit_requests: list[bool] = []
+    monkeypatch.setattr(
+        floating.QApplication,
+        "quit",
+        lambda: quit_requests.append(True),
+    )
+
+    event = FakeCloseEvent(spontaneous=True)
+    assistant.orb.closeEvent(event)  # type: ignore[arg-type]
+
+    assert event.ignored is True
+    assert event.accepted is False
+    assert assistant.orb.isHidden()
+    assert quit_requests == []
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_programmatic_orb_close_remains_available_for_cleanup() -> None:
+    _application()
+    orb = FloatingOrb()
+    event = FakeCloseEvent(spontaneous=False)
+    close_requests: list[bool] = []
+    orb.close_requested.connect(lambda: close_requests.append(True))
+
+    orb.closeEvent(event)  # type: ignore[arg-type]
+
+    assert event.accepted is True
+    assert event.ignored is False
+    assert close_requests == []
+    orb.close()
+
+
+def test_system_tray_shutdown_is_idempotent_and_clears_references(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating.QSystemTrayIcon,
+        "isSystemTrayAvailable",
+        staticmethod(lambda: True),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    tray = assistant._tray_icon
+    menu = assistant._tray_menu
+    assert tray is not None
+    assert menu is not None
+    closed: list[bool] = []
+    monkeypatch.setattr(assistant.manager, "close", lambda: closed.append(True))
+
+    assistant.shutdown()
+    assistant.shutdown()
+
+    assert closed == [True]
+    assert not tray.isVisible()
+    assert tray.contextMenu() is None
+    assert assistant._tray_icon is None
+    assert assistant._tray_menu is None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
 def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
     _application()
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
@@ -777,6 +1408,53 @@ def test_update_waits_for_active_recognition_before_starting_installer(
     assert events == ["close", "installer", "quit"]
 
 
+def test_shutdown_launches_pending_installer_exactly_once(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    settings.setValue("updates/last_check_utc", 123)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    installer.write_bytes(b"setup")
+    asset = UpdateAsset(installer.name, "https://example.invalid", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    launches: list[Path] = []
+    monkeypatch.setattr(
+        floating,
+        "launch_verified_installer",
+        lambda path, *_args, **_kwargs: launches.append(path) or True,
+    )
+    assistant._pending_update_install = (installer, release)
+
+    assistant.shutdown()
+    assistant.shutdown()
+
+    assert launches == [installer]
+    assert assistant._pending_update_install is None
+    assert settings.value("updates/last_check_utc") is not None
+
+
+def test_shutdown_failed_pending_installer_clears_update_throttle(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    settings.setValue("updates/last_check_utc", 123)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    installer.write_bytes(b"setup")
+    asset = UpdateAsset(installer.name, "https://example.invalid", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    monkeypatch.setattr(floating, "launch_verified_installer", lambda *_a, **_kw: False)
+    assistant._pending_update_install = (installer, release)
+
+    assistant.shutdown()
+
+    assert settings.value("updates/last_check_utc") is None
+    assert "update-installer-start-failed" in caplog.text
+
+
 def test_startup_settings_and_preferences_are_applied(tmp_path: Path) -> None:
     application = _application()
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
@@ -785,7 +1463,7 @@ def test_startup_settings_and_preferences_are_applied(tmp_path: Path) -> None:
 
     assert assistant.settings_panel.isVisible()
     assert assistant.orb.isHidden()
-    preferences = FloatingPreferences("rapid", "green", "light", False)
+    preferences = FloatingPreferences("mathcraft", "green", "light", False)
     assistant._apply_preferences(preferences)
     assistant.enter_floating_mode()
     application.processEvents()
@@ -802,7 +1480,7 @@ def test_selected_recognition_mode_is_passed_to_worker(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     _application()
-    created: list[tuple[Any, Any, str]] = []
+    created: list[tuple[Any, Any, str, dict[str, Any]]] = []
 
     class Hook:
         def connect(self, _callback: Any) -> None:
@@ -815,8 +1493,14 @@ def test_selected_recognition_mode_is_passed_to_worker(
     class FakeWorker:
         signals = Signals()
 
-        def __init__(self, manager: Any, image: Any, mode: str) -> None:
-            created.append((manager, image, mode))
+        def __init__(
+            self,
+            manager: Any,
+            image: Any,
+            mode: str,
+            **kwargs: Any,
+        ) -> None:
+            created.append((manager, image, mode, kwargs))
 
     class Pool:
         started: Any = None
@@ -834,6 +1518,297 @@ def test_selected_recognition_mode_is_passed_to_worker(
     assistant._captured(pixmap)
 
     assert created[0][2] == "mathcraft"
+    assert assistant._last_image is None
+    assert created[0][3] == {
+        "ai_enabled": False,
+        "ai_api_key": None,
+        "ai_base_url": "https://api.openai.com/v1",
+        "ai_model": "gpt-5.6-luna",
+    }
+    assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_enabled_ai_configuration_is_passed_to_worker(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    key_store = FakeApiKeyStore("unit-test-token")
+    monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
+    created: list[dict[str, Any]] = []
+
+    class Hook:
+        def connect(self, _callback: Any) -> None:
+            pass
+
+    class Signals:
+        finished = Hook()
+        failed = Hook()
+
+    class FakeWorker:
+        signals = Signals()
+
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            created.append(kwargs)
+
+    class Pool:
+        def start(self, _worker: Any) -> None:
+            pass
+
+    monkeypatch.setattr(floating, "RecognitionWorker", FakeWorker)
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/ai_correction_enabled", True)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assistant._thread_pool = Pool()  # type: ignore[assignment]
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+
+    assert created == [
+        {
+            "ai_enabled": True,
+            "ai_api_key": "unit-test-token",
+            "ai_base_url": "https://api.openai.com/v1",
+            "ai_model": "gpt-5.6-luna",
+        }
+    ]
+    assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_capture_conversion_failure_clears_qimage_before_showing_error(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    monkeypatch.setattr(
+        floating,
+        "qimage_to_pil",
+        lambda _image: (_ for _ in ()).throw(ValueError("转换失败")),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+
+    assert assistant._last_image is None
+    assert assistant._worker is None
+    assert "转换失败" in assistant.panel.preview_message.text()
+    assistant.panel.close()
+    assert assistant._last_image is None
+    assistant.orb.close()
+    assistant.settings_panel.hide()
+
+
+def test_both_recognition_failures_do_not_retain_capture_qimage(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+
+    class Manager:
+        def recognize(self, _image: Any, _backend_key: str) -> RecognitionResult:
+            raise RuntimeError("local failure")
+
+    monkeypatch.setattr(
+        worker_module,
+        "transcribe_formula",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("AI failure")),
+    )
+    assistant = FloatingFormulaAssistant(
+        settings=_settings(tmp_path),
+        manager=Manager(),  # type: ignore[arg-type]
+    )
+    assistant.preferences = FloatingPreferences(ai_correction_enabled=True)
+    assistant._api_key_store = FakeApiKeyStore("unit-test-token")  # type: ignore[assignment]
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+    assert assistant._last_image is None
+
+    deadline = time.monotonic() + 3
+    while assistant._worker is not None and time.monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(5)
+
+    assert assistant._worker is None
+    assert "本地识别失败" in assistant.panel.preview_message.text()
+    assert "AI 识别失败" in assistant.panel.preview_message.text()
+    assert assistant._last_image is None
+    assistant.panel.close()
+    assert assistant._last_image is None
+    assistant.orb.close()
+    assistant.settings_panel.hide()
+
+
+@pytest.mark.parametrize("terminal", ("success", "failure", "cancel"))
+def test_recognition_terminal_signals_release_worker_and_image(
+    terminal: str,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    local = RecognitionResult("local-x", "MathCraft", 0.1)
+
+    class Manager:
+        def recognize(self, _image: Any, _backend_key: str) -> RecognitionResult:
+            if terminal == "failure":
+                raise RuntimeError("local failure")
+            return local
+
+    if terminal == "cancel":
+        def cancel_before_ai_delivery(
+            _image: Any,
+            _api_key: str,
+            **kwargs: Any,
+        ) -> RecognitionCandidate:
+            kwargs["cancel_event"].set()
+            return RecognitionCandidate(
+                "stale-ai-y", "AI · vision-model", 0.2, source="ai"
+            )
+
+        monkeypatch.setattr(worker_module, "transcribe_formula", cancel_before_ai_delivery)
+
+    assistant = FloatingFormulaAssistant(
+        settings=_settings(tmp_path),
+        manager=Manager(),  # type: ignore[arg-type]
+    )
+    assistant.preferences = FloatingPreferences(
+        ai_correction_enabled=terminal == "cancel",
+    )
+    assistant._api_key_store = FakeApiKeyStore("unit-test-token")  # type: ignore[assignment]
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+    assert assistant._last_image is None
+    worker = assistant._worker
+    assert worker is not None
+    worker_ref = weakref.ref(worker)
+    image_ref = weakref.ref(worker.image)
+
+    deadline = time.monotonic() + 3
+    while assistant._worker is not None and time.monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(5)
+    assert assistant._worker is None
+    if terminal == "failure":
+        assert assistant._last_result is None
+    else:
+        assert assistant._last_result is not None
+        assert assistant._last_result.latex == "local-x"
+        if terminal == "cancel":
+            assert "已取消" in assistant._last_result.warnings[-1]
+    assert image_ref() is None
+
+    del worker
+    # PySide's global pool may retain its most recently completed Python runnable.
+    # Advancing it with a sentinel distinguishes that bounded cache from a signal
+    # callback cycle, while the heavyweight screenshot must already be released.
+    sentinel = QRunnable.create(lambda: None)
+    sentinel.setAutoDelete(False)
+    assistant._thread_pool.start(sentinel)
+    assert assistant._thread_pool.waitForDone(3000)
+    del sentinel
+    deadline = time.monotonic() + 3
+    while worker_ref() is not None and time.monotonic() < deadline:
+        application.processEvents()
+        gc.collect()
+        QTest.qWait(5)
+
+    assert worker_ref() is None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_cancelled_queued_ai_result_is_replaced_with_local_result(
+    tmp_path: Path,
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    local = RecognitionResult("local-x", "MathCraft", 0.1)
+    stale_ai = RecognitionResult(
+        "stale-ai-y",
+        "MathCraft + vision-model",
+        0.2,
+        "ai-assisted",
+    )
+
+    class QueuedWorker:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def result_for_delivery(self, result: RecognitionResult) -> RecognitionResult:
+            assert result is stale_ai
+            if not self.cancelled:
+                return result
+            return RecognitionResult(
+                local.latex,
+                local.backend_name,
+                local.elapsed_seconds,
+                local.strategy,
+                ("AI 辅助已取消，已保留本地结果。",),
+            )
+
+        def release_resources(self) -> None:
+            pass
+
+    worker = QueuedWorker()
+    assistant._worker = worker  # type: ignore[assignment]
+    assistant.orb.set_busy(True)
+
+    # Credential changes can happen after Qt has queued the finished signal.
+    assistant._cancel_active_recognition()
+    assistant._worker_recognition_finished(worker, stale_ai)  # type: ignore[arg-type]
+
+    assert assistant._worker is None
+    assert assistant._last_result is not None
+    assert assistant._last_result.latex == "local-x"
+    assert assistant._last_result.strategy != "ai-assisted"
+    assert assistant.orb._busy is False
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_stale_worker_signals_do_not_change_current_worker_state(tmp_path: Path) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    class StaleWorker:
+        release_count = 0
+
+        def release_resources(self) -> None:
+            self.release_count += 1
+
+    old_worker = StaleWorker()
+    current_worker = object()
+    retained = RecognitionResult("current-local", "MathCraft", 0.1)
+    assistant._worker = current_worker  # type: ignore[assignment]
+    assistant._last_result = retained
+    assistant.orb.set_busy(True)
+
+    assistant._worker_recognition_finished(  # type: ignore[arg-type]
+        old_worker,
+        RecognitionResult("stale-ai", "AI", 0.2, "ai-assisted"),
+    )
+    assistant._worker_recognition_failed(old_worker, "stale failure")  # type: ignore[arg-type]
+
+    assert assistant._worker is current_worker
+    assert assistant._last_result is retained
+    assert assistant.orb._busy is True
+    assert assistant._pending_error is None
+    assert old_worker.release_count == 2
     assistant._worker = None
     assistant.orb.close()
     assistant.panel.close()
@@ -904,26 +1879,42 @@ def test_cancelled_recapture_restores_unconsumed_result(tmp_path: Path) -> None:
     assistant.settings_panel.hide()
 
 
-def test_settings_round_trip_preserves_edited_result(tmp_path: Path) -> None:
+def test_settings_round_trip_preserves_edited_local_result_source(tmp_path: Path) -> None:
     application = _application()
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
-    assistant._recognition_finished(RecognitionResult("x", "Rapid", 0.1))
-    assistant.panel.latex_view.setPlainText("edited-y")
+    local = RecognitionCandidate("local-x", "MathCraft", 0.2, source="local")
+    ai = RecognitionCandidate("ai-y", "AI · vision-model", 0.3, source="ai")
+    assistant._recognition_finished(
+        RecognitionResult(
+            ai.latex,
+            ai.backend,
+            0.35,
+            "ai-parallel",
+            alternatives=(local, ai),
+            comparison="different",
+        )
+    )
+    assistant.panel.local_result_button.click()
+    assistant.panel.latex_view.setPlainText("local-edited")
 
     assistant.open_settings()
     assistant.enter_floating_mode()
     application.processEvents()
 
-    assert assistant.panel.latex_view.toPlainText() == "edited-y"
+    assert assistant.panel.local_result_button.isChecked()
+    assert not assistant.panel.ai_result_button.isChecked()
+    assert "MathCraft" in assistant.panel.backend_label.text()
+    assert assistant.panel.latex_view.toPlainText() == "local-edited"
     assistant.panel.copy_latex_button.click()
-    assert QApplication.clipboard().text() == "edited-y"
+    assert QApplication.clipboard().text() == "local-edited"
+    assert assistant._last_result_source is None
     QApplication.clipboard().clear()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
 
 
-def test_cancelled_recapture_preserves_edited_result_and_mathml(
+def test_cancelled_recapture_preserves_edited_local_source_and_mathml(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     application = _application()
@@ -940,17 +1931,32 @@ def test_cancelled_recapture_preserves_edited_result_and_mathml(
         lambda latex: converted.append(latex) or "<math><mi>z</mi></math>",
     )
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
-    assistant._recognition_finished(RecognitionResult("x", "Rapid", 0.1))
-    assistant.panel.latex_view.setPlainText("edited-z")
+    local = RecognitionCandidate("local-x", "MathCraft", 0.2, source="local")
+    ai = RecognitionCandidate("ai-y", "AI · vision-model", 0.3, source="ai")
+    assistant._recognition_finished(
+        RecognitionResult(
+            ai.latex,
+            ai.backend,
+            0.35,
+            "ai-parallel",
+            alternatives=(local, ai),
+            comparison="different",
+        )
+    )
+    assistant.panel.local_result_button.click()
+    assistant.panel.latex_view.setPlainText("local-edited")
 
     assistant.start_capture()
     assert len(scheduled) == 1
     assistant._capture_cancelled()
     application.processEvents()
 
-    assert assistant.panel.latex_view.toPlainText() == "edited-z"
+    assert assistant.panel.local_result_button.isChecked()
+    assert not assistant.panel.ai_result_button.isChecked()
+    assert "MathCraft" in assistant.panel.backend_label.text()
+    assert assistant.panel.latex_view.toPlainText() == "local-edited"
     assistant.panel.copy_mathml_button.click()
-    assert converted == ["edited-z"]
+    assert converted == ["local-edited"]
     assert QApplication.clipboard().text() == "<math><mi>z</mi></math>"
     QApplication.clipboard().clear()
     assistant.orb.close()

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "formulasnip"
-version = "0.2.5"
+version = "0.2.6"
 description = "Offline Windows formula snipping and recognition prototype"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -17,9 +17,6 @@ dependencies = [
   "Pillow>=10.4,<13",
   "latex2mathml>=3.77,<4",
   "matplotlib>=3.9,<4",
-  "rapid-latex-ocr==0.0.9",
-  # rapid-latex-ocr imports requests for model downloads but omits it from
-  # the package metadata.
   "requests>=2.32,<3",
   "mathcraft-ocr[cpu]==0.3.1",
 ]
@@ -56,8 +53,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.uv]
-# MathCraft 0.3.1 declares NumPy 2 although its ONNX CPU inference path is
-# compatible with NumPy 1. RapidLaTeXOCR 0.0.9 still pins NumPy below 2.
+# MathCraft's ONNX CPU inference path is compatible with NumPy 1, which keeps
+# the packaged runtime aligned with the current OpenCV dependency set.
 override-dependencies = ["numpy>=1.26,<2"]
 
 [tool.ruff]

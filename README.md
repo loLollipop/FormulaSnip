@@ -1,28 +1,15 @@
 # FormulaSnip
 
-<p align="center">
-  <img src="formulasnip/assets/formulasnip.png" width="88" alt="FormulaSnip Logo">
-</p>
-
-<p align="center">
-  面向 Windows 论文写作的公式截图识别工具
-</p>
-
-<p align="center">
-  <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><img src="https://img.shields.io/github/v/release/loLollipop/FormulaSnip?label=Release" alt="GitHub Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="GPL-3.0 License"></a>
-  <img src="https://img.shields.io/badge/Platform-Windows%20x64-0078D4" alt="Windows x64">
-</p>
-
-FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别为可编辑的电子公式，并复制为 **LaTeX** 或 **MathML**，方便粘贴到 Word、MathType 及其他公式编辑器。
+FormulaSnip 是面向 Windows、Word 和 MathType 工作流的本地公式截图识别工具。
 
 ## 功能
 
-- 点击悬浮球，框选并识别公式；
-- 内置 RapidLaTeXOCR 与 MathCraft OCR 0.3.1 CPU 双识别引擎；
-- 提供智能、快速、精确三种识别模式；
+- 点击悬浮球框选单个公式；
+- 使用 MathCraft OCR 0.3.1 的 CPU 推理路径在本地识别；
+- 可选接入 OpenAI 兼容视觉模型，与本地识别智能并行（默认关闭，用户自备 API Key）；
 - 显示 SVG 电子公式预览，方便识别后校对；
 - 一键复制 LaTeX 或 MathML，复制后自动收起结果面板；
+- 支持从 Windows 系统托盘开始识别、恢复悬浮球、打开设置或检查更新；
 - 支持深色与浅色主题、自定义悬浮球圆环颜色和中心 Logo；
 - 安装版支持在应用内检查并安装更新。
 
@@ -36,10 +23,10 @@ FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别�
 
 前往 [GitHub Releases](https://github.com/loLollipop/FormulaSnip/releases/latest) 下载最新版本：
 
-- `FormulaSnip-v0.2.5-windows-x64-setup.exe`：安装版，提供安装向导、桌面快捷方式和卸载入口；
-- `FormulaSnip-v0.2.5-windows-x64.zip`：便携版，解压后运行 `FormulaSnip.exe`。
+- `FormulaSnip-v0.2.6-windows-x64-setup.exe`：安装版，提供安装向导、桌面快捷方式和卸载入口；
+- `FormulaSnip-v0.2.6-windows-x64.zip`：便携版，解压后运行 `FormulaSnip.exe`。
 
-首次使用识别引擎时需要联网下载模型，下载完成后即可离线识别。当前安装包尚未进行代码签名，Windows SmartScreen 可能显示风险提示，请仅从本仓库下载。
+首次识别需要联网下载 MathCraft 公式模型（约 112 MiB），下载完成后可离线使用。当前安装包尚未进行代码签名，Windows SmartScreen 可能显示风险提示，请仅从本仓库下载。
 
 ## 使用方法
 
@@ -51,15 +38,9 @@ FormulaSnip 可以通过悬浮球框选屏幕中的单个公式，将其识别�
 
 右键悬浮球可以重新打开设置或退出软件，按 `Esc` 可以取消截图。
 
-## 识别模式
+FormulaSnip 固定使用 MathCraft OCR（CPU）。公式 OCR 无法保证完全正确，所有结果都应在粘贴前对照原图校对。
 
-| 模式 | 说明 |
-|---|---|
-| 智能 | 默认模式，先快速识别，复杂公式或疑似异常结果再由第二引擎复核 |
-| 快速 | 使用 RapidLaTeXOCR，适合清晰、结构简单的公式 |
-| 精确 | 使用 MathCraft OCR CPU，适合复杂公式 |
-
-公式识别无法保证完全正确，请在粘贴前核对电子公式预览。
+AI 辅助识别可在“设置 → 识别”中配置兼容 API 地址、拉取上游模型并测试连接。启用后，MathCraft 与 AI 会同时识别；结果不一致时可在结果窗切换对照。API Key 保存在 Windows 凭据管理器，仅把本次框选的公式截图发送给所配置的服务，可能产生 API 费用，失败时自动保留本地结果。
 
 ## 从源码运行
 

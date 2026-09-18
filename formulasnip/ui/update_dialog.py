@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal, Slot
@@ -17,6 +18,8 @@ from formulasnip.ui.branding import application_icon
 from formulasnip.update import (
     MAX_RELEASE_NOTES_LENGTH,
     ReleaseInfo,
+    UpdateCancellation,
+    UpdateCancelled,
     download_installer,
     fetch_latest_release,
 )
@@ -123,18 +126,34 @@ class UpdateCheckWorker(QRunnable):
         super().__init__()
         self.current_version = current_version
         self.signals = UpdateCheckSignals()
+        self._cancellation = UpdateCancellation()
+
+    def cancel(self) -> None:
+        self._cancellation.cancel()
+
+    def _publish(self, callback: Callable[[], None]) -> bool:
+        try:
+            return self._cancellation.run_if_active(callback)
+        except RuntimeError:
+            return False
 
     @Slot()
     def run(self) -> None:
         try:
-            release = fetch_latest_release(self.current_version)
+            release = fetch_latest_release(
+                self.current_version,
+                cancel_event=self._cancellation,
+            )
+        except UpdateCancelled:
+            return
         except Exception as exc:
-            self.signals.failed.emit(str(exc).strip() or "检查更新失败。")
+            message = str(exc).strip() or "检查更新失败。"
+            self._publish(lambda: self.signals.failed.emit(message))
             return
         if release is None:
-            self.signals.no_update.emit()
+            self._publish(self.signals.no_update.emit)
         else:
-            self.signals.available.emit(release)
+            self._publish(lambda: self.signals.available.emit(release))
 
 
 class UpdateDownloadSignals(QObject):
@@ -149,6 +168,20 @@ class UpdateDownloadWorker(QRunnable):
         self.release = release
         self.cache_directory = cache_directory
         self.signals = UpdateDownloadSignals()
+        self._cancellation = UpdateCancellation()
+        self.completed_path: Path | None = None
+
+    def cancel(self) -> None:
+        self._cancellation.cancel()
+
+    def _publish(self, callback: Callable[[], None]) -> bool:
+        try:
+            return self._cancellation.run_if_active(callback)
+        except RuntimeError:
+            return False
+
+    def _publish_progress(self, received: int, total: int) -> None:
+        self._publish(lambda: self.signals.progress.emit(received, total))
 
     @Slot()
     def run(self) -> None:
@@ -156,9 +189,18 @@ class UpdateDownloadWorker(QRunnable):
             path = download_installer(
                 self.release.asset,
                 self.cache_directory,
-                progress=self.signals.progress.emit,
+                progress=self._publish_progress,
+                cancel_event=self._cancellation,
             )
-        except Exception as exc:
-            self.signals.failed.emit(str(exc).strip() or "下载更新失败。")
+        except UpdateCancelled:
             return
-        self.signals.finished.emit(path)
+        except Exception as exc:
+            message = str(exc).strip() or "下载更新失败。"
+            self._publish(lambda: self.signals.failed.emit(message))
+            return
+
+        def publish_finished() -> None:
+            self.completed_path = path
+            self.signals.finished.emit(path)
+
+        self._publish(publish_finished)

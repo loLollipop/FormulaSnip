@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.5"
+  #define AppVersion "0.2.6"
 #endif
 
 #define AppName "FormulaSnip"
@@ -56,8 +56,14 @@ Source: "..\dist\FormulaSnip\*"; DestDir: "{app}"; Flags: ignoreversion recurses
 [InstallDelete]
 ; A directory-mode upgrade must not leave metadata from an older FormulaSnip
 ; build beside the new metadata. Keep this wildcard limited to this package's
-; dist-info directories; model directories are deliberately untouched.
+; dist-info directories; active model directories are deliberately untouched.
 Type: filesandordirs; Name: "{app}\_internal\formulasnip-*.dist-info"
+; Versions before the MathCraft-only release bundled RapidLaTeXOCR and could
+; download its weights below this exact package directory. Remove only that
+; retired backend during an upgrade; `rapidocr` is still required by MathCraft.
+Type: filesandordirs; Name: "{app}\_internal\rapid_latex_ocr"
+Type: filesandordirs; Name: "{app}\_internal\rapid_latex_ocr-*.dist-info"
+Type: files; Name: "{app}\_internal\formulasnip\recognition\rapid_config.yaml"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Comment: "公式截图识别"
@@ -67,12 +73,6 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsAutoUpdate
 Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutoUpdate
-
-[UninstallDelete]
-; RapidLaTeXOCR downloads these files after installation, so Inno does not
-; know about them automatically. Keep the uninstall target narrow and remove
-; only the backend's generated model directory.
-Type: filesandordirs; Name: "{app}\_internal\rapid_latex_ocr\models"
 
 [Code]
 function IsAutoUpdate: Boolean;

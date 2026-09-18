@@ -104,8 +104,8 @@ def diagnose_image(image: Image.Image) -> tuple[str, ...]:
 def has_complex_image_layout(image: Image.Image) -> bool:
     """Conservatively route visibly two-dimensional or long formula crops.
 
-    This signal is independent of OCR text, so a complex formula that Rapid
-    collapses to a short, syntactically valid expression can still be reviewed.
+    This signal is independent of OCR text and identifies screenshots that
+    deserve extra care during manual review.
     """
 
     gray = image.convert("L")

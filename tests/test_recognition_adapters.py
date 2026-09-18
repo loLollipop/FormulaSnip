@@ -3,29 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pytest
 from PIL import Image
 
 from formulasnip.exceptions import RecognitionError
 from formulasnip.recognition.mathcraft_backend import _InProcessMathCraftBackend
-from formulasnip.recognition.rapid_backend import RapidLatexBackend
-
-
-def test_rapid_passes_contiguous_rgb_array_and_uses_model_timing() -> None:
-    received: list[np.ndarray[Any, Any]] = []
-
-    def model(value: np.ndarray[Any, Any]) -> tuple[str, float]:
-        received.append(value)
-        return "x+y", 0.25
-
-    backend = RapidLatexBackend()
-    backend._model = model
-    result = backend.recognize(Image.new("L", (20, 10), 255))
-
-    assert received[0].shape == (10, 20, 3)
-    assert received[0].flags.c_contiguous
-    assert result.elapsed_seconds >= 0.25
 
 
 @dataclass
@@ -106,13 +88,3 @@ def test_mathcraft_warmup_loads_once_and_uses_formula_profile() -> None:
 
     assert len(runtimes) == 1
     assert runtimes[0].warmups == ["formula", "formula"]
-
-
-def test_rapid_warmup_only_loads_model(monkeypatch: Any) -> None:
-    backend = RapidLatexBackend()
-    loaded: list[bool] = []
-    monkeypatch.setattr(backend, "_load_model", lambda: loaded.append(True) or object())
-
-    backend.warmup()
-
-    assert loaded == [True]

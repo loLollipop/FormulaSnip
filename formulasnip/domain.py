@@ -12,6 +12,7 @@ class RecognitionCandidate:
     elapsed_seconds: float
     issues: tuple[str, ...] = ()
     previewable: bool = True
+    source: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,3 +25,4 @@ class RecognitionResult:
     strategy: str = "single"
     warnings: tuple[str, ...] = ()
     alternatives: tuple[RecognitionCandidate, ...] = ()
+    comparison: str = "not_compared"

@@ -29,7 +29,7 @@ def test_versioned_manifest_has_hash_license_and_stats() -> None:
         def recognize(self, _image: object, _backend: str) -> RecognitionResult:
             return RecognitionResult(self.predictions.pop(0), "fake", 0.001)
 
-    report = run_benchmark(samples, "auto", 2, FakeManager())  # type: ignore[arg-type]
+    report = run_benchmark(samples, "mathcraft", 2, FakeManager())  # type: ignore[arg-type]
     assert report["summary"]["normalized_exact_count"] == 2
     assert report["summary"]["normalized_exact_rate"] == 1.0
     assert all(len(sample["timings_seconds"]) == 2 for sample in report["samples"])

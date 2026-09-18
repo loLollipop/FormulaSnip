@@ -109,6 +109,18 @@ QLabel#EngineStatus {{
 QLabel#EngineStatus[available="true"] {{
     color: {colors['success']};
 }}
+QLineEdit#ApiKeyInput, QLineEdit#AiTextInput, QComboBox#AiModelCombo {{
+    background: {colors['code']}; color: {colors['text']};
+    border: 1px solid {colors['border']}; border-radius: 8px;
+    padding: 8px 11px; min-height: 18px;
+}}
+QLineEdit#ApiKeyInput:focus, QLineEdit#AiTextInput:focus,
+QComboBox#AiModelCombo:focus {{ border: 2px solid {colors['accent']}; }}
+QLabel#ApiKeyStatus {{ color: {colors['muted']}; font-size: 12px; }}
+QLabel#ApiKeyStatus[saved="true"] {{ color: {colors['success']}; }}
+QLabel#ApiKeyStatus[error="true"] {{ color: {colors['warning']}; }}
+QLabel#AiConnectionStatus {{ color: {colors['muted']}; font-size: 12px; }}
+QLabel#AiConnectionStatus[error="true"] {{ color: {colors['warning']}; }}
 QPushButton {{
     background: {colors['surface_alt']}; color: {colors['text']};
     border: 1px solid {colors['border']}; border-radius: 8px;
@@ -253,6 +265,23 @@ QLabel#FloatingPreviewMessage {{
 QWidget#FloatingPreviewFrame QWidget#FloatingSvgPreview {{ background: transparent; border: none; }}
 QLabel#FloatingQuality {{ color: {colors['success']}; font-size: 12px; }}
 QLabel#FloatingQuality[warning="true"] {{ color: {colors['warning']}; }}
+QWidget#FloatingSourceSwitch {{
+    background: {colors['surface_alt']}; border: 1px solid {colors['border']};
+    border-radius: 8px;
+}}
+QPushButton#FloatingSourceButton {{
+    background: transparent; color: {colors['muted']}; border: none;
+    border-radius: 7px; padding: 6px 12px; min-height: 20px;
+}}
+QPushButton#FloatingSourceButton:hover {{
+    background: {colors['surface_hover']}; color: {colors['text']};
+}}
+QPushButton#FloatingSourceButton:checked {{
+    background: {colors['accent_soft']}; color: {colors['accent']};
+}}
+QPushButton#FloatingSourceButton:focus {{
+    border: 2px solid {colors['accent']};
+}}
 QPlainTextEdit#FloatingLatex {{
     background: {colors['code']}; color: {colors['text']};
     border: 1px solid {colors['border']}; border-radius: 8px;

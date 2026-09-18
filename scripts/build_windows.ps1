@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipSync,
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [string]$ReleaseNotesPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,7 +69,11 @@ try {
     Write-Output "Archive: $($archive.FullName) ($([Math]::Round($archive.Length / 1MB, 1)) MiB)"
 
     if (-not $SkipInstaller) {
-        & (Join-Path $PSScriptRoot "build_installer.ps1")
+        $installerArguments = @{}
+        if (-not [string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
+            $installerArguments.ReleaseNotesPath = $ReleaseNotesPath
+        }
+        & (Join-Path $PSScriptRoot "build_installer.ps1") @installerArguments
     }
 }
 finally {

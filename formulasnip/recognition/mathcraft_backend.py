@@ -94,7 +94,7 @@ class _InProcessMathCraftBackend(RecognitionBackend):
             raise RecognitionError("MathCraft OCR 没有返回公式，请调整截图范围后重试。")
         if has_fatal_output_issue(latex):
             raise RecognitionError(
-                "MathCraft OCR 输出异常过长，请缩小截图范围或改用智能模式。"
+                "MathCraft OCR 输出异常过长，请缩小截图范围后重试。"
             )
         return RecognitionResult(latex, self.display_name, elapsed)
 

@@ -4,15 +4,20 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Lock
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 import requests
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
 from formulasnip import __version__
 
@@ -66,8 +71,179 @@ class UpdateError(RuntimeError):
     """A release response or downloaded installer failed a safety check."""
 
 
+class UpdateCancelled(UpdateError):
+    """The caller cancelled an in-flight update operation."""
+
+
 class HttpClient(Protocol):
     def get(self, url: str, **kwargs: Any) -> Any: ...
+
+
+class CancellationSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+
+class UpdateCancellation:
+    """Thread-safe cancellation signal that can also abort active transports."""
+
+    def __init__(self) -> None:
+        self._event = Event()
+        self._lock = Lock()
+        self._abort_callbacks: set[Callable[[], None]] = set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._event.set()
+            callbacks = tuple(self._abort_callbacks)
+        for callback in callbacks:
+            with suppress(Exception):
+                callback()
+
+    def add_abort_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        with self._lock:
+            if self._event.is_set():
+                abort_now = True
+            else:
+                self._abort_callbacks.add(callback)
+                abort_now = False
+        if abort_now:
+            with suppress(Exception):
+                callback()
+
+        def remove() -> None:
+            with self._lock:
+                self._abort_callbacks.discard(callback)
+
+        return remove
+
+    def run_if_active(self, callback: Callable[[], None]) -> bool:
+        """Run one short publication step unless cancellation already won."""
+        with self._lock:
+            if self._event.is_set():
+                return False
+            callback()
+            return True
+
+
+class _ConnectionTracker:
+    """Own duplicate socket handles that can interrupt a requests Session."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._sockets: list[Any] = []
+        self._aborted = False
+
+    def track(self, connection_socket: Any) -> None:
+        with self._lock:
+            if self._aborted:
+                abort_now = True
+            else:
+                self._sockets.append(connection_socket)
+                abort_now = False
+        if abort_now:
+            self._abort_socket(connection_socket)
+
+    def abort(self) -> None:
+        with self._lock:
+            self._aborted = True
+            sockets = tuple(self._sockets)
+        for connection_socket in sockets:
+            self._abort_socket(connection_socket)
+
+    def close(self) -> None:
+        with self._lock:
+            sockets = tuple(self._sockets)
+            self._sockets.clear()
+        for connection_socket in sockets:
+            with suppress(OSError):
+                connection_socket.close()
+
+    @staticmethod
+    def _abort_socket(connection_socket: Any) -> None:
+        with suppress(OSError):
+            connection_socket.shutdown(socket.SHUT_RDWR)
+        with suppress(OSError):
+            connection_socket.close()
+
+
+def _tracked_pool_classes(
+    tracker: _ConnectionTracker,
+) -> tuple[type[HTTPConnectionPool], type[HTTPSConnectionPool]]:
+    class TrackedHTTPConnection(HTTPConnection):
+        def _new_conn(self) -> Any:
+            connection_socket = super()._new_conn()
+            tracker.track(connection_socket.dup())
+            return connection_socket
+
+    class TrackedHTTPSConnection(HTTPSConnection):
+        def _new_conn(self) -> Any:
+            connection_socket = super()._new_conn()
+            # TLS wrapping detaches the original handle. The duplicate can still
+            # interrupt the same TCP connection while waiting for headers/body.
+            tracker.track(connection_socket.dup())
+            return connection_socket
+
+    class TrackedHTTPConnectionPool(HTTPConnectionPool):
+        ConnectionCls = TrackedHTTPConnection
+
+    class TrackedHTTPSConnectionPool(HTTPSConnectionPool):
+        ConnectionCls = TrackedHTTPSConnection
+
+    return TrackedHTTPConnectionPool, TrackedHTTPSConnectionPool
+
+
+class _CancellableHTTPAdapter(requests.adapters.HTTPAdapter):
+    def __init__(self, tracker: _ConnectionTracker) -> None:
+        http_pool, https_pool = _tracked_pool_classes(tracker)
+        self._tracked_pools = {"http": http_pool, "https": https_pool}
+        super().__init__()
+
+    def _configure_pool_manager(self, manager: Any) -> None:
+        manager.pool_classes_by_scheme = self._tracked_pools.copy()
+
+    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+        super().init_poolmanager(*args, **kwargs)
+        self._configure_pool_manager(self.poolmanager)
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        if not proxy.casefold().startswith("socks"):
+            self._configure_pool_manager(manager)
+        return manager
+
+
+@contextmanager
+def _request_client(
+    client: HttpClient,
+    cancel_event: CancellationSignal | None,
+) -> Any:
+    if client is not requests:
+        yield client
+        return
+    tracker = _ConnectionTracker()
+    session = requests.Session()
+    adapter = _CancellableHTTPAdapter(tracker)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    remove_abort: Callable[[], None] | None = None
+    add_abort = getattr(cancel_event, "add_abort_callback", None)
+    if callable(add_abort):
+        remove_abort = add_abort(tracker.abort)
+    try:
+        yield session
+    finally:
+        if remove_abort is not None:
+            remove_abort()
+        session.close()
+        tracker.close()
+
+
+def _raise_if_cancelled(cancel_event: CancellationSignal | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpdateCancelled("Update operation cancelled.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +410,11 @@ def _validate_manifest_url(url: str, *, stage: str) -> str | None:
     raise UpdateError("The update manifest redirect state is invalid.")
 
 
-def _read_manifest_response(response: Any) -> object:
+def _read_manifest_response(
+    response: Any,
+    cancel_event: CancellationSignal | None = None,
+) -> object:
+    _raise_if_cancelled(cancel_event)
     content_length = response.headers.get("Content-Length")
     if content_length is not None:
         try:
@@ -246,11 +426,13 @@ def _read_manifest_response(response: Any) -> object:
 
     content = bytearray()
     for chunk in response.iter_content(chunk_size=16 * 1024):
+        _raise_if_cancelled(cancel_event)
         if not chunk:
             continue
         if len(content) + len(chunk) > MAX_MANIFEST_BYTES:
             raise UpdateError("The update manifest is too large.")
         content.extend(chunk)
+    _raise_if_cancelled(cancel_event)
     try:
         return json.loads(bytes(content))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -316,11 +498,13 @@ def _fetch_release_manifest(
     current_version: str,
     *,
     client: HttpClient,
+    cancel_event: CancellationSignal | None = None,
 ) -> ReleaseInfo | None:
     current_url = LATEST_RELEASE_MANIFEST
     resolved_tag: str | None = None
     stages = ("latest", "tagged", "asset")
     for redirect_count in range(MAX_MANIFEST_REDIRECTS + 1):
+        _raise_if_cancelled(cancel_event)
         response: Any = None
         try:
             stage = stages[redirect_count]
@@ -332,6 +516,7 @@ def _fetch_release_manifest(
                 stream=True,
                 allow_redirects=False,
             )
+            _raise_if_cancelled(cancel_event)
             response_url = str(getattr(response, "url", current_url) or current_url)
             response_tag = _validate_manifest_url(response_url, stage=stage)
             if response_tag is not None:
@@ -356,15 +541,18 @@ def _fetch_release_manifest(
                 current_url = next_url
                 continue
             response.raise_for_status()
+            _raise_if_cancelled(cancel_event)
             if stage != "asset" or resolved_tag is None:
                 raise UpdateError("The update manifest did not follow the expected redirects.")
-            payload = _read_manifest_response(response)
+            payload = _read_manifest_response(response, cancel_event)
+            _raise_if_cancelled(cancel_event)
             return parse_manifest(
                 payload,
                 resolved_tag=resolved_tag,
                 current_version=current_version,
             )
         except requests.RequestException as exc:
+            _raise_if_cancelled(cancel_event)
             raise UpdateError("Unable to download the update manifest.") from exc
         finally:
             if response is not None and callable(getattr(response, "close", None)):
@@ -376,21 +564,28 @@ def _fetch_release_api(
     current_version: str,
     *,
     client: HttpClient,
+    cancel_event: CancellationSignal | None = None,
 ) -> ReleaseInfo | None:
     response: Any = None
     try:
+        _raise_if_cancelled(cancel_event)
         response = client.get(
             LATEST_RELEASE_API,
             headers={"Accept": "application/vnd.github+json", "User-Agent": "FormulaSnip-Updater"},
             timeout=REQUEST_TIMEOUT,
+            stream=True,
             allow_redirects=False,
         )
+        _raise_if_cancelled(cancel_event)
         status_code = int(getattr(response, "status_code", 0))
         if 300 <= status_code < 400:
             raise UpdateError("GitHub returned an unexpected redirect for the release API.")
         response.raise_for_status()
+        _raise_if_cancelled(cancel_event)
         payload = response.json()
+        _raise_if_cancelled(cancel_event)
     except (requests.RequestException, ValueError) as exc:
+        _raise_if_cancelled(cancel_event)
         raise UpdateError("Unable to check the GitHub release API.") from exc
     finally:
         if response is not None and callable(getattr(response, "close", None)):
@@ -402,16 +597,32 @@ def fetch_latest_release(
     current_version: str = __version__,
     *,
     client: HttpClient = requests,
+    cancel_event: CancellationSignal | None = None,
 ) -> ReleaseInfo | None:
-    try:
-        return _fetch_release_manifest(current_version, client=client)
-    except UpdateError:
+    _raise_if_cancelled(cancel_event)
+    with _request_client(client, cancel_event) as request_client:
         try:
-            return _fetch_release_api(current_version, client=client)
-        except UpdateError as api_error:
-            raise UpdateError(
-                "无法检查更新：静态更新清单和 GitHub API 均不可用，请稍后重试。"
-            ) from api_error
+            return _fetch_release_manifest(
+                current_version,
+                client=request_client,
+                cancel_event=cancel_event,
+            )
+        except UpdateCancelled:
+            raise
+        except UpdateError:
+            _raise_if_cancelled(cancel_event)
+            try:
+                return _fetch_release_api(
+                    current_version,
+                    client=request_client,
+                    cancel_event=cancel_event,
+                )
+            except UpdateCancelled:
+                raise
+            except UpdateError as api_error:
+                raise UpdateError(
+                    "无法检查更新：静态更新清单和 GitHub API 均不可用，请稍后重试。"
+                ) from api_error
 
 
 def should_check_for_updates(
@@ -434,15 +645,26 @@ def should_check_for_updates(
     )
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(
+    path: Path,
+    cancel_event: CancellationSignal | None = None,
+) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            _raise_if_cancelled(cancel_event)
             digest.update(chunk)
+    _raise_if_cancelled(cancel_event)
     return digest.hexdigest()
 
 
-def verify_installer(path: Path, asset: UpdateAsset) -> None:
+def verify_installer(
+    path: Path,
+    asset: UpdateAsset,
+    *,
+    cancel_event: CancellationSignal | None = None,
+) -> None:
+    _raise_if_cancelled(cancel_event)
     if path.name != asset.name or not path.is_file():
         raise UpdateError("The cached installer path is invalid.")
     try:
@@ -451,7 +673,7 @@ def verify_installer(path: Path, asset: UpdateAsset) -> None:
         raise UpdateError("The cached installer cannot be inspected.") from exc
     if size != asset.size:
         raise UpdateError("The installer size does not match the GitHub release metadata.")
-    if _sha256_file(path) != asset.sha256:
+    if _sha256_file(path, cancel_event) != asset.sha256:
         raise UpdateError("The installer SHA-256 digest does not match GitHub metadata.")
 
 
@@ -504,9 +726,11 @@ def _open_trusted_download(
     *,
     tag: str,
     client: HttpClient,
+    cancel_event: CancellationSignal | None = None,
 ) -> Any:
     current_url = asset.url
     for redirect_count in range(MAX_DOWNLOAD_REDIRECTS + 1):
+        _raise_if_cancelled(cancel_event)
         response: Any = None
         try:
             response = client.get(
@@ -519,6 +743,7 @@ def _open_trusted_download(
                 stream=True,
                 allow_redirects=False,
             )
+            _raise_if_cancelled(cancel_event)
             status_code = int(getattr(response, "status_code", 0))
             response_url = str(getattr(response, "url", current_url) or current_url)
             validate_asset_url(
@@ -544,6 +769,7 @@ def _open_trusted_download(
                 current_url = next_url
                 continue
             response.raise_for_status()
+            _raise_if_cancelled(cancel_event)
             return response
         except Exception:
             if response is not None and callable(getattr(response, "close", None)):
@@ -558,9 +784,30 @@ def download_installer(
     *,
     client: HttpClient = requests,
     progress: Callable[[int, int], None] | None = None,
+    cancel_event: CancellationSignal | None = None,
+) -> Path:
+    _raise_if_cancelled(cancel_event)
+    with _request_client(client, cancel_event) as request_client:
+        return _download_installer(
+            asset,
+            cache_directory,
+            client=request_client,
+            progress=progress,
+            cancel_event=cancel_event,
+        )
+
+
+def _download_installer(
+    asset: UpdateAsset,
+    cache_directory: Path,
+    *,
+    client: HttpClient,
+    progress: Callable[[int, int], None] | None,
+    cancel_event: CancellationSignal | None,
 ) -> Path:
     tag = _asset_tag(asset)
     validate_asset_url(asset.url, tag=tag, name=asset.name)
+    _raise_if_cancelled(cancel_event)
     cache_directory.mkdir(parents=True, exist_ok=True)
     destination = cache_directory / asset.name
     partial = cache_directory / (
@@ -568,7 +815,8 @@ def download_installer(
     )
     if destination.is_file():
         try:
-            verify_installer(destination, asset)
+            verify_installer(destination, asset, cancel_event=cancel_event)
+            _raise_if_cancelled(cancel_event)
             if progress is not None:
                 progress(asset.size, asset.size)
             return destination
@@ -578,7 +826,13 @@ def download_installer(
     downloaded = 0
     digest = hashlib.sha256()
     try:
-        response = _open_trusted_download(asset, tag=tag, client=client)
+        response = _open_trusted_download(
+            asset,
+            tag=tag,
+            client=client,
+            cancel_event=cancel_event,
+        )
+        _raise_if_cancelled(cancel_event)
         final_url = str(getattr(response, "url", asset.url))
         validate_asset_url(final_url, tag=tag, name=asset.name, allow_redirect=True)
         content_length = response.headers.get("Content-Length")
@@ -592,6 +846,7 @@ def download_installer(
 
         with partial.open("xb") as handle:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
+                _raise_if_cancelled(cancel_event)
                 if not chunk:
                     continue
                 downloaded += len(chunk)
@@ -599,18 +854,24 @@ def download_installer(
                     raise UpdateError("The installer is larger than its GitHub metadata.")
                 digest.update(chunk)
                 handle.write(chunk)
+                _raise_if_cancelled(cancel_event)
                 if progress is not None:
                     progress(downloaded, asset.size)
+        _raise_if_cancelled(cancel_event)
         if downloaded != asset.size:
             raise UpdateError("The installer download is incomplete.")
+        _raise_if_cancelled(cancel_event)
         if digest.hexdigest() != asset.sha256:
             raise UpdateError("The installer SHA-256 digest does not match GitHub metadata.")
+        _raise_if_cancelled(cancel_event)
         os.replace(partial, destination)
-        verify_installer(destination, asset)
+        verify_installer(destination, asset, cancel_event=cancel_event)
         return destination
     except requests.RequestException as exc:
+        _raise_if_cancelled(cancel_event)
         raise UpdateError("Unable to download the installer.") from exc
     except OSError as exc:
+        _raise_if_cancelled(cancel_event)
         raise UpdateError("Unable to save the installer in the user cache.") from exc
     finally:
         partial.unlink(missing_ok=True)

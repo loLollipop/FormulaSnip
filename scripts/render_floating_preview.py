@@ -38,7 +38,7 @@ def main() -> None:
         TUTORIAL_FORMULA_LATEX,
         "MathCraft OCR（CPU）",
         0.71,
-        "auto-reviewed",
+        "single",
     )
     orb.set_result_available(True)
     orb.show()
@@ -79,7 +79,7 @@ def main() -> None:
 
         settings.show_recognition_page()
         app.processEvents()
-        recognition_output = output_dir / "formulasnip_recognition_modes.png"
+        recognition_output = output_dir / "formulasnip_recognition_engine.png"
         save_widget(settings, recognition_output)
 
         settings.show_appearance_page()

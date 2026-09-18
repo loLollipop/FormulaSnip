@@ -35,22 +35,25 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QMenu,
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
 from formulasnip.core.latex import latex_to_mathml
-from formulasnip.domain import RecognitionResult
+from formulasnip.credentials import CredentialError, OpenAIApiKeyStore
+from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.recognition import BackendManager
 from formulasnip.recognition.quality import assess_latex
-from formulasnip.ui.branding import application_version
+from formulasnip.ui.branding import application_icon, application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
 from formulasnip.ui.preview import render_formula_svg
 from formulasnip.ui.settings import (
@@ -89,6 +92,7 @@ class FloatingOrb(QWidget):
     capture_requested = Signal()
     settings_requested = Signal()
     quit_requested = Signal()
+    close_requested = Signal()
 
     def __init__(self, color: str = "blue", logo_path: str = "") -> None:
         super().__init__()
@@ -281,15 +285,25 @@ class FloatingOrb(QWidget):
         target_x = left if abs(self.x() - left) <= abs(self.x() - right) else right
         self.move(target_x, self._clamped_position(self.pos()).y())
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if event.spontaneous():
+            event.ignore()
+            self.close_requested.emit()
+            return
+        event.accept()
+
 
 class FloatingResultPanel(QWidget):
     recapture_requested = Signal()
     result_consumed = Signal()
     draft_changed = Signal(str)
+    source_changed = Signal(str)
 
     def __init__(self, theme: str = "dark") -> None:
         super().__init__()
         self._result: RecognitionResult | None = None
+        self._source_candidates: dict[str, RecognitionCandidate] = {}
+        self._active_source = ""
         self._theme = "dark"
         self._preview_timer = PreviewTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -360,11 +374,44 @@ class FloatingResultPanel(QWidget):
         self.quality_label.setWordWrap(True)
         outer.addWidget(self.quality_label)
 
+        self.source_switch = QWidget()
+        self.source_switch.setObjectName("FloatingSourceSwitch")
+        self.source_switch.setAccessibleName("识别结果来源")
+        self.source_switch.setAccessibleDescription(
+            "在本地识别和 AI 识别结果之间切换"
+        )
+        source_layout = QHBoxLayout(self.source_switch)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(0)
+        self.local_result_button = QPushButton("本地结果")
+        self.ai_result_button = QPushButton("AI 结果")
+        self.local_source_button = self.local_result_button
+        self.ai_source_button = self.ai_result_button
+        self._source_button_group = QButtonGroup(self)
+        self._source_button_group.setExclusive(True)
+        for source, button, description in (
+            ("local", self.local_result_button, "显示本地 MathCraft 识别结果"),
+            ("ai", self.ai_result_button, "显示 AI 图像识别结果"),
+        ):
+            button.setObjectName("FloatingSourceButton")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            button.setAccessibleName(button.text())
+            button.setAccessibleDescription(description)
+            button.clicked.connect(lambda _checked=False, value=source: self._select_source(value))
+            self._source_button_group.addButton(button)
+            source_layout.addWidget(button)
+        self.source_switch.hide()
+        outer.addWidget(self.source_switch)
+
         self.latex_view = QPlainTextEdit()
         self.latex_view.setObjectName("FloatingLatex")
         self.latex_view.setMaximumHeight(68)
         self.latex_view.setPlaceholderText("在此修改 LaTeX，预览会自动更新")
         outer.addWidget(self.latex_view)
+        QWidget.setTabOrder(self.local_result_button, self.ai_result_button)
+        QWidget.setTabOrder(self.ai_result_button, self.latex_view)
 
         copy_row = QHBoxLayout()
         self.copy_latex_button = QPushButton("复制 LaTeX")
@@ -393,12 +440,15 @@ class FloatingResultPanel(QWidget):
         result: RecognitionResult,
         anchor: QRect,
         draft: str | None = None,
+        source: str | None = None,
     ) -> None:
         self._result = result
         self._preview_timer.stop()
-        self.backend_label.setText(f"{result.backend_name} · {result.elapsed_seconds:.2f} 秒")
-        displayed_latex = result.latex if draft is None else draft
-        edited_draft = displayed_latex != result.latex
+        selected_candidate = self._configure_source_switch(result, draft, source)
+        self._update_backend_label(selected_candidate)
+        baseline_latex = selected_candidate.latex if selected_candidate else result.latex
+        displayed_latex = baseline_latex if draft is None else draft
+        edited_draft = displayed_latex != baseline_latex
         blocker = QSignalBlocker(self.latex_view)
         self.latex_view.setPlainText(displayed_latex)
         del blocker
@@ -407,39 +457,12 @@ class FloatingResultPanel(QWidget):
         if edited_draft:
             self._show_near(anchor)
             return
-        adopted_issues: tuple[str, ...] = ()
-        adopted_previewable: bool | None = None
-        for candidate in result.alternatives:
-            if candidate.latex == result.latex and candidate.backend == result.backend_name:
-                adopted_issues = candidate.issues
-                adopted_previewable = candidate.previewable
-                break
-        if result.warnings:
-            self.quality_label.setText("\n".join(dict.fromkeys(result.warnings)))
-            self.quality_label.setProperty("warning", True)
-        elif adopted_previewable is False:
-            self.quality_label.setText(
-                next(
-                    (
-                        warning
-                        for warning in result.warnings
-                        if "预览" in warning or "修改 LaTeX" in warning
-                    ),
-                    "当前结果无法预览，可继续修改 LaTeX 后重试。",
-                )
-            )
-            self.quality_label.setProperty("warning", True)
-        elif adopted_issues:
-            self.quality_label.setText("识别结果需要人工校对：" + "；".join(adopted_issues))
-            self.quality_label.setProperty("warning", True)
-        else:
-            self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
-            self.quality_label.setProperty("warning", False)
-        _refresh_style(self.quality_label)
+        self._show_candidate_quality(selected_candidate)
         self.status_label.setText("")
         self._show_near(anchor)
 
     def show_error(self, message: str, anchor: QRect) -> None:
+        self._clear_source_switch()
         self._result = None
         self.backend_label.setText("识别失败")
         self.preview_message.setText(message)
@@ -453,7 +476,118 @@ class FloatingResultPanel(QWidget):
         del blocker
         self.copy_latex_button.setDisabled(True)
         self.copy_mathml_button.setDisabled(True)
+        self.status_label.clear()
         self._show_near(anchor)
+
+    def _configure_source_switch(
+        self,
+        result: RecognitionResult,
+        draft: str | None,
+        source: str | None,
+    ) -> RecognitionCandidate | None:
+        self._clear_source_switch()
+        self._source_candidates = {
+            candidate.source: candidate
+            for candidate in result.alternatives
+            if candidate.source in {"local", "ai"}
+        }
+        show_switch = (
+            result.comparison == "different"
+            and "local" in self._source_candidates
+            and "ai" in self._source_candidates
+        )
+        self.source_switch.setVisible(show_switch)
+        if show_switch:
+            if source in self._source_candidates:
+                selected_source = source
+            else:
+                selected_source = next(
+                    (
+                        candidate_source
+                        for candidate_source, candidate in self._source_candidates.items()
+                        if draft is not None and draft == candidate.latex
+                    ),
+                    "ai",
+                )
+            self._active_source = selected_source
+            selected_button = (
+                self.local_result_button
+                if selected_source == "local"
+                else self.ai_result_button
+            )
+            selected_button.setChecked(True)
+            return self._source_candidates[selected_source]
+        return next(
+            (
+                candidate
+                for candidate in result.alternatives
+                if candidate.latex == result.latex
+                and candidate.backend == result.backend_name
+            ),
+            None,
+        )
+
+    def _clear_source_switch(self) -> None:
+        self._source_candidates.clear()
+        self._active_source = ""
+        self._source_button_group.setExclusive(False)
+        self.local_result_button.setChecked(False)
+        self.ai_result_button.setChecked(False)
+        self._source_button_group.setExclusive(True)
+        self.source_switch.hide()
+
+    def _update_backend_label(
+        self, candidate: RecognitionCandidate | None = None
+    ) -> None:
+        if candidate is not None:
+            backend = candidate.backend
+            elapsed = candidate.elapsed_seconds
+        elif self._result is not None:
+            backend = self._result.backend_name
+            elapsed = self._result.elapsed_seconds
+        else:
+            return
+        self.backend_label.setText(f"{backend} · {elapsed:.2f} 秒")
+
+    @Slot(str)
+    def _select_source(self, source: str) -> None:
+        if self._result is None:
+            return
+        candidate = self._source_candidates.get(source)
+        if candidate is None:
+            return
+        source_changed = source != self._active_source
+        self._active_source = source
+        button = self.local_result_button if source == "local" else self.ai_result_button
+        button.setChecked(True)
+        self._preview_timer.stop()
+        blocker = QSignalBlocker(self.latex_view)
+        self.latex_view.setPlainText(candidate.latex)
+        del blocker
+        if source_changed:
+            self.source_changed.emit(source)
+        self.draft_changed.emit(candidate.latex)
+        self._update_backend_label(candidate)
+        self._update_copy_buttons()
+        self._render_preview(candidate.latex, edited=False)
+        self._show_candidate_quality(candidate)
+        self.status_label.clear()
+
+    def _show_candidate_quality(
+        self, candidate: RecognitionCandidate | None
+    ) -> None:
+        warnings = list(self._result.warnings if self._result is not None else ())
+        if candidate is not None and candidate.issues:
+            warnings.insert(0, "识别结果需要人工校对：" + "；".join(candidate.issues))
+        if candidate is not None and not candidate.previewable:
+            warnings.insert(0, "当前结果无法预览，可继续修改 LaTeX 后重试。")
+        if warnings:
+            self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
+            self.quality_label.setProperty("warning", True)
+        else:
+            self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
+            self.quality_label.setProperty("warning", False)
+        _refresh_style(self.quality_label)
 
     def _show_near(self, anchor: QRect) -> None:
         screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
@@ -488,6 +622,7 @@ class FloatingResultPanel(QWidget):
             self.status_label.setText(f"复制失败：{exc}")
             return
         self.status_label.setText("LaTeX 已复制")
+        self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
         self.hide()
@@ -510,6 +645,7 @@ class FloatingResultPanel(QWidget):
             self.status_label.setText(str(exc))
             return
         self.status_label.setText("MathML 已复制，可粘贴到 Word/MathType")
+        self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
         self.hide()
@@ -588,6 +724,7 @@ class FloatingResultPanel(QWidget):
 
     @Slot()
     def _dismiss_result(self) -> None:
+        self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
         self.hide()
@@ -595,6 +732,7 @@ class FloatingResultPanel(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._result is not None:
+            self._clear_source_switch()
             self._result = None
             self._preview_timer.stop()
             self.result_consumed.emit()
@@ -619,21 +757,31 @@ class FloatingFormulaAssistant(QObject):
         self.preferences = FloatingPreferences.load(self.settings_store)
         apply_application_theme(self.preferences.result_theme)
         self.manager = manager or BackendManager()
+        self._api_key_store = OpenAIApiKeyStore()
         self.orb = FloatingOrb(
             self.preferences.effective_ring_color,
             self.preferences.effective_logo_path,
         )
         self.panel = FloatingResultPanel(self.preferences.result_theme)
-        self.settings_panel = SettingsPanel(self.settings_store, self.preferences)
+        self.settings_panel = SettingsPanel(
+            self.settings_store,
+            self.preferences,
+            api_key_store=self._api_key_store,
+        )
+        self.preferences = self.settings_panel.preferences
         self._overlay: SnipOverlay | None = None
         self._worker: RecognitionWorker | None = None
         self._capture_pending = False
         self._last_image: QImage | None = None
         self._last_result: RecognitionResult | None = None
         self._last_result_draft: str | None = None
+        self._last_result_source: str | None = None
         self._pending_result = False
         self._pending_error: str | None = None
         self._settings_visible = False
+        self._shutdown = False
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._tray_menu: QMenu | None = None
         self._thread_pool = QThreadPool.globalInstance()
         self._warmup_worker: ModelWarmupWorker | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
@@ -647,30 +795,65 @@ class FloatingFormulaAssistant(QObject):
         self._update_timer.setInterval(CHECK_INTERVAL_SECONDS * 1000)
         self._update_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._update_timer.timeout.connect(self.check_for_updates)
+        self._tray_trigger_timer = RepeatingTimer(self)
+        self._tray_trigger_timer.setSingleShot(True)
+        self._tray_trigger_timer.timeout.connect(self._run_delayed_tray_trigger)
 
         self.orb.capture_requested.connect(self.start_capture)
         self.orb.settings_requested.connect(self.open_settings)
         self.orb.quit_requested.connect(QApplication.quit)
+        self.orb.close_requested.connect(self._orb_close_requested)
         self.panel.recapture_requested.connect(self.start_capture)
         self.panel.result_consumed.connect(self._result_consumed)
         self.panel.draft_changed.connect(self._result_draft_changed)
+        self.panel.source_changed.connect(self._result_source_changed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
+        self.settings_panel.ai_credential_changed.connect(
+            self._cancel_active_recognition
+        )
         self.settings_panel.update_check_requested.connect(
             lambda: self.check_for_updates(manual=True)
         )
+        self._create_system_tray()
+
+    def _create_system_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        menu = QMenu()
+        start_action = menu.addAction("开始识别")
+        show_action = menu.addAction("显示悬浮球")
+        settings_action = menu.addAction("打开设置")
+        update_action = menu.addAction("检查更新")
+        menu.addSeparator()
+        quit_action = menu.addAction("退出软件")
+        start_action.triggered.connect(self._start_capture_from_tray)
+        show_action.triggered.connect(self._show_floating_from_tray)
+        settings_action.triggered.connect(self._open_settings_from_tray)
+        update_action.triggered.connect(self._check_for_updates_from_tray)
+        quit_action.triggered.connect(self._quit_from_tray)
+
+        tray = QSystemTrayIcon(application_icon(), self)
+        tray.setToolTip("FormulaSnip 公式识别")
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._tray_activated)
+        self._tray_menu = menu
+        self._tray_icon = tray
+        tray.show()
+
+    @Slot()
+    def _orb_close_requested(self) -> None:
+        if self._tray_icon is not None:
+            self.orb.hide()
+            return
+        QApplication.quit()
 
     def start_model_warmup(self) -> None:
         """Start one ordered, non-blocking model warmup run."""
 
         if self._warmup_worker is not None:
             return
-        keys = {
-            "auto": ("rapid", "mathcraft"),
-            "rapid": ("rapid",),
-            "mathcraft": ("mathcraft",),
-        }.get(self.preferences.recognition_mode, ("rapid", "mathcraft"))
-        worker = ModelWarmupWorker(self.manager, keys)
+        worker = ModelWarmupWorker(self.manager, ("mathcraft",))
         worker.signals.started.connect(
             lambda key: self.settings_panel.set_engine_status(key, "started")
         )
@@ -685,12 +868,53 @@ class FloatingFormulaAssistant(QObject):
         self._thread_pool.start(worker)
 
     def shutdown(self) -> None:
+        if self._shutdown:
+            return
+        self._shutdown = True
         self._update_timer.stop()
-        self.manager.close()
+        self._tray_trigger_timer.stop()
+        update_check_worker = self._update_check_worker
+        update_download_worker = self._update_download_worker
+        self._update_check_worker = None
+        self._update_download_worker = None
+        if update_check_worker is not None:
+            update_check_worker.cancel()
+        if update_download_worker is not None:
+            update_download_worker.cancel()
+            if (
+                self._pending_update_install is None
+                and update_download_worker.completed_path is not None
+            ):
+                self._pending_update_install = (
+                    update_download_worker.completed_path,
+                    update_download_worker.release,
+                )
+        if self._worker is not None:
+            self._worker.cancel()
+        self.settings_panel.cancel_ai_request()
+        if self._pending_update_install is not None:
+            self._try_launch_pending_installer(force=True, quit_application=False)
+        else:
+            if update_download_worker is not None:
+                self._reset_update_throttle_for_retry()
+            self.manager.close()
+        tray = self._tray_icon
+        menu = self._tray_menu
+        self._tray_icon = None
+        self._tray_menu = None
+        if tray is not None:
+            tray.hide()
+            tray.setContextMenu(None)
+            tray.deleteLater()
+        if menu is not None:
+            menu.close()
+            menu.deleteLater()
 
     @Slot()
     def _model_warmup_finished(self) -> None:
         self._warmup_worker = None
+        if self._shutdown:
+            return
         self._try_launch_pending_installer()
 
     def show(self) -> None:
@@ -700,16 +924,20 @@ class FloatingFormulaAssistant(QObject):
             self.enter_floating_mode()
 
     def start_update_checks(self) -> None:
+        if self._shutdown:
+            return
         if not self._update_timer.isActive():
             self._update_timer.start()
         QTimer.singleShot(1500, self.check_for_updates)
 
     def _restart_update_timer(self) -> None:
-        if self._update_timer.isActive():
+        if not self._shutdown and self._update_timer.isActive():
             self._update_timer.start()
 
     @Slot()
     def check_for_updates(self, *, manual: bool = False) -> None:
+        if self._shutdown:
+            return
         if self._update_check_worker is not None:
             if manual:
                 self._update_check_manual_requested = True
@@ -738,6 +966,8 @@ class FloatingFormulaAssistant(QObject):
     @Slot(object)
     def _update_available(self, release: ReleaseInfo, manual: bool) -> None:
         self._update_check_worker = None
+        if self._shutdown:
+            return
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
         self._restart_update_timer()
@@ -755,6 +985,8 @@ class FloatingFormulaAssistant(QObject):
     @Slot()
     def _update_not_available(self, manual: bool) -> None:
         self._update_check_worker = None
+        if self._shutdown:
+            return
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
         self._restart_update_timer()
@@ -766,6 +998,8 @@ class FloatingFormulaAssistant(QObject):
     @Slot(str)
     def _update_check_failed(self, message: str, manual: bool) -> None:
         self._update_check_worker = None
+        if self._shutdown:
+            return
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
         self._restart_update_timer()
@@ -773,6 +1007,8 @@ class FloatingFormulaAssistant(QObject):
             self.settings_panel.set_update_status(f"检查失败：{message}")
 
     def _begin_update(self, release: ReleaseInfo) -> None:
+        if self._shutdown:
+            return
         dialog = self._update_dialog
         if dialog is None or self._update_download_worker is not None:
             return
@@ -788,7 +1024,7 @@ class FloatingFormulaAssistant(QObject):
             return
         dialog.show_downloading()
         worker = UpdateDownloadWorker(release, Path(cache_root) / "updates")
-        worker.signals.progress.connect(dialog.set_download_progress)
+        worker.signals.progress.connect(self._update_download_progress)
         worker.signals.finished.connect(
             lambda path, selected=release: self._update_downloaded(path, selected)
         )
@@ -799,15 +1035,22 @@ class FloatingFormulaAssistant(QObject):
     @Slot(object)
     def _update_downloaded(self, path: Path, release: ReleaseInfo) -> None:
         self._update_download_worker = None
+        if self._shutdown:
+            return
         self._pending_update_install = (Path(path), release)
         self._try_launch_pending_installer()
 
-    def _try_launch_pending_installer(self) -> bool:
+    def _try_launch_pending_installer(
+        self,
+        *,
+        force: bool = False,
+        quit_application: bool = True,
+    ) -> bool:
         pending = self._pending_update_install
         if pending is None:
             return False
         dialog = self._update_dialog
-        if (
+        if not force and (
             self._worker is not None
             or self._warmup_worker is not None
             or self._capture_pending
@@ -827,21 +1070,44 @@ class FloatingFormulaAssistant(QObject):
                 start_detached=QProcess.startDetached,
             )
         except Exception as exc:
-            self.manager = BackendManager()
-            if dialog is not None:
+            if self._shutdown:
+                self._reset_update_throttle_for_retry()
+                logging.getLogger(__name__).warning(
+                    "update-installer-launch-failed: %s", exc
+                )
+            else:
+                self.manager = BackendManager()
+            if dialog is not None and not self._shutdown:
                 dialog.show_error(f"安装包校验失败：{exc}")
             return False
         if not started:
-            self.manager = BackendManager()
-            if dialog is not None:
+            if self._shutdown:
+                self._reset_update_throttle_for_retry()
+                logging.getLogger(__name__).warning("update-installer-start-failed")
+            else:
+                self.manager = BackendManager()
+            if dialog is not None and not self._shutdown:
                 dialog.show_error("无法启动更新安装程序。")
             return False
-        QApplication.quit()
+        if quit_application:
+            QApplication.quit()
         return True
+
+    def _reset_update_throttle_for_retry(self) -> None:
+        self.settings_store.remove("updates/last_check_utc")
+        self.settings_store.sync()
+
+    @Slot(object, object)
+    def _update_download_progress(self, received: int, total: int) -> None:
+        if self._shutdown or self._update_dialog is None:
+            return
+        self._update_dialog.set_download_progress(received, total)
 
     @Slot(str)
     def _update_download_failed(self, message: str) -> None:
         self._update_download_worker = None
+        if self._shutdown:
+            return
         if self._update_dialog is not None:
             self._update_dialog.show_error(f"更新失败：{message}")
 
@@ -868,28 +1134,91 @@ class FloatingFormulaAssistant(QObject):
                 self._last_result,
                 self.orb.geometry(),
                 self._last_result_draft,
+                self._last_result_source,
             )
         elif self._pending_error is not None:
             message = self._pending_error
             self._pending_error = None
             self.panel.show_error(message, self.orb.geometry())
 
+    def _capture_in_progress(self) -> bool:
+        return self._capture_pending or self._overlay is not None
+
+    def _can_start_capture(self) -> bool:
+        return (
+            not self._shutdown
+            and self._pending_update_install is None
+            and self._worker is None
+            and not self._capture_in_progress()
+        )
+
+    @Slot()
+    def _start_capture_from_tray(self) -> None:
+        if not self._can_start_capture():
+            return
+        self.enter_floating_mode()
+        self.start_capture()
+
+    @Slot()
+    def _show_floating_from_tray(self) -> None:
+        if self._shutdown or self._capture_in_progress():
+            return
+        self.enter_floating_mode()
+
+    @Slot()
+    def _run_delayed_tray_trigger(self) -> None:
+        self._show_floating_from_tray()
+
+    @Slot()
+    def _open_settings_from_tray(self) -> None:
+        if self._shutdown or self._capture_in_progress():
+            return
+        self.open_settings()
+
+    @Slot()
+    def _check_for_updates_from_tray(self) -> None:
+        if self._shutdown or self._capture_in_progress():
+            return
+        self.open_settings()
+        self.check_for_updates(manual=True)
+
+    @staticmethod
+    @Slot()
+    def _quit_from_tray() -> None:
+        QApplication.quit()
+
+    @Slot(object)
+    def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if not self._shutdown:
+                self._tray_trigger_timer.start(QApplication.doubleClickInterval())
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._tray_trigger_timer.stop()
+            self._start_capture_from_tray()
+
     @Slot(object)
     def _apply_preferences(self, preferences: FloatingPreferences) -> None:
+        previous = self.preferences
         self.preferences = preferences
+        if self._worker is not None and (
+            not preferences.ai_correction_enabled
+            or preferences.ai_base_url != previous.ai_base_url
+            or preferences.ai_model != previous.ai_model
+        ):
+            self._worker.cancel()
         self.orb.set_color(preferences.effective_ring_color)
         self.orb.set_logo_path(preferences.effective_logo_path)
         self.panel.set_theme(preferences.result_theme)
         apply_application_theme(preferences.result_theme)
 
     @Slot()
+    def _cancel_active_recognition(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+
+    @Slot()
     def start_capture(self) -> None:
-        if (
-            self._pending_update_install is not None
-            or self._worker is not None
-            or self._capture_pending
-            or self._overlay is not None
-        ):
+        if not self._can_start_capture():
             return
         self._capture_pending = True
         self.panel.hide()
@@ -897,6 +1226,9 @@ class FloatingFormulaAssistant(QObject):
         QTimer.singleShot(180, self._show_screen_overlay)
 
     def _show_screen_overlay(self) -> None:
+        if self._shutdown:
+            self._capture_pending = False
+            return
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is None:
             self._capture_pending = False
@@ -926,19 +1258,34 @@ class FloatingFormulaAssistant(QObject):
         self.orb.raise_()
         self.orb.set_busy(True)
         self.orb.set_result_available(False)
-        self._last_image = pixmap.toImage()
+        self._last_image = None
         self._last_result = None
         self._last_result_draft = None
+        self._last_result_source = None
         self._pending_result = False
         self._pending_error = None
         try:
-            image = qimage_to_pil(self._last_image)
+            image = qimage_to_pil(pixmap.toImage())
         except ValueError as exc:
             self._recognition_failed(str(exc))
             return
-        worker = RecognitionWorker(self.manager, image, self.preferences.recognition_mode)
-        worker.signals.finished.connect(self._recognition_finished)
-        worker.signals.failed.connect(self._recognition_failed)
+        ai_api_key: str | None = None
+        if self.preferences.ai_correction_enabled:
+            try:
+                ai_api_key = self._api_key_store.load()
+            except CredentialError:
+                ai_api_key = None
+        worker = RecognitionWorker(
+            self.manager,
+            image,
+            self.preferences.recognition_mode,
+            ai_enabled=self.preferences.ai_correction_enabled,
+            ai_api_key=ai_api_key,
+            ai_base_url=self.preferences.ai_base_url,
+            ai_model=self.preferences.ai_model,
+        )
+        worker.signals.finished.connect(self._worker_recognition_finished)
+        worker.signals.failed.connect(self._worker_recognition_failed)
         self._worker = worker
         self._thread_pool.start(worker)
 
@@ -955,6 +1302,7 @@ class FloatingFormulaAssistant(QObject):
                 self._last_result,
                 self.orb.geometry(),
                 self._last_result_draft,
+                self._last_result_source,
             )
 
     @Slot(object)
@@ -962,6 +1310,7 @@ class FloatingFormulaAssistant(QObject):
         self._worker = None
         self._last_result = result
         self._last_result_draft = result.latex
+        self._last_result_source = None
         self._pending_error = None
         self.orb.set_busy(False)
         self.orb.set_result_available(True)
@@ -971,6 +1320,22 @@ class FloatingFormulaAssistant(QObject):
             self._pending_result = True
             return
         self.panel.show_result(result, self.orb.geometry())
+
+    @Slot(object, object)
+    def _worker_recognition_finished(
+        self,
+        worker: RecognitionWorker,
+        result: RecognitionResult,
+    ) -> None:
+        if worker is not self._worker:
+            worker.release_resources()
+            return
+        delivery = worker.result_for_delivery(result)
+        worker.release_resources()
+        if delivery is None:
+            self._recognition_failed("识别任务已取消。")
+        else:
+            self._recognition_finished(delivery)
 
     @Slot(str)
     def _recognition_failed(self, message: str) -> None:
@@ -983,18 +1348,36 @@ class FloatingFormulaAssistant(QObject):
             return
         self.panel.show_error(message, self.orb.geometry())
 
+    @Slot(object, str)
+    def _worker_recognition_failed(
+        self,
+        worker: RecognitionWorker,
+        message: str,
+    ) -> None:
+        if worker is not self._worker:
+            worker.release_resources()
+            return
+        worker.release_resources()
+        self._recognition_failed(message)
+
     @Slot()
     def _result_consumed(self) -> None:
         self._pending_result = False
         self._last_image = None
         self._last_result = None
         self._last_result_draft = None
+        self._last_result_source = None
         self.orb.set_result_available(False)
 
     @Slot(str)
     def _result_draft_changed(self, latex: str) -> None:
         if self._last_result is not None:
             self._last_result_draft = latex
+
+    @Slot(str)
+    def _result_source_changed(self, source: str) -> None:
+        if self._last_result is not None:
+            self._last_result_source = source
 
 
 def _refresh_style(widget: QWidget) -> None:

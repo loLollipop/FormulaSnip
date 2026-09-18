@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$IsccPath
+    [string]$IsccPath,
+    [string]$ReleaseNotesPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,6 +9,7 @@ $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $applicationDirectory = Join-Path $projectRoot "dist\FormulaSnip"
 $installerScript = Join-Path $projectRoot "installer\FormulaSnip.iss"
 $pyprojectPath = Join-Path $projectRoot "pyproject.toml"
+$maximumReleaseNotesLength = 4000
 
 if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
     throw "FormulaSnip installers must be built on Windows."
@@ -34,6 +36,23 @@ if ($null -eq $versionMatch -or $versionMatch.Matches.Count -ne 1) {
 }
 $appVersion = $versionMatch.Matches[0].Groups[1].Value
 
+if ([string]::IsNullOrWhiteSpace($ReleaseNotesPath)) {
+    $ReleaseNotesPath = Join-Path $projectRoot "RELEASE_NOTES.md"
+}
+if (-not (Test-Path -LiteralPath $ReleaseNotesPath -PathType Leaf)) {
+    throw "Release notes were not found: $ReleaseNotesPath"
+}
+$releaseNotes = [System.IO.File]::ReadAllText(
+    (Resolve-Path -LiteralPath $ReleaseNotesPath).Path,
+    [System.Text.Encoding]::UTF8
+).Trim()
+if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+    throw "Release notes must not be empty."
+}
+if ($releaseNotes.Length -gt $maximumReleaseNotesLength) {
+    throw "Release notes exceed the $maximumReleaseNotesLength character client limit."
+}
+
 $metadataDirectories = @(
     Get-ChildItem `
         -LiteralPath (Join-Path $applicationDirectory "_internal") `
@@ -53,13 +72,15 @@ if ($packagedVersion -ne $appVersion) {
     throw "Packaged app version $packagedVersion does not match project version $appVersion. Rebuild the portable application first."
 }
 
-$rapidModelDirectory = Join-Path $applicationDirectory "_internal\rapid_latex_ocr\models"
-if (
-    (Test-Path -LiteralPath $rapidModelDirectory -PathType Container) -and
-    (Get-ChildItem -LiteralPath $rapidModelDirectory -Recurse -File | Select-Object -First 1)
-) {
-    throw "Rapid model weights were found in the portable directory. Remove them or rebuild before creating a redistributable installer."
+$retiredRapidEntries = @(
+    (Join-Path $applicationDirectory "_internal\rapid_latex_ocr"),
+    (Join-Path $applicationDirectory "_internal\rapid_latex_ocr-0.0.9.dist-info"),
+    (Join-Path $applicationDirectory "_internal\formulasnip\recognition\rapid_config.yaml")
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($null -ne $retiredRapidEntries) {
+    throw "The portable directory still contains the retired RapidLaTeXOCR backend. Rebuild it with scripts\build_windows.ps1 -SkipInstaller first: $retiredRapidEntries"
 }
+
 $mathCraftWeights = Get-ChildItem `
     -LiteralPath $applicationDirectory `
     -Recurse `
@@ -118,7 +139,7 @@ $manifest = [ordered]@{
     schema_version = 1
     version = $appVersion
     tag = "v$appVersion"
-    notes = ""
+    notes = $releaseNotes
     asset = [ordered]@{
         name = $installer.Name
         size = $installer.Length
@@ -129,3 +150,4 @@ $manifestJson = $manifest | ConvertTo-Json -Depth 3
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
 Write-Output "Update manifest: $manifestPath"
+Write-Output "Release notes: $ReleaseNotesPath"

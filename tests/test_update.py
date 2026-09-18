@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from formulasnip.update import (
     REQUEST_TIMEOUT,
     ReleaseInfo,
     UpdateAsset,
+    UpdateCancellation,
+    UpdateCancelled,
     UpdateError,
     _fetch_release_manifest,
     download_installer,
@@ -415,6 +418,69 @@ def test_download_rejects_size_mismatch_and_cleans_partial(
     with pytest.raises(UpdateError):
         download_installer(asset, tmp_path, client=_Client(response))
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_cancelled_download_cleans_partial_and_stops_progress(tmp_path: Path) -> None:
+    content = b"abcdef"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    url = f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}"
+    asset = UpdateAsset(name, url, len(content), hashlib.sha256(content).hexdigest())
+    cancellation = UpdateCancellation()
+
+    class CancellingResponse(_Response):
+        def iter_content(self, chunk_size: int) -> Any:
+            del chunk_size
+            yield content[:3]
+            cancellation.cancel()
+            yield content[3:]
+
+    progress: list[tuple[int, int]] = []
+    response = CancellingResponse(content=content, url=url, content_length=len(content))
+
+    with pytest.raises(UpdateCancelled):
+        download_installer(
+            asset,
+            tmp_path,
+            client=_Client(response),
+            progress=lambda received, total: progress.append((received, total)),
+            cancel_event=cancellation,
+        )
+
+    assert progress == [(3, 6)]
+    assert not list(tmp_path.glob("*.part"))
+    assert not (tmp_path / name).exists()
+    assert response.closed
+
+
+def test_cancelled_update_worker_emits_no_completion_signal(monkeypatch: Any) -> None:
+    from formulasnip.ui import update_dialog
+
+    entered = Event()
+
+    def blocking_fetch(
+        _version: str, *, cancel_event: UpdateCancellation
+    ) -> ReleaseInfo | None:
+        entered.set()
+        released = Event()
+        cancel_event.add_abort_callback(released.set)
+        assert released.wait(1.0)
+        raise UpdateCancelled("cancelled")
+
+    monkeypatch.setattr(update_dialog, "fetch_latest_release", blocking_fetch)
+    worker = update_dialog.UpdateCheckWorker("0.2.0")
+    emitted: list[str] = []
+    worker.signals.available.connect(lambda _release: emitted.append("available"))
+    worker.signals.no_update.connect(lambda: emitted.append("none"))
+    worker.signals.failed.connect(lambda _message: emitted.append("failed"))
+    thread = Thread(target=worker.run)
+    thread.start()
+    assert entered.wait(1.0)
+
+    worker.cancel()
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert emitted == []
 
 
 def test_cached_installer_size_and_hash_are_both_checked(tmp_path: Path) -> None:

@@ -14,10 +14,6 @@ project_root = Path(SPECPATH)
 
 datas = [
     (str(project_root / "formulasnip" / "assets"), "formulasnip/assets"),
-    (
-        str(project_root / "formulasnip" / "recognition" / "rapid_config.yaml"),
-        "formulasnip/recognition",
-    ),
     (str(project_root / "LICENSE"), "."),
     (str(project_root / "README.md"), "."),
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
@@ -48,7 +44,6 @@ for distribution_name in (
     "Pillow",
     "latex2mathml",
     "matplotlib",
-    "rapid-latex-ocr",
     "requests",
     "mathcraft-ocr",
     "rapidocr",
@@ -67,11 +62,6 @@ for distribution_name in (
 datas.extend((source, destination) for destination, source in metadata.items())
 
 
-def is_rapid_model_file(source: str) -> bool:
-    normalized = source.replace("\\", "/").lower()
-    return "/rapid_latex_ocr/models/" in normalized
-
-
 def is_downloadable_model_file(source: str) -> bool:
     """Keep runtime-downloaded OCR weights out of redistributed builds."""
 
@@ -86,19 +76,11 @@ def is_downloadable_model_file(source: str) -> bool:
     )
 
 
-for package_name in (
-    "rapid_latex_ocr",
-    "latex2mathml",
-    "mathcraft_ocr",
-):
+for package_name in ("latex2mathml", "mathcraft_ocr"):
     package_datas, package_binaries, package_hiddenimports = collect_all(
         package_name,
         include_py_files=False,
     )
-    if package_name == "rapid_latex_ocr":
-        package_datas = [
-            item for item in package_datas if not is_rapid_model_file(item[0])
-        ]
     package_datas = [
         item for item in package_datas if not is_downloadable_model_file(item[0])
     ]
