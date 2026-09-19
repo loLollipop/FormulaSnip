@@ -3,7 +3,6 @@ from __future__ import annotations
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import (
     QColor,
-    QCursor,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -13,7 +12,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-OVERLAY_ALPHA = 72
+OVERLAY_COLOR = "#FFFFFF"
+OVERLAY_ALPHA = 96
 MIN_SELECTION_SIZE = 12
 
 
@@ -33,7 +33,7 @@ class SnipOverlay(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
-        self.setCursor(_crosshair_cursor())
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setGeometry(screen.geometry())
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -47,7 +47,9 @@ class SnipOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.drawPixmap(self.rect(), self._screenshot)
-        painter.fillRect(self.rect(), QColor(5, 10, 20, OVERLAY_ALPHA))
+        overlay_color = QColor(OVERLAY_COLOR)
+        overlay_color.setAlpha(OVERLAY_ALPHA)
+        painter.fillRect(self.rect(), overlay_color)
 
         selection = self._selection_rect()
         if selection.isValid() and selection.width() > 1 and selection.height() > 1:
@@ -56,22 +58,12 @@ class SnipOverlay(QWidget):
             painter.setPen(QPen(QColor("#60a5fa"), 2))
             painter.drawRect(selection)
             label_rect = QRect(selection.left(), max(8, selection.top() - 32), 260, 26)
-            painter.fillRect(label_rect, QColor(15, 23, 42, 220))
-            painter.setPen(QColor("#e5edf8"))
+            painter.fillRect(label_rect, QColor(255, 255, 255, 235))
+            painter.setPen(QColor("#334155"))
             painter.drawText(
                 label_rect.adjusted(8, 0, -8, 0),
                 Qt.AlignmentFlag.AlignVCenter,
                 f"{selection.width()} × {selection.height()}  松开鼠标完成",
-            )
-        elif self._start is None:
-            help_rect = QRect(0, 0, 420, 52)
-            help_rect.moveCenter(self.rect().center())
-            painter.fillRect(help_rect, QColor(15, 23, 42, 225))
-            painter.setPen(QColor("#f8fafc"))
-            painter.drawText(
-                help_rect,
-                Qt.AlignmentFlag.AlignCenter,
-                "拖动框选公式 · Esc 取消",
             )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -128,19 +120,3 @@ class SnipOverlay(QWidget):
             max(1, round(rect.width() * scale_x)),
             max(1, round(rect.height() * scale_y)),
         )
-
-
-def _crosshair_cursor() -> QCursor:
-    pixmap = QPixmap(31, 31)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setPen(QPen(QColor("#101827"), 5))
-    painter.drawLine(15, 1, 15, 29)
-    painter.drawLine(1, 15, 29, 15)
-    painter.setPen(QPen(QColor("#f8fafc"), 2))
-    painter.drawLine(15, 2, 15, 28)
-    painter.drawLine(2, 15, 28, 15)
-    painter.setPen(QPen(QColor("#2563eb"), 1))
-    painter.drawPoint(15, 15)
-    painter.end()
-    return QCursor(pixmap, 15, 15)

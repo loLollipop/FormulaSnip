@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygon,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -369,7 +370,7 @@ class TutorialStepIllustration(QWidget):
         self.setAccessibleDescription(
             (
                 "左键点击桌面悬浮球进入截图模式",
-                "拖动十字光标框选单个公式",
+                "拖动箭头光标框选单个公式",
                 "在结果面板核对电子公式和 LaTeX",
                 "选择复制 LaTeX 或 MathML 并粘贴到 Word",
             )[step_index]
@@ -437,6 +438,25 @@ class TutorialStepIllustration(QWidget):
         painter.setPen(QPen(border, 1))
         painter.setBrush(fill)
         painter.drawRoundedRect(rect, radius, radius)
+
+    @staticmethod
+    def _draw_arrow_cursor(
+        painter: QPainter, tip: QPoint, fill: QColor, outline: QColor
+    ) -> None:
+        points = QPolygon(
+            [
+                tip,
+                tip + QPoint(1, 20),
+                tip + QPoint(6, 15),
+                tip + QPoint(11, 24),
+                tip + QPoint(15, 22),
+                tip + QPoint(10, 13),
+                tip + QPoint(18, 13),
+            ]
+        )
+        painter.setPen(QPen(outline, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setBrush(fill)
+        painter.drawPolygon(points)
 
     def _draw_formula(self, painter: QPainter, rect: QRectF) -> None:
         if self._formula_image.isNull():
@@ -534,16 +554,11 @@ class TutorialStepIllustration(QWidget):
         painter.setBrush(QColor("#1A2434"))
         painter.drawEllipse(orb)
         cls._draw_label(painter, orb, "fx", QColor("#FFFFFF"), size=14, bold=True)
-        cursor_x = orb.left() - 17
-        cursor_y = orb.center().y()
-        painter.setPen(QPen(colors["accent"], 2))
-        painter.drawLine(
-            QPoint(int(cursor_x - 9), int(cursor_y)),
-            QPoint(int(cursor_x + 9), int(cursor_y)),
-        )
-        painter.drawLine(
-            QPoint(int(cursor_x), int(cursor_y - 9)),
-            QPoint(int(cursor_x), int(cursor_y + 9)),
+        cls._draw_arrow_cursor(
+            painter,
+            QPoint(int(orb.left() - 27), int(orb.center().y() - 10)),
+            colors["accent"],
+            QColor("#FFFFFF"),
         )
         label_rect = QRectF(page.left() + 10, page.bottom() - 45, page.width() - 88, 25)
         cls._draw_label(
@@ -589,10 +604,12 @@ class TutorialStepIllustration(QWidget):
             (selection.right(), selection.bottom()),
         ):
             painter.drawEllipse(QRectF(x - 3, y - 3, 6, 6))
-        cursor = selection.bottomRight() + QPoint(13, 13)
-        painter.setPen(QPen(colors["accent"], 2))
-        painter.drawLine(cursor + QPoint(-10, 0), cursor + QPoint(10, 0))
-        painter.drawLine(cursor + QPoint(0, -10), cursor + QPoint(0, 10))
+        self._draw_arrow_cursor(
+            painter,
+            selection.bottomRight().toPoint() + QPoint(5, 5),
+            colors["accent"],
+            QColor("#FFFFFF"),
+        )
         self._draw_label(
             painter,
             QRectF(page.left() + 12, page.bottom() - 31, page.width() - 24, 20),
@@ -860,7 +877,7 @@ class SettingsPanel(QWidget):
         (
             "点击悬浮球",
             "点击悬浮球开始截图",
-            "左键点击桌面上的 fx 悬浮球，屏幕进入框选状态，遮罩下使用高对比十字光标。",
+            "左键点击桌面上的 fx 悬浮球，屏幕进入浅色框选状态，使用箭头光标拖动。",
             "截图只覆盖鼠标所在的那块屏幕；按 Esc 可随时取消。",
         ),
         (
@@ -872,7 +889,7 @@ class SettingsPanel(QWidget):
         (
             "核对结果",
             "核对排版后的电子公式",
-            "结果面板紧贴悬浮球展开，用 SVG 矢量排版，放大仍然清晰。"
+            "结果面板紧贴悬浮球展开，用 MathJax 排版复杂公式，放大仍然清晰。"
             "质量规则会提示括号不配对、裸 frac / sqrt 等可疑结果。",
             "语法正确但数学含义错误的结果无法自动发现，仍需人工校对。",
         ),

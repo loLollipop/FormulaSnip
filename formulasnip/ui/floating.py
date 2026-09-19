@@ -55,7 +55,6 @@ from formulasnip.recognition import BackendManager
 from formulasnip.recognition.quality import assess_latex
 from formulasnip.ui.branding import application_icon, application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
-from formulasnip.ui.preview import render_formula_svg
 from formulasnip.ui.settings import (
     DEFAULT_RING_COLOR,
     RING_PRESETS,
@@ -71,7 +70,7 @@ from formulasnip.ui.update_dialog import (
     UpdateDialog,
     UpdateDownloadWorker,
 )
-from formulasnip.ui.widgets import FormulaSvgWidget
+from formulasnip.ui.widgets import FormulaPreviewWidget
 from formulasnip.ui.worker import ModelWarmupWorker, RecognitionWorker
 from formulasnip.update import (
     CHECK_INTERVAL_SECONDS,
@@ -304,10 +303,13 @@ class FloatingResultPanel(QWidget):
         self._result: RecognitionResult | None = None
         self._source_candidates: dict[str, RecognitionCandidate] = {}
         self._active_source = ""
+        self._preview_request_id: int | None = None
+        self._preview_request_edited = False
+        self._preview_request_candidate: RecognitionCandidate | None = None
         self._theme = "dark"
         self._preview_timer = PreviewTimer(self)
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(250)
+        self._preview_timer.setInterval(300)
         self._preview_timer.timeout.connect(self._refresh_edited_preview)
         self.setObjectName("FloatingResultPanel")
         self.setWindowTitle("FormulaSnip 识别结果")
@@ -352,7 +354,7 @@ class FloatingResultPanel(QWidget):
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setObjectName("FloatingPreviewStack")
-        self.preview_stack.setFixedHeight(126)
+        self.preview_stack.setFixedHeight(168)
         self.preview_message = QLabel("等待识别")
         self.preview_message.setObjectName("FloatingPreviewMessage")
         self.preview_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -360,11 +362,13 @@ class FloatingResultPanel(QWidget):
         self.preview_frame = QWidget()
         self.preview_frame.setObjectName("FloatingPreviewFrame")
         preview_layout = QVBoxLayout(self.preview_frame)
-        preview_layout.setContentsMargins(30, 22, 30, 22)
+        preview_layout.setContentsMargins(12, 12, 12, 12)
         preview_layout.setSpacing(0)
-        self.svg_preview = FormulaSvgWidget()
-        self.svg_preview.setObjectName("FloatingSvgPreview")
-        preview_layout.addWidget(self.svg_preview, 1)
+        self.formula_preview = FormulaPreviewWidget()
+        self.formula_preview.setObjectName("FloatingFormulaPreview")
+        self.formula_preview.rendered.connect(self._preview_rendered)
+        self.formula_preview.failed.connect(self._preview_failed)
+        preview_layout.addWidget(self.formula_preview, 1)
         self.preview_stack.addWidget(self.preview_message)
         self.preview_stack.addWidget(self.preview_frame)
         outer.addWidget(self.preview_stack)
@@ -453,12 +457,11 @@ class FloatingResultPanel(QWidget):
         self.latex_view.setPlainText(displayed_latex)
         del blocker
         self._update_copy_buttons()
-        self._render_preview(displayed_latex, edited=edited_draft)
-        if edited_draft:
-            self._show_near(anchor)
-            return
-        self._show_candidate_quality(selected_candidate)
-        self.status_label.setText("")
+        self._render_preview(
+            displayed_latex,
+            edited=edited_draft,
+            candidate=None if edited_draft else selected_candidate,
+        )
         self._show_near(anchor)
 
     def show_error(self, message: str, anchor: QRect) -> None:
@@ -471,6 +474,7 @@ class FloatingResultPanel(QWidget):
         self.quality_label.setProperty("warning", True)
         _refresh_style(self.quality_label)
         self._preview_timer.stop()
+        self._preview_request_id = None
         blocker = QSignalBlocker(self.latex_view)
         self.latex_view.clear()
         del blocker
@@ -569,21 +573,25 @@ class FloatingResultPanel(QWidget):
         self.draft_changed.emit(candidate.latex)
         self._update_backend_label(candidate)
         self._update_copy_buttons()
-        self._render_preview(candidate.latex, edited=False)
-        self._show_candidate_quality(candidate)
-        self.status_label.clear()
+        self._render_preview(candidate.latex, edited=False, candidate=candidate)
 
     def _show_candidate_quality(
-        self, candidate: RecognitionCandidate | None
+        self,
+        candidate: RecognitionCandidate | None,
+        *,
+        preview_pending: bool = False,
     ) -> None:
         warnings = list(self._result.warnings if self._result is not None else ())
         if candidate is not None and candidate.issues:
             warnings.insert(0, "识别结果需要人工校对：" + "；".join(candidate.issues))
-        if candidate is not None and not candidate.previewable:
+        if candidate is not None and candidate.previewable is False:
             warnings.insert(0, "当前结果无法预览，可继续修改 LaTeX 后重试。")
         if warnings:
             self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
             self.quality_label.setProperty("warning", True)
+        elif preview_pending:
+            self.quality_label.setText("正在生成预览…")
+            self.quality_label.setProperty("warning", False)
         else:
             self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
             self.quality_label.setProperty("warning", False)
@@ -654,8 +662,15 @@ class FloatingResultPanel(QWidget):
     @Slot()
     def _latex_edited(self) -> None:
         latex = self.latex_view.toPlainText()
+        self._preview_request_id = None
         self.draft_changed.emit(latex)
         self._update_copy_buttons()
+        if latex.strip():
+            self._show_pending_preview_quality(
+                latex,
+                edited=True,
+                candidate=None,
+            )
         self.status_label.setText("正在更新预览…" if latex.strip() else "")
         self._preview_timer.start()
 
@@ -668,7 +683,16 @@ class FloatingResultPanel(QWidget):
         self.copy_latex_button.setEnabled(enabled)
         self.copy_mathml_button.setEnabled(enabled)
 
-    def _render_preview(self, latex: str, *, edited: bool) -> None:
+    def _render_preview(
+        self,
+        latex: str,
+        *,
+        edited: bool,
+        candidate: RecognitionCandidate | None = None,
+    ) -> None:
+        self._preview_request_id = None
+        self._preview_request_edited = edited
+        self._preview_request_candidate = candidate
         if not latex.strip():
             self.preview_message.setText("请输入 LaTeX 以生成电子公式预览。")
             self.preview_stack.setCurrentWidget(self.preview_message)
@@ -679,7 +703,7 @@ class FloatingResultPanel(QWidget):
                 _refresh_style(self.quality_label)
             return
         try:
-            self.svg_preview.set_formula_svg(render_formula_svg(latex))
+            request_id = self.formula_preview.set_formula(latex)
         except Exception:
             self.preview_message.setText(
                 "当前 LaTeX 暂时无法生成电子公式预览，可继续修改后重试。"
@@ -693,8 +717,43 @@ class FloatingResultPanel(QWidget):
                 self.status_label.setText("预览生成失败，可继续修改")
                 _refresh_style(self.quality_label)
             return
+        self._preview_request_id = request_id
         self.preview_stack.setCurrentWidget(self.preview_frame)
+        self._show_pending_preview_quality(latex, edited=edited, candidate=candidate)
+        self.status_label.setText("正在生成预览…")
+
+    def _show_pending_preview_quality(
+        self,
+        latex: str,
+        *,
+        edited: bool,
+        candidate: RecognitionCandidate | None,
+    ) -> None:
         if edited:
+            report = assess_latex(latex)
+            warnings = list(self._persistent_result_warnings())
+            if report.issues:
+                warnings.insert(0, "识别结果需要人工校对：" + "；".join(report.issues))
+            if warnings:
+                self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
+                self.quality_label.setProperty("warning", True)
+            else:
+                self.quality_label.setText("正在生成预览…")
+                self.quality_label.setProperty("warning", False)
+        else:
+            self._show_candidate_quality(candidate, preview_pending=True)
+            return
+        _refresh_style(self.quality_label)
+
+    @Slot(int, str)
+    def _preview_rendered(self, request_id: int, _backend: str) -> None:
+        if request_id != self._preview_request_id:
+            return
+        if request_id != self.formula_preview.request_id:
+            return
+        self.preview_stack.setCurrentWidget(self.preview_frame)
+        if self._preview_request_edited:
+            latex = self.latex_view.toPlainText()
             report = assess_latex(latex)
             warnings = list(self._persistent_result_warnings())
             if report.issues:
@@ -706,7 +765,30 @@ class FloatingResultPanel(QWidget):
                 self.quality_label.setText("电子公式预览已更新，请核对后复制")
                 self.quality_label.setProperty("warning", False)
             self.status_label.setText("预览已更新")
-            _refresh_style(self.quality_label)
+        else:
+            self._show_candidate_quality(
+                self._preview_request_candidate,
+                preview_pending=False,
+            )
+            self.status_label.setText("电子公式已生成")
+        _refresh_style(self.quality_label)
+
+    @Slot(int, str)
+    def _preview_failed(self, request_id: int, _detail: str) -> None:
+        if request_id != self._preview_request_id:
+            return
+        if request_id != self.formula_preview.request_id:
+            return
+        self.preview_message.setText(
+            "当前 LaTeX 暂时无法生成电子公式预览，可继续修改后重试。"
+        )
+        self.preview_stack.setCurrentWidget(self.preview_message)
+        warnings = ["预览生成失败，可继续修改 LaTeX 后重试。"]
+        warnings.extend(self._persistent_result_warnings())
+        self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
+        self.quality_label.setProperty("warning", True)
+        self.status_label.setText("预览生成失败，可继续修改")
+        _refresh_style(self.quality_label)
 
     def _persistent_result_warnings(self) -> tuple[str, ...]:
         if self._result is None:
@@ -727,6 +809,7 @@ class FloatingResultPanel(QWidget):
         self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
+        self._preview_request_id = None
         self.hide()
         self.result_consumed.emit()
 
@@ -926,16 +1009,17 @@ class FloatingFormulaAssistant(QObject):
     def start_update_checks(self) -> None:
         if self._shutdown:
             return
-        if not self._update_timer.isActive():
-            self._update_timer.start()
-        QTimer.singleShot(1500, self.check_for_updates)
+        if self._update_timer.isActive():
+            return
+        self._update_timer.start()
+        QTimer.singleShot(1500, lambda: self.check_for_updates(force=True))
 
     def _restart_update_timer(self) -> None:
         if not self._shutdown and self._update_timer.isActive():
             self._update_timer.start()
 
     @Slot()
-    def check_for_updates(self, *, manual: bool = False) -> None:
+    def check_for_updates(self, *, manual: bool = False, force: bool = False) -> None:
         if self._shutdown:
             return
         if self._update_check_worker is not None:
@@ -945,7 +1029,11 @@ class FloatingFormulaAssistant(QObject):
             return
         now = int(time.time())
         last_check = self.settings_store.value("updates/last_check_utc")
-        if not should_check_for_updates(last_check, now_seconds=now, manual=manual):
+        if not should_check_for_updates(
+            last_check,
+            now_seconds=now,
+            manual=manual or force,
+        ):
             return
         if manual:
             self.settings_panel.set_update_status("正在检查更新…", checking=True)

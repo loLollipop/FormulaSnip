@@ -14,12 +14,11 @@ def test_windows_build_checks_all_release_versions_before_pyinstaller() -> None:
     assert "installer/FormulaSnip.iss=$installerVersion" in script
 
 
-def test_windows_build_checks_svg_backend_in_clean_pyz_manifest() -> None:
+def test_windows_build_smoke_checks_frozen_mathjax_preview() -> None:
     script = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
 
     assert "uv run pyinstaller --noconfirm --clean FormulaSnip.spec" in script
-    assert '"build\\FormulaSnip\\PYZ-00.toc"' in script
-    assert '.Contains("matplotlib.backends.backend_svg")' in script
+    assert "matplotlib.backends.backend_svg" not in script
     assert '-ArgumentList "--smoke-preview"' in script
     assert ".WaitForExit(30000)" in script
 

@@ -262,7 +262,11 @@ QLabel#FloatingPreviewMessage {{
     background: #ffffff; color: #334155; border: 1px solid #d8e0eb;
     border-radius: 8px;
 }}
-QWidget#FloatingPreviewFrame QWidget#FloatingSvgPreview {{ background: transparent; border: none; }}
+QWidget#FloatingPreviewFrame QWidget#FloatingFormulaPreview,
+QWidget#FloatingPreviewFrame QWidget#FloatingMathJaxPreview,
+QWidget#FloatingPreviewFrame QLabel#FloatingMathJaxError {{
+    background: transparent; border: none;
+}}
 QLabel#FloatingQuality {{ color: {colors['success']}; font-size: 12px; }}
 QLabel#FloatingQuality[warning="true"] {{ color: {colors['warning']}; }}
 QWidget#FloatingSourceSwitch {{

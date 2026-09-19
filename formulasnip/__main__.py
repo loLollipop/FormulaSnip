@@ -2,20 +2,35 @@ from __future__ import annotations
 
 
 def _run_preview_smoke_test() -> int:
-    """Exercise the frozen SVG renderer without starting the desktop UI."""
+    """Render one formula through the frozen WebEngine and offline MathJax."""
 
-    from formulasnip.core.preview import render_formula_svg
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QApplication
 
-    formula = (
-        r"\rho c _ { \mathrm { p } } \, "
-        r"\frac { \partial T } { \partial t } = "
-        r"\nabla \cdot ( k \nabla T ) + Q _ { \mathrm { v } }"
-    )
-    try:
-        svg = render_formula_svg(formula)
-    except Exception:
+    from formulasnip.ui.widgets import FormulaPreviewWidget
+
+    app = QApplication.instance() or QApplication([])
+    preview = FormulaPreviewWidget()
+    if not preview.webengine_available:
+        preview.close()
         return 2
-    return 0 if b"<svg" in svg else 3
+
+    outcome: list[str] = []
+    loop = QEventLoop()
+    preview.rendered.connect(lambda _request, backend: (outcome.append(backend), loop.quit()))
+    preview.failed.connect(lambda _request, _detail: (outcome.append("failed"), loop.quit()))
+    QTimer.singleShot(15_000, loop.quit)
+    preview.resize(480, 168)
+    preview.show()
+    preview.set_formula(
+        r"f(x)=\begin{cases}x^2,&x\ge0\\-x,&x<0\end{cases}"
+    )
+    loop.exec()
+    preview.close()
+    app.processEvents()
+    if outcome != ["mathjax"]:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

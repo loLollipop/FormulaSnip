@@ -11,7 +11,9 @@ class RecognitionCandidate:
     backend: str
     elapsed_seconds: float
     issues: tuple[str, ...] = ()
-    previewable: bool = True
+    # ``None`` means the worker preflight passed but the GUI-owned MathJax
+    # renderer has not confirmed this exact candidate yet.
+    previewable: bool | None = None
     source: str = ""
 
 

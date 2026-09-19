@@ -1,5 +1,5 @@
-"""Compatibility exports for callers that still import preview helpers from UI."""
+"""Compatibility export for the worker-safe preview preflight."""
 
-from formulasnip.core.preview import is_formula_previewable, render_formula_svg
+from formulasnip.core.preview import is_formula_previewable
 
-__all__ = ["is_formula_previewable", "render_formula_svg"]
+__all__ = ["is_formula_previewable"]

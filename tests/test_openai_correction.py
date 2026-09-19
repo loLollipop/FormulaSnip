@@ -207,7 +207,7 @@ def test_direct_ai_transcription_does_not_send_a_local_candidate() -> None:
     assert candidate.latex == r"\frac{x}{y}"
     assert candidate.backend == "AI · vision-model"
     assert candidate.source == "ai"
-    assert candidate.previewable is True
+    assert candidate.previewable is None
     body = client.post_calls[0][1]["json"]
     prompt = body["messages"][1]["content"][0]["text"]
     assert "Local OCR candidate" not in prompt

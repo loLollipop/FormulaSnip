@@ -70,18 +70,6 @@ try {
     uv run pyinstaller --noconfirm --clean FormulaSnip.spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
-    $pyzTocPath = Join-Path $projectRoot "build\FormulaSnip\PYZ-00.toc"
-    if (-not (Test-Path -LiteralPath $pyzTocPath -PathType Leaf)) {
-        throw "PyInstaller module manifest was not generated: $pyzTocPath"
-    }
-    $pyzToc = [System.IO.File]::ReadAllText(
-        (Resolve-Path -LiteralPath $pyzTocPath).Path,
-        [System.Text.Encoding]::UTF8
-    )
-    if (-not $pyzToc.Contains("matplotlib.backends.backend_svg")) {
-        throw "PyInstaller module manifest is missing matplotlib.backends.backend_svg."
-    }
-
     $executablePath = Join-Path $applicationDirectory "FormulaSnip.exe"
     if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
         throw "The expected executable was not generated: $executablePath"

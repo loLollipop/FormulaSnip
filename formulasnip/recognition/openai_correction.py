@@ -217,7 +217,7 @@ def transcribe_formula(
             issue in _STRUCTURAL_ISSUES for issue in report.issues
         ):
             raise AICorrectionError("AI 识别结果未通过安全校验。")
-        previewable = is_formula_previewable(latex)
+        structurally_previewable = is_formula_previewable(latex)
         _raise_if_cancelled(cancel_event)
     except AICorrectionError as exc:
         message = str(exc).replace("，已保留本地结果。", "。").replace(
@@ -229,7 +229,7 @@ def transcribe_formula(
         f"AI · {selected_model}",
         perf_counter() - started,
         report.issues,
-        previewable,
+        None if structurally_previewable else False,
         "ai",
     )
 
@@ -274,15 +274,15 @@ def enhance_formula(
     elapsed = local_result.elapsed_seconds + (perf_counter() - started)
     backend_name = f"MathCraft + {selected_model}"
     report = assess_latex(corrected)
-    previewable = is_formula_previewable(corrected)
+    structurally_previewable = is_formula_previewable(corrected)
     _raise_if_cancelled(cancel_event)
     if _UNSAFE_LATEX_COMMAND.search(corrected) or any(
         issue in _STRUCTURAL_ISSUES for issue in report.issues
     ):
         raise AICorrectionError("AI 辅助结果未通过安全校验，已保留本地结果。")
-    local_previewable = is_formula_previewable(local_result.latex)
+    local_structurally_previewable = is_formula_previewable(local_result.latex)
     _raise_if_cancelled(cancel_event)
-    if local_previewable and not previewable:
+    if local_structurally_previewable and not structurally_previewable:
         raise AICorrectionError("AI 辅助结果无法可靠预览，已保留本地结果。")
 
     ai_candidate = RecognitionCandidate(
@@ -290,7 +290,7 @@ def enhance_formula(
         backend_name,
         elapsed,
         report.issues,
-        previewable,
+        None if structurally_previewable else False,
         "ai",
     )
     local_candidate = RecognitionCandidate(
@@ -298,7 +298,7 @@ def enhance_formula(
         local_result.backend_name,
         local_result.elapsed_seconds,
         assess_latex(local_result.latex).issues,
-        local_previewable,
+        None if local_structurally_previewable else False,
         "local",
     )
     warnings = [
@@ -308,7 +308,7 @@ def enhance_formula(
     ]
     if report.issues:
         warnings.append("AI 校正结果需要人工核对：" + "；".join(report.issues))
-    if not previewable:
+    if not structurally_previewable:
         warnings.append("AI 校正结果无法生成电子公式预览，可继续修改 LaTeX。")
     changed = _comparable(corrected) != _comparable(local_result.latex)
     warnings.append(

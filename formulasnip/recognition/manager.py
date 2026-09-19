@@ -105,12 +105,13 @@ class BackendManager:
 
 def _candidate(result: RecognitionResult) -> RecognitionCandidate:
     report = assess_latex(result.latex)
+    structurally_previewable = is_formula_previewable(result.latex)
     return RecognitionCandidate(
         result.latex,
         result.backend_name,
         result.elapsed_seconds,
         report.issues,
-        is_formula_previewable(result.latex),
+        None if structurally_previewable else False,
     )
 
 
@@ -120,7 +121,7 @@ def _candidate_warnings(
     candidate_warnings: list[str] = []
     if candidate.issues:
         candidate_warnings.append("识别结果需要人工校对：" + "；".join(candidate.issues))
-    if not candidate.previewable:
+    if candidate.previewable is False:
         candidate_warnings.append(
             "当前识别结果无法生成电子公式预览，可在结果框中继续修改 LaTeX。"
         )

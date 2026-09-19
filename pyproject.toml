@@ -4,25 +4,26 @@ build-backend = "hatchling.build"
 
 [project]
 name = "formulasnip"
-version = "0.2.7"
+version = "0.2.8"
 description = "Offline Windows formula snipping and recognition prototype"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "GPL-3.0-only" }
 authors = [{ name = "FormulaSnip contributors" }]
 dependencies = [
-  # QtCore/QtGui/QtWidgets are all in Essentials; avoiding Addons saves
-  # hundreds of MB in the packaged desktop application.
   "PySide6-Essentials>=6.8,<7",
+  # QtWebEngine in Addons powers the offline MathJax preview.
+  "PySide6-Addons>=6.8,<7",
   "Pillow>=10.4,<13",
   "latex2mathml>=3.77,<4",
-  "matplotlib>=3.9,<4",
   "requests>=2.32,<3",
   "mathcraft-ocr[cpu]==0.3.1",
 ]
 
 [project.optional-dependencies]
 dev = [
+  # Asset-generation scripts use matplotlib; the application does not.
+  "matplotlib>=3.9,<4",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
   "ruff>=0.9,<1",
@@ -36,6 +37,10 @@ formulasnip = "formulasnip.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["formulasnip"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"THIRD_PARTY_NOTICES.md" = "share/formulasnip/THIRD_PARTY_NOTICES.md"
+"THIRD_PARTY_LICENSES" = "share/formulasnip/THIRD_PARTY_LICENSES"
 
 [tool.hatch.build.targets.sdist]
 include = [

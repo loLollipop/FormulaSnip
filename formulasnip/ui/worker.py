@@ -241,7 +241,7 @@ class RecognitionWorker(QRunnable):
             result.backend_name,
             result.elapsed_seconds,
             assess_latex(result.latex).issues,
-            is_formula_previewable(result.latex),
+            None if is_formula_previewable(result.latex) else False,
             "local",
         )
 

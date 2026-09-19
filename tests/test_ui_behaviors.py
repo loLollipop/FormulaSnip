@@ -21,7 +21,11 @@ from formulasnip.exceptions import FormulaSnipError
 from formulasnip.ui import floating
 from formulasnip.ui import settings as settings_ui
 from formulasnip.ui import worker as worker_module
-from formulasnip.ui.branding import application_icon, tutorial_formula_image
+from formulasnip.ui.branding import (
+    application_icon,
+    application_version,
+    tutorial_formula_image,
+)
 from formulasnip.ui.floating import (
     FloatingFormulaAssistant,
     FloatingOrb,
@@ -35,8 +39,9 @@ from formulasnip.ui.settings import (
     normalize_hex_color,
     read_logo_image,
 )
-from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, SnipOverlay
+from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, OVERLAY_COLOR, SnipOverlay
 from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.widgets import FormulaPreviewWidget
 from formulasnip.ui.worker import ModelWarmupWorker
 from formulasnip.update import ReleaseInfo, UpdateAsset
 
@@ -94,19 +99,26 @@ class FakeCloseEvent:
         self.ignored = True
 
 
-def test_overlay_is_lighter_uses_visible_cursor_and_preserves_cancel_semantics() -> None:
+def test_overlay_is_white_uses_arrow_cursor_and_preserves_cancel_semantics() -> None:
     application = _application()
     screen = application.primaryScreen()
     assert screen is not None
     assert OVERLAY_ALPHA < 100
+    assert OVERLAY_COLOR == "#FFFFFF"
 
     screenshot = QPixmap(screen.geometry().size())
-    screenshot.fill(Qt.GlobalColor.white)
+    screenshot.fill(Qt.GlobalColor.black)
     closed_overlay = SnipOverlay(screen, screenshot)
-    assert closed_overlay.cursor().shape() == Qt.CursorShape.BitmapCursor
+    assert closed_overlay.cursor().shape() == Qt.CursorShape.ArrowCursor
     cancellations: list[bool] = []
     closed_overlay.cancelled.connect(lambda: cancellations.append(True))
     closed_overlay.show()
+    application.processEvents()
+    overlay_image = closed_overlay.grab().toImage()
+    corner = overlay_image.pixelColor(5, 5)
+    center = overlay_image.pixelColor(overlay_image.rect().center())
+    assert corner == center
+    assert corner.red() > 0 and corner.red() == corner.green() == corner.blue()
     closed_overlay.close()
     assert cancellations == [True]
 
@@ -160,16 +172,15 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
 
     margins = panel.preview_frame.layout().contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
-        30,
-        22,
-        30,
-        22,
+        12,
+        12,
+        12,
+        12,
     )
-    assert panel.preview_stack.height() == 126
-    assert panel.svg_preview.maximumHeight() == 78
+    assert panel.preview_stack.height() == 168
 
     panel.show_result(result, QRect(20, 20, 68, 68))
-    assert panel.svg_preview.renderer().isValid()
+    assert panel.formula_preview.current_backend == "mathjax"
     panel.copy_latex_button.click()
     assert QApplication.clipboard().text() == result.latex
     assert panel.isHidden()
@@ -185,6 +196,137 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     QApplication.clipboard().clear()
     panel.close()
     application.processEvents()
+
+
+def test_mathjax_preview_reports_missing_webengine_without_svg_fallback() -> None:
+    _application()
+    preview = FormulaPreviewWidget(webengine_enabled=False)
+    failures = QSignalSpy(preview.failed)
+
+    stale_request = preview.set_formula("x")
+    current_request = preview.set_formula("y")
+    QTest.qWait(10)
+
+    assert current_request == stale_request + 1
+    assert failures.count() == 1
+    assert failures.at(0)[0] == current_request
+    assert preview.current_backend == "unavailable"
+    assert "WebEngine" in preview.error_text
+    assert not hasattr(preview, "svg_preview")
+    preview.close()
+
+
+def test_mathjax_preview_ignores_stale_async_completion() -> None:
+    _application()
+    preview = FormulaPreviewWidget(webengine_enabled=False)
+    rendered = QSignalSpy(preview.rendered)
+    preview._request_id = 2
+    preview._current_backend = "mathjax"
+
+    preview._handle_render_state(
+        1, '{"requestId":1,"state":"ready","error":""}'
+    )
+    assert rendered.count() == 0
+
+    preview._handle_render_state(
+        2, '{"requestId":2,"state":"ready","error":""}'
+    )
+    assert rendered.count() == 1
+    assert rendered.at(0) == [2, "mathjax"]
+    preview.close()
+
+
+def test_mathjax_preview_watchdog_fails_without_browser_callback() -> None:
+    _application()
+    preview = FormulaPreviewWidget(webengine_enabled=False)
+    failures = QSignalSpy(preview.failed)
+    preview._request_id = 3
+    preview._current_backend = "mathjax"
+    preview._timeout_timer.start()
+
+    preview._render_timeout()
+    QTest.qWait(10)
+
+    assert failures.count() == 1
+    assert failures.at(0)[0] == 3
+    assert "超时" in failures.at(0)[1]
+    assert not preview._timeout_timer.isActive()
+    preview.close()
+
+
+def test_mathjax_preview_rejects_unknown_command() -> None:
+    application = _application()
+    preview = FormulaPreviewWidget()
+    if not preview.webengine_available:
+        pytest.skip("Qt WebEngine is unavailable")
+    rendered = QSignalSpy(preview.rendered)
+    failures = QSignalSpy(preview.failed)
+
+    preview.resize(480, 168)
+    preview.show()
+    request_id = preview.set_formula(r"\notacommand{x}")
+
+    assert failures.count() or failures.wait(15_000)
+    assert failures.at(0)[0] == request_id
+    assert rendered.count() == 0
+    preview.close()
+    application.processEvents()
+
+
+def test_result_panel_only_reports_success_for_current_render_request(
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    requests: list[int] = []
+
+    def defer_render(_latex: str) -> int:
+        panel.formula_preview._request_id += 1
+        request_id = panel.formula_preview._request_id
+        requests.append(request_id)
+        return request_id
+
+    monkeypatch.setattr(panel.formula_preview, "set_formula", defer_render)
+    panel.show_result(
+        RecognitionResult("x", "MathCraft", 0.1),
+        QRect(20, 20, 68, 68),
+    )
+    first_request = requests[-1]
+    assert panel.status_label.text() == "正在生成预览…"
+    assert "电子公式已生成" not in panel.quality_label.text()
+
+    panel.latex_view.setPlainText("y")
+    panel.formula_preview.rendered.emit(first_request, "mathjax")
+    panel.formula_preview.failed.emit(first_request, "stale failure")
+    assert panel.status_label.text() == "正在更新预览…"
+    assert "电子公式已生成" not in panel.quality_label.text()
+
+    panel._refresh_edited_preview()
+    current_request = requests[-1]
+    assert current_request != first_request
+    panel.formula_preview.rendered.emit(first_request, "mathjax")
+    panel.formula_preview.failed.emit(first_request, "stale failure")
+    assert panel.status_label.text() == "正在生成预览…"
+    assert panel.preview_stack.currentWidget() is panel.preview_frame
+
+    panel.formula_preview.rendered.emit(current_request, "mathjax")
+    assert panel.status_label.text() == "预览已更新"
+    panel.formula_preview.failed.emit(first_request, "late stale failure")
+    assert panel.status_label.text() == "预览已更新"
+    panel.close()
+    application.processEvents()
+
+
+def test_aborted_old_page_load_does_not_fail_current_request() -> None:
+    _application()
+    preview = FormulaPreviewWidget(webengine_enabled=False)
+    preview._request_id = 2
+    preview._current_backend = "mathjax"
+
+    preview._web_load_finished(False)
+
+    assert preview.current_backend == "mathjax"
+    preview.close()
 
 
 def test_result_panel_switches_disagreeing_local_and_ai_candidates(
@@ -224,7 +366,7 @@ def test_result_panel_switches_disagreeing_local_and_ai_candidates(
     assert panel.latex_view.toPlainText() == "x"
     assert "MathCraft" in panel.backend_label.text()
     assert sources == ["local"]
-    assert panel.svg_preview.renderer().isValid()
+    assert panel.formula_preview.current_backend == "mathjax"
     panel.latex_view.setPlainText("edited")
     assert panel.source_switch.isVisible()
     panel.local_result_button.click()
@@ -275,6 +417,7 @@ def test_result_error_clears_status_from_previous_result() -> None:
     panel.show_result(RecognitionResult("x", "Rapid", 0.1), anchor)
     panel.latex_view.setPlainText("edited")
     panel._refresh_edited_preview()
+    panel._preview_rendered(panel.formula_preview.request_id, "mathjax")
     assert panel.status_label.text() == "预览已更新"
 
     panel.show_error("识别失败", anchor)
@@ -384,10 +527,10 @@ def test_result_panel_rerenders_and_copies_edited_latex(monkeypatch: Any) -> Non
     application = _application()
     panel = FloatingResultPanel()
 
-    original_render = floating.render_formula_svg
+    original_render = panel.formula_preview.set_formula
     monkeypatch.setattr(
-        floating,
-        "render_formula_svg",
+        panel.formula_preview,
+        "set_formula",
         lambda latex: (
             (_ for _ in ()).throw(ValueError("bad preview"))
             if latex == "bad"
@@ -400,6 +543,8 @@ def test_result_panel_rerenders_and_copies_edited_latex(monkeypatch: Any) -> Non
     panel.latex_view.setPlainText("edited")
     panel._refresh_edited_preview()
     assert panel.preview_stack.currentWidget() is panel.preview_frame
+    assert panel.status_label.text() == "正在生成预览…"
+    panel._preview_rendered(panel.formula_preview.request_id, "mathjax")
     assert panel.status_label.text() == "预览已更新"
     panel.copy_latex_button.click()
     assert QApplication.clipboard().text() == "edited"
@@ -618,7 +763,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert not panel.brand_logo.pixmap().isNull()
     assert panel.brand_edition.isHidden()
     assert panel.update_button is panel.check_update_button
-    assert "v0.2.7" in panel.update_version_label.text()
+    assert f"v{application_version()}" in panel.update_version_label.text()
     assert all(
         dot.property("available") == "false"
         for dot in panel.engine_status_dots.values()
@@ -1348,6 +1493,52 @@ def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
     assert requests == [True]
     assert panel.update_status_label.text() == "稳定通道"
     panel.hide()
+
+
+def test_startup_update_check_bypasses_background_throttle(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    settings.setValue("updates/last_check_utc", int(time.time()) - 60)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    scheduled: list[Any] = []
+    started: list[Any] = []
+    monkeypatch.setattr(
+        floating.QTimer,
+        "singleShot",
+        lambda _milliseconds, callback: scheduled.append(callback),
+    )
+    monkeypatch.setattr(assistant._thread_pool, "start", started.append)
+
+    assistant.start_update_checks()
+    assistant.start_update_checks()
+    assert len(scheduled) == 1
+
+    scheduled[0]()
+
+    assert len(started) == 1
+    assert assistant._update_check_worker is started[0]
+    assert assistant.settings_panel.update_status_label.text() == "稳定通道"
+    assert assistant.settings_panel.check_update_button.isEnabled()
+    assistant.shutdown()
+
+
+def test_background_update_check_keeps_twelve_hour_throttle(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    settings.setValue("updates/last_check_utc", int(time.time()) - 60)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    started: list[Any] = []
+    monkeypatch.setattr(assistant._thread_pool, "start", started.append)
+
+    assistant.check_for_updates()
+
+    assert started == []
+    assert assistant._update_check_worker is None
+    assistant.shutdown()
 
 
 def test_manual_request_during_automatic_check_restores_update_button(

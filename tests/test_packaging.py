@@ -24,10 +24,22 @@ def test_pyinstaller_collects_mathcraft_runtime_without_legacy_engine() -> None:
     assert "rapid-latex-ocr" not in spec
 
 
-def test_pyinstaller_collects_runtime_selected_svg_backend() -> None:
+def test_pyinstaller_collects_webengine_and_not_legacy_preview_renderer() -> None:
     spec = (ROOT / "FormulaSnip.spec").read_text(encoding="utf-8")
 
-    assert '"matplotlib.backends.backend_svg"' in spec
+    assert '"PySide6.QtWebEngineCore"' in spec
+    assert '"PySide6.QtWebEngineWidgets"' in spec
+    assert '"PySide6_Addons"' in spec
+    assert '"matplotlib.backends.backend_svg"' not in spec
+    assert 'excludes=["tkinter", "matplotlib"' in spec
+
+
+def test_wheel_includes_third_party_notices_and_licenses() -> None:
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '[tool.hatch.build.targets.wheel.shared-data]' in project
+    assert '"THIRD_PARTY_NOTICES.md" = "share/formulasnip/THIRD_PARTY_NOTICES.md"' in project
+    assert '"THIRD_PARTY_LICENSES" = "share/formulasnip/THIRD_PARTY_LICENSES"' in project
 
 
 def test_installer_rejects_accidentally_packaged_onnx_weights() -> None:

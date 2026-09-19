@@ -21,9 +21,13 @@ Additional license texts that are absent from upstream wheels are preserved in
 
 ## User interface and conversion libraries
 
-- PySide6 Essentials and Shiboken6 are distributed by Qt under a choice of
+- PySide6 Essentials, PySide6 Addons, and Shiboken6 are distributed by Qt under a choice of
   LGPL-3.0-only, GPL-2.0-only, or GPL-3.0-only. FormulaSnip uses the
   GPL-3.0-only option. Source: https://code.qt.io/cgit/pyside/pyside-setup.git/
+- MathJax 3.2.2 is Apache-2.0 licensed. FormulaSnip vendors the self-contained
+  `tex-svg-full.js` component for fully offline formula preview; its license is
+  included at `THIRD_PARTY_LICENSES/mathjax-3.2.2-LICENSE.txt`. Source:
+  https://github.com/mathjax/MathJax
 - latex2mathml 3.81.1 is MIT licensed. Its license text is included at
   `THIRD_PARTY_LICENSES/latex2mathml-LICENSE.txt` because the upstream wheel
   does not contain that file. Source: https://github.com/roniemartinez/latex2mathml
