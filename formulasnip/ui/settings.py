@@ -54,8 +54,6 @@ from PySide6.QtWidgets import (
 from formulasnip.credentials import CredentialError, OpenAIApiKeyStore
 from formulasnip.recognition import backend_summaries
 from formulasnip.recognition.openai_correction import (
-    DEFAULT_AI_BASE_URL,
-    DEFAULT_AI_MODEL,
     AICorrectionError,
     validate_ai_base_url,
     validate_ai_model_id,
@@ -102,6 +100,32 @@ GITHUB_MARK_PATH = (
     "3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 "
     "2.2 0 .21.15.46.55.38A7.995 7.995 0 0016 8c0-4.42-3.58-8-8-8z"
 )
+LINE_ICON_PATHS = {
+    "general": (
+        '<path d="M4 6h10m4 0h2M4 12h2m4 0h10M4 18h7m4 0h5"/>'
+        '<circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/>'
+        '<circle cx="13" cy="18" r="2"/>'
+    ),
+    "recognition": (
+        '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M8 '
+        '21H5a2 2 0 0 1-2-2v-3m13 5h3a2 2 0 0 0 2-2v-3"/>'
+        '<path d="M7 15l2-6 3 6 2-4 3 4"/>'
+    ),
+    "orb": (
+        '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/>'
+        '<path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>'
+    ),
+    "tutorial": (
+        '<path d="M4 5h5a3 3 0 0 1 3 3v12a4 4 0 0 0-4-4H4z"/>'
+        '<path d="M20 5h-5a3 3 0 0 0-3 3v12a4 4 0 0 1 4-4h4z"/>'
+    ),
+    "sun": (
+        '<circle cx="12" cy="12" r="4"/>'
+        '<path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 '
+        '12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>'
+    ),
+    "moon": '<path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5z"/>',
+}
 
 
 def normalize_hex_color(value: object, default: str = DEFAULT_RING_COLOR) -> str:
@@ -124,6 +148,23 @@ def github_mark_icon(color: str) -> QIcon:
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     renderer.render(painter, QRectF(0, 0, 32, 32))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def line_icon(name: str, color: str) -> QIcon:
+    body = LINE_ICON_PATHS.get(name, "")
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{color}" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        f"{body}</svg>"
+    )
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter, QRectF(2, 2, 28, 28))
     painter.end()
     return QIcon(pixmap)
 
@@ -171,8 +212,8 @@ class FloatingPreferences:
     ring_color: str | None = None
     logo_path: str = ""
     ai_correction_enabled: bool = False
-    ai_base_url: str = DEFAULT_AI_BASE_URL
-    ai_model: str = DEFAULT_AI_MODEL
+    ai_base_url: str = ""
+    ai_model: str = ""
 
     @property
     def effective_ring_color(self) -> str:
@@ -240,17 +281,22 @@ class FloatingPreferences:
 
     def save(self, settings: QSettings) -> None:
         ring = self.effective_ring_color
-        ai_config_valid = True
-        try:
-            ai_base_url = validate_ai_base_url(self.ai_base_url)
-        except AICorrectionError:
-            ai_base_url = DEFAULT_AI_BASE_URL
-            ai_config_valid = False
-        try:
-            ai_model = validate_ai_model_id(self.ai_model)
-        except AICorrectionError:
-            ai_model = DEFAULT_AI_MODEL
-            ai_config_valid = False
+        ai_base_url = ""
+        ai_model = ""
+        ai_config_valid = False
+        if self.ai_base_url.strip() and self.ai_model.strip():
+            try:
+                ai_base_url = validate_ai_base_url(self.ai_base_url)
+                ai_model = validate_ai_model_id(self.ai_model)
+            except AICorrectionError:
+                pass
+            else:
+                ai_config_valid = True
+        elif self.ai_base_url.strip():
+            try:
+                ai_base_url = validate_ai_base_url(self.ai_base_url)
+            except AICorrectionError:
+                ai_base_url = ""
         settings.setValue("recognition/mode", "mathcraft")
         settings.setValue("appearance/ring_color", ring)
         settings.setValue("appearance/theme", self.result_theme)
@@ -274,25 +320,21 @@ def _preset_name(color: str) -> str:
 
 
 def _stored_ai_base_url(value: object) -> tuple[str, bool]:
-    if value is None:
-        return DEFAULT_AI_BASE_URL, True
-    if isinstance(value, str):
+    if isinstance(value, str) and value.strip():
         try:
             return validate_ai_base_url(value), True
         except AICorrectionError:
             pass
-    return DEFAULT_AI_BASE_URL, False
+    return "", False
 
 
 def _stored_ai_model(value: object) -> tuple[str, bool]:
-    if value is None:
-        return DEFAULT_AI_MODEL, True
-    if isinstance(value, str):
+    if isinstance(value, str) and value.strip():
         try:
             return validate_ai_model_id(value), True
         except AICorrectionError:
             pass
-    return DEFAULT_AI_MODEL, False
+    return "", False
 
 
 def _choice(value: object, choices: tuple[str, ...], default: str) -> str:
@@ -911,7 +953,12 @@ class SettingsPanel(QWidget):
         self._settings = settings
         self._api_key_store = api_key_store or OpenAIApiKeyStore()
         try:
-            self._ai_key_present = self._api_key_store.has_key()
+            self._ai_key_present = bool(
+                preferences.ai_base_url
+                and self._api_key_store.has_key_for_base_url(
+                    preferences.ai_base_url
+                )
+            )
             self._credential_error = ""
         except CredentialError as exc:
             self._ai_key_present = False
@@ -923,6 +970,7 @@ class SettingsPanel(QWidget):
         self._ai_model_worker: CompatibleModelWorker | None = None
         self._ai_active_context: tuple[str, str, str, int] | None = None
         self._ai_credential_generation = 0
+        self._ai_models_base_url = preferences.ai_base_url if preferences.ai_model else ""
         self._building = True
         self._ring_color = preferences.effective_ring_color
         self._logo_path = preferences.effective_logo_path
@@ -936,12 +984,13 @@ class SettingsPanel(QWidget):
             | Qt.WindowType.WindowMaximizeButtonHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        self.resize(1180, 760)
-        self.setMinimumSize(1040, 680)
+        self.resize(1080, 700)
+        self.setMinimumSize(960, 620)
         apply_application_theme(preferences.result_theme)
         self._build_ui()
         self._load_controls(preferences)
         self._building = False
+        self._update_ai_draft_status()
 
     @property
     def preferences(self) -> FloatingPreferences:
@@ -985,13 +1034,13 @@ class SettingsPanel(QWidget):
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("SettingsSidebar")
-        sidebar.setFixedWidth(216)
+        sidebar.setFixedWidth(220)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(12, 20, 12, 12)
-        layout.setSpacing(2)
+        layout.setContentsMargins(14, 22, 14, 14)
+        layout.setSpacing(4)
 
         brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(8, 0, 8, 20)
+        brand_row.setContentsMargins(8, 0, 8, 22)
         brand_row.setSpacing(10)
         self.brand_logo = QLabel()
         self.brand_logo.setObjectName("BrandLogo")
@@ -1012,16 +1061,18 @@ class SettingsPanel(QWidget):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self._nav_entries: list[tuple[NavigationButton, str]] = []
-        for label, title, hint in (
-            ("常规", "常规", ""),
-            ("识别", "识别", ""),
-            ("悬浮球", "悬浮球", ""),
-            ("使用方法", "使用方法", "4 步"),
+        for label, title, hint, icon_name in (
+            ("常规", "常规", "", "general"),
+            ("识别", "识别", "", "recognition"),
+            ("悬浮球", "悬浮球", "", "orb"),
+            ("使用方法", "使用方法", "4 步", "tutorial"),
         ):
             button = NavigationButton(label, hint)
             button.setObjectName("NavButton")
+            button.setProperty("iconName", icon_name)
+            button.setIconSize(QSize(19, 19))
             button.setCheckable(True)
-            button.setFixedHeight(38)
+            button.setFixedHeight(44)
             self.nav_group.addButton(button)
             self._nav_entries.append((button, title))
             layout.addWidget(button)
@@ -1048,7 +1099,7 @@ class SettingsPanel(QWidget):
         header.setObjectName("SettingsHeader")
         header.setFixedHeight(64)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 0, 24, 0)
+        layout.setContentsMargins(28, 0, 28, 0)
         layout.setSpacing(10)
         self.page_title = QLabel()
         self.page_title.setObjectName("PageTitle")
@@ -1076,8 +1127,8 @@ class SettingsPanel(QWidget):
         body = QWidget()
         body.setObjectName("SettingsPageBody")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(24, 20, 24, 24)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 24, 28, 28)
+        layout.setSpacing(16)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(body)
@@ -1274,26 +1325,27 @@ class SettingsPanel(QWidget):
         ai_copy.addWidget(_muted_text("与 MathCraft 同时识别，不一致时可切换对照"))
         self.ai_correction_toggle = ToggleSwitch()
         self.ai_correction_toggle.setAccessibleName("启用 AI 智能并行")
-        self.ai_correction_toggle.setEnabled(self._ai_key_present)
-        self.ai_correction_toggle.toggled.connect(self._controls_changed)
+        self.ai_correction_toggle.toggled.connect(self._ai_toggle_changed)
         ai_header.addLayout(ai_copy, 1)
         ai_header.addWidget(self.ai_correction_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         ai_layout.addLayout(ai_header)
-        ai_layout.addWidget(_divider())
 
-        ai_layout.addWidget(_field_label("兼容 API 地址"))
+        self.ai_configuration_widget = QWidget()
+        self.ai_configuration_widget.setObjectName("AiConfiguration")
+        ai_configuration_layout = QVBoxLayout(self.ai_configuration_widget)
+        ai_configuration_layout.setContentsMargins(0, 0, 0, 0)
+        ai_configuration_layout.setSpacing(10)
+        ai_configuration_layout.addWidget(_divider())
+
+        ai_configuration_layout.addWidget(_field_label("兼容 API 地址"))
         self.ai_base_url_input = QLineEdit()
         self.ai_base_url_input.setObjectName("AiTextInput")
-        self.ai_base_url_input.setPlaceholderText(DEFAULT_AI_BASE_URL)
-        self.ai_base_url_input.setText(self._preferences.ai_base_url)
+        self.ai_base_url_input.setPlaceholderText("输入 OpenAI 兼容 API 地址")
         self.ai_base_url_input.setClearButtonEnabled(True)
-        self.ai_base_url_input.textChanged.connect(
-            self._ai_request_configuration_changed
-        )
-        self.ai_base_url_input.editingFinished.connect(self._controls_changed)
-        ai_layout.addWidget(self.ai_base_url_input)
+        self.ai_base_url_input.textChanged.connect(self._ai_base_url_changed)
+        ai_configuration_layout.addWidget(self.ai_base_url_input)
 
-        ai_layout.addWidget(_field_label("API Key"))
+        ai_configuration_layout.addWidget(_field_label("API Key"))
         key_row = QHBoxLayout()
         self.ai_api_key_input = QLineEdit()
         self.ai_api_key_input.setObjectName("ApiKeyInput")
@@ -1304,8 +1356,12 @@ class SettingsPanel(QWidget):
             else "输入兼容服务 API Key"
         )
         self.ai_api_key_input.setClearButtonEnabled(True)
+        self.ai_api_key_input.textChanged.connect(
+            lambda _text: self._update_ai_action_state()
+        )
         self.ai_save_key_button = QPushButton("保存 Key")
         self.ai_save_key_button.setFixedHeight(36)
+        self.ai_save_key_button.setEnabled(False)
         self.ai_save_key_button.clicked.connect(self._save_ai_api_key)
         self.ai_delete_key_button = QPushButton("删除")
         self.ai_delete_key_button.setFixedHeight(36)
@@ -1314,27 +1370,26 @@ class SettingsPanel(QWidget):
         key_row.addWidget(self.ai_api_key_input, 1)
         key_row.addWidget(self.ai_save_key_button)
         key_row.addWidget(self.ai_delete_key_button)
-        ai_layout.addLayout(key_row)
+        ai_configuration_layout.addLayout(key_row)
         self.ai_key_status_label = QLabel()
         self.ai_key_status_label.setObjectName("ApiKeyStatus")
         self.ai_key_status_label.setWordWrap(True)
         self._update_ai_key_status()
-        ai_layout.addWidget(self.ai_key_status_label)
+        ai_configuration_layout.addWidget(self.ai_key_status_label)
 
-        ai_layout.addWidget(_field_label("模型"))
+        ai_configuration_layout.addWidget(_field_label("模型"))
         model_row = QHBoxLayout()
         self.ai_model_combo = QComboBox()
         self.ai_model_combo.setObjectName("AiModelCombo")
-        self.ai_model_combo.setEditable(True)
-        self.ai_model_combo.addItem(self._preferences.ai_model)
-        self.ai_model_combo.currentTextChanged.connect(self._controls_changed)
-        self.ai_refresh_models_button = QPushButton("刷新模型")
+        self.ai_model_combo.setPlaceholderText("获取后选择模型")
+        self.ai_model_combo.currentTextChanged.connect(self._ai_draft_changed)
+        self.ai_refresh_models_button = QPushButton("获取模型")
         self.ai_refresh_models_button.setFixedHeight(36)
-        self.ai_refresh_models_button.setEnabled(self._ai_key_present)
+        self.ai_refresh_models_button.setEnabled(False)
         self.ai_refresh_models_button.clicked.connect(self._refresh_ai_models)
         self.ai_test_connection_button = QPushButton("测试连接")
         self.ai_test_connection_button.setFixedHeight(36)
-        self.ai_test_connection_button.setEnabled(self._ai_key_present)
+        self.ai_test_connection_button.setEnabled(False)
         self.ai_test_connection_button.setToolTip(
             "发送一次小型视觉请求验证完整链路，可能产生少量费用"
         )
@@ -1342,16 +1397,27 @@ class SettingsPanel(QWidget):
         model_row.addWidget(self.ai_model_combo, 1)
         model_row.addWidget(self.ai_refresh_models_button)
         model_row.addWidget(self.ai_test_connection_button)
-        ai_layout.addLayout(model_row)
-        self.ai_connection_status_label = QLabel("保存 Key 后可拉取上游模型")
+        ai_configuration_layout.addLayout(model_row)
+        self.ai_connection_status_label = QLabel("填写地址并保存 Key")
         self.ai_connection_status_label.setObjectName("AiConnectionStatus")
         self.ai_connection_status_label.setWordWrap(True)
-        ai_layout.addWidget(self.ai_connection_status_label)
+        ai_configuration_layout.addWidget(self.ai_connection_status_label)
         privacy = _muted_text(
             "默认关闭。仅将框选区域上传给所配置的兼容 API，不上传本地识别结果；调用可能产生费用。"
         )
         privacy.setWordWrap(True)
-        ai_layout.addWidget(privacy)
+        ai_configuration_layout.addWidget(privacy)
+        save_row = QHBoxLayout()
+        save_row.addStretch(1)
+        self.ai_save_config_button = QPushButton("保存配置")
+        self.ai_save_config_button.setObjectName("SettingsPrimary")
+        self.ai_save_config_button.setFixedHeight(38)
+        self.ai_save_config_button.setMinimumWidth(112)
+        self.ai_save_config_button.setEnabled(False)
+        self.ai_save_config_button.clicked.connect(self._save_ai_configuration)
+        save_row.addWidget(self.ai_save_config_button)
+        ai_configuration_layout.addLayout(save_row)
+        ai_layout.addWidget(self.ai_configuration_widget)
         layout.addWidget(ai_card)
 
         layout.addStretch(1)
@@ -1524,11 +1590,16 @@ class SettingsPanel(QWidget):
             1.0 if self.ai_correction_toggle.isChecked() else 0.0
         )
         self.ai_base_url_input.setText(preferences.ai_base_url)
-        model_index = self.ai_model_combo.findText(preferences.ai_model)
-        if model_index < 0:
+        self.ai_model_combo.clear()
+        if preferences.ai_model:
             self.ai_model_combo.addItem(preferences.ai_model)
-            model_index = self.ai_model_combo.count() - 1
-        self.ai_model_combo.setCurrentIndex(model_index)
+            self.ai_model_combo.setCurrentIndex(0)
+        else:
+            self.ai_model_combo.setCurrentIndex(-1)
+        self.ai_configuration_widget.setVisible(
+            self.ai_correction_toggle.isChecked()
+        )
+        self._update_ai_action_state()
         self.startup_checkbox.setChecked(preferences.show_settings_on_startup)
         self.startup_checkbox.set_position(
             1.0 if preferences.show_settings_on_startup else 0.0
@@ -1548,11 +1619,18 @@ class SettingsPanel(QWidget):
         button, title = self._nav_entries[bounded]
         button.setChecked(True)
         for nav_button, _nav_title in self._nav_entries:
+            selected = nav_button is button
             nav_button.marker.setProperty(
-                "selected", "true" if nav_button is button else "false"
+                "selected", "true" if selected else "false"
             )
             nav_button.marker.style().unpolish(nav_button.marker)
             nav_button.marker.style().polish(nav_button.marker)
+            nav_button.setIcon(
+                line_icon(
+                    str(nav_button.property("iconName")),
+                    self._navigation_icon_color(selected=selected),
+                )
+            )
         self.page_title.setText(title)
         self.page_subtitle.clear()
 
@@ -1592,36 +1670,155 @@ class SettingsPanel(QWidget):
     def _controls_changed(self) -> None:
         if self._building:
             return
-        self._ai_request_configuration_changed()
-        try:
-            ai_base_url = validate_ai_base_url(self.ai_base_url_input.text())
-            ai_model = validate_ai_model_id(self.ai_model_combo.currentText())
-        except AICorrectionError as exc:
-            ai_base_url = self._preferences.ai_base_url
-            ai_model = self._preferences.ai_model
-            ai_enabled = False
-            toggle_blocker = QSignalBlocker(self.ai_correction_toggle)
-            self.ai_correction_toggle.setChecked(False)
-            self.ai_correction_toggle.set_position(0.0)
-            del toggle_blocker
-            self._set_ai_connection_status(str(exc), error=True)
-        else:
-            ai_enabled = (
-                self.ai_correction_toggle.isChecked() and self._ai_key_present
-            )
-        self._preferences = FloatingPreferences(
+        self._preferences = replace(
+            self._preferences,
             recognition_mode="mathcraft",
             orb_color=_preset_name(self._ring_color),
-            result_theme=self._preferences.result_theme,
             show_settings_on_startup=self.startup_checkbox.isChecked(),
             ring_color=self._ring_color,
             logo_path=self._logo_path,
-            ai_correction_enabled=ai_enabled,
-            ai_base_url=ai_base_url,
-            ai_model=ai_model,
         )
         self._preferences.save(self._settings)
         self.preferences_changed.emit(self._preferences)
+
+    @Slot(bool)
+    def _ai_toggle_changed(self, checked: bool) -> None:
+        self.ai_configuration_widget.setVisible(checked)
+        self.ai_correction_toggle.setAccessibleDescription(
+            "已开启" if checked else "已关闭"
+        )
+        if not checked:
+            self.cancel_ai_request()
+            if self._preferences.ai_correction_enabled:
+                self._preferences = replace(
+                    self._preferences, ai_correction_enabled=False
+                )
+                self._preferences.save(self._settings)
+                self.preferences_changed.emit(self._preferences)
+            self._set_ai_connection_status("AI 辅助已关闭")
+        else:
+            self._update_ai_draft_status()
+        self._update_ai_action_state()
+
+    @Slot(str)
+    def _ai_base_url_changed(self, _text: str) -> None:
+        if self._building:
+            return
+        self._disable_active_ai_for_changed_provider()
+        request_was_active = self._ai_model_worker is not None
+        self._ai_request_configuration_changed()
+        self._refresh_ai_key_presence()
+        current_base_url = self.ai_base_url_input.text().strip().rstrip("/")
+        if self._ai_models_base_url and current_base_url != self._ai_models_base_url:
+            blocker = QSignalBlocker(self.ai_model_combo)
+            self.ai_model_combo.clear()
+            self.ai_model_combo.setCurrentIndex(-1)
+            del blocker
+            self._ai_models_base_url = ""
+            message = "地址已更改，请重新获取模型"
+            if request_was_active:
+                message = "地址已更改，已取消旧请求，请重新获取模型"
+            self._set_ai_connection_status(message)
+        elif not request_was_active:
+            self._update_ai_draft_status()
+        self._update_ai_action_state()
+
+    def _disable_active_ai_for_changed_provider(self) -> bool:
+        """Keep a draft provider from inheriting the active provider's credentials."""
+
+        if not self._preferences.ai_correction_enabled:
+            return False
+        active_base_url = self._preferences.ai_base_url.strip().rstrip("/")
+        draft_base_url = self.ai_base_url_input.text().strip().rstrip("/")
+        if draft_base_url == active_base_url:
+            return False
+        self._preferences = replace(self._preferences, ai_correction_enabled=False)
+        self._preferences.save(self._settings)
+        self.preferences_changed.emit(self._preferences)
+        return True
+
+    @Slot()
+    def _ai_draft_changed(self) -> None:
+        if self._building:
+            return
+        request_was_active = self._ai_model_worker is not None
+        self._ai_request_configuration_changed()
+        self._update_ai_action_state()
+        if not request_was_active:
+            self._update_ai_draft_status()
+
+    def _ai_draft_is_dirty(self) -> bool:
+        return (
+            self.ai_correction_toggle.isChecked()
+            != self._preferences.ai_correction_enabled
+            or self.ai_base_url_input.text().strip()
+            != self._preferences.ai_base_url
+            or self.ai_model_combo.currentText().strip()
+            != self._preferences.ai_model
+        )
+
+    def _update_ai_draft_status(self) -> None:
+        if self._building or not self.ai_correction_toggle.isChecked():
+            return
+        raw_base_url = self.ai_base_url_input.text().strip()
+        raw_model = self.ai_model_combo.currentText().strip()
+        if self._credential_error:
+            self._set_ai_connection_status(self._credential_error, error=True)
+        elif not raw_base_url:
+            self._set_ai_connection_status("请输入兼容 API 地址")
+        elif not self._ai_key_present:
+            self._set_ai_connection_status("请为当前地址保存 Key")
+        elif not raw_model:
+            self._set_ai_connection_status("获取并选择模型")
+        elif self._ai_draft_is_dirty():
+            self._set_ai_connection_status("配置已更改，请保存后生效")
+        else:
+            self._set_ai_connection_status("配置已保存并生效")
+
+    def _update_ai_action_state(self) -> None:
+        visible = self.ai_correction_toggle.isChecked()
+        idle = self._ai_model_worker is None
+        try:
+            validate_ai_base_url(self.ai_base_url_input.text())
+        except AICorrectionError:
+            base_url_valid = False
+        else:
+            base_url_valid = True
+        try:
+            validate_ai_model_id(self.ai_model_combo.currentText())
+        except AICorrectionError:
+            model_valid = False
+        else:
+            model_valid = True
+        self.ai_save_key_button.setEnabled(
+            visible
+            and idle
+            and base_url_valid
+            and bool(self.ai_api_key_input.text().strip())
+        )
+        self.ai_delete_key_button.setEnabled(visible and idle and self._ai_key_present)
+        self.ai_model_combo.setEnabled(visible and idle)
+        self.ai_refresh_models_button.setEnabled(
+            visible and idle and self._ai_key_present and base_url_valid
+        )
+        self.ai_test_connection_button.setEnabled(
+            visible
+            and idle
+            and self._ai_key_present
+            and base_url_valid
+            and model_valid
+        )
+        has_complete_draft = bool(
+            self.ai_base_url_input.text().strip()
+            and self.ai_model_combo.currentText().strip()
+        )
+        self.ai_save_config_button.setEnabled(
+            visible
+            and idle
+            and self._ai_key_present
+            and has_complete_draft
+            and self._ai_draft_is_dirty()
+        )
 
     @Slot()
     def _ai_request_configuration_changed(self) -> None:
@@ -1642,26 +1839,76 @@ class SettingsPanel(QWidget):
         self._controls_changed()
 
     @Slot()
+    def _save_ai_configuration(self) -> None:
+        if self._ai_model_worker is not None:
+            return
+        try:
+            ai_base_url = validate_ai_base_url(self.ai_base_url_input.text())
+            ai_model = validate_ai_model_id(self.ai_model_combo.currentText())
+        except AICorrectionError as exc:
+            self._set_ai_connection_status(str(exc), error=True)
+            self._update_ai_action_state()
+            return
+        try:
+            self._ai_key_present = self._api_key_store.has_key_for_base_url(
+                ai_base_url
+            )
+        except CredentialError as exc:
+            self._credential_error = str(exc)
+            self._set_ai_connection_status(str(exc), error=True)
+            self._update_ai_key_status()
+            self._update_ai_action_state()
+            return
+        if not self._ai_key_present:
+            self._set_ai_connection_status("请为当前地址保存 Key", error=True)
+            self._update_ai_action_state()
+            return
+
+        base_url_blocker = QSignalBlocker(self.ai_base_url_input)
+        model_blocker = QSignalBlocker(self.ai_model_combo)
+        self.ai_base_url_input.setText(ai_base_url)
+        model_index = self.ai_model_combo.findText(ai_model)
+        if model_index >= 0:
+            self.ai_model_combo.setCurrentIndex(model_index)
+        del model_blocker
+        del base_url_blocker
+        self._ai_models_base_url = ai_base_url
+        self._preferences = replace(
+            self._preferences,
+            ai_correction_enabled=True,
+            ai_base_url=ai_base_url,
+            ai_model=ai_model,
+        )
+        self._preferences.save(self._settings)
+        self.preferences_changed.emit(self._preferences)
+        self._set_ai_connection_status("配置已保存并生效")
+        self._update_ai_action_state()
+
+    @Slot()
     def _save_ai_api_key(self) -> None:
         try:
-            self._api_key_store.save(self.ai_api_key_input.text())
+            base_url = validate_ai_base_url(self.ai_base_url_input.text())
+        except AICorrectionError as exc:
+            self._set_ai_connection_status(str(exc), error=True)
+            self._update_ai_action_state()
+            return
+        try:
+            self._api_key_store.save(self.ai_api_key_input.text(), base_url)
         except CredentialError as exc:
             self._credential_error = str(exc)
             self._update_ai_key_status()
             return
+        self._disable_active_ai_for_changed_provider()
         self.cancel_ai_request()
         self._ai_credential_generation += 1
         self.ai_api_key_input.clear()
         self._credential_error = ""
         self._ai_key_present = True
-        self.ai_correction_toggle.setEnabled(True)
-        self.ai_delete_key_button.setEnabled(True)
-        self.ai_refresh_models_button.setEnabled(True)
-        self.ai_test_connection_button.setEnabled(True)
         self.ai_api_key_input.setPlaceholderText("已安全保存，可输入新 Key 替换")
         self._update_ai_key_status()
+        self._update_ai_action_state()
         self.ai_credential_changed.emit()
-        self._controls_changed()
+        self._update_ai_draft_status()
 
     @Slot()
     def _delete_ai_api_key(self) -> None:
@@ -1676,16 +1923,12 @@ class SettingsPanel(QWidget):
         self._credential_error = ""
         self._ai_key_present = False
         self.ai_correction_toggle.setChecked(False)
-        self.ai_correction_toggle.setEnabled(False)
-        self.ai_delete_key_button.setEnabled(False)
-        self.ai_refresh_models_button.setEnabled(False)
-        self.ai_test_connection_button.setEnabled(False)
         self.ai_api_key_input.clear()
         self.ai_api_key_input.setPlaceholderText("输入兼容服务 API Key")
-        self._set_ai_connection_status("保存 Key 后可拉取上游模型")
+        self._set_ai_connection_status("填写地址并保存 Key")
         self._update_ai_key_status()
+        self._update_ai_action_state()
         self.ai_credential_changed.emit()
-        self._controls_changed()
 
     @Slot()
     def _refresh_ai_models(self) -> None:
@@ -1700,17 +1943,26 @@ class SettingsPanel(QWidget):
             return
         try:
             base_url = validate_ai_base_url(self.ai_base_url_input.text())
-            model = validate_ai_model_id(self.ai_model_combo.currentText())
         except AICorrectionError as exc:
             self._set_ai_connection_status(str(exc), error=True)
             return
+        model = ""
+        if action == "test":
+            try:
+                model = validate_ai_model_id(self.ai_model_combo.currentText())
+            except AICorrectionError as exc:
+                self._set_ai_connection_status(str(exc), error=True)
+                return
         try:
-            api_key = self._api_key_store.load()
+            api_key = self._api_key_store.load_for_base_url(base_url)
         except CredentialError as exc:
             self._set_ai_connection_status(str(exc), error=True)
             return
         if api_key is None:
-            self._set_ai_connection_status("请先保存 API Key。", error=True)
+            self._ai_key_present = False
+            self._set_ai_connection_status("请为当前地址保存 Key", error=True)
+            self._update_ai_key_status()
+            self._update_ai_action_state()
             return
         worker = CompatibleModelWorker(
             action,
@@ -1728,8 +1980,7 @@ class SettingsPanel(QWidget):
             model,
             self._ai_credential_generation,
         )
-        self.ai_refresh_models_button.setEnabled(False)
-        self.ai_test_connection_button.setEnabled(False)
+        self._update_ai_action_state()
         self._set_ai_connection_status(
             "正在拉取上游模型…" if action == "list" else "正在测试连接…"
         )
@@ -1748,10 +1999,11 @@ class SettingsPanel(QWidget):
             for model in result:
                 self.ai_model_combo.addItem(str(model))
             index = self.ai_model_combo.findText(current)
-            self.ai_model_combo.setCurrentIndex(max(0, index))
+            self.ai_model_combo.setCurrentIndex(index)
             del blocker
-            self._controls_changed()
-            self._set_ai_connection_status(f"已获取 {len(result)} 个模型")
+            self._ai_models_base_url = worker.base_url
+            self._update_ai_action_state()
+            self._set_ai_connection_status(f"已获取 {len(result)} 个模型，请选择")
         elif worker.action == "test" and isinstance(result, str):
             self._set_ai_connection_status(f"连接成功，可访问 {result}")
 
@@ -1769,8 +2021,7 @@ class SettingsPanel(QWidget):
             return
         self._ai_model_worker = None
         self._ai_active_context = None
-        self.ai_refresh_models_button.setEnabled(self._ai_key_present)
-        self.ai_test_connection_button.setEnabled(self._ai_key_present)
+        self._update_ai_action_state()
 
     def cancel_ai_request(self) -> None:
         worker = self._ai_model_worker
@@ -1779,8 +2030,7 @@ class SettingsPanel(QWidget):
         worker.cancel()
         self._ai_model_worker = None
         self._ai_active_context = None
-        self.ai_refresh_models_button.setEnabled(self._ai_key_present)
-        self.ai_test_connection_button.setEnabled(self._ai_key_present)
+        self._update_ai_action_state()
 
     def _ai_request_is_current(
         self, worker: CompatibleModelWorker | None = None
@@ -1796,7 +2046,11 @@ class SettingsPanel(QWidget):
             return False
         try:
             current_base_url = validate_ai_base_url(self.ai_base_url_input.text())
-            current_model = validate_ai_model_id(self.ai_model_combo.currentText())
+            current_model = (
+                ""
+                if action == "list"
+                else validate_ai_model_id(self.ai_model_combo.currentText())
+            )
         except AICorrectionError:
             return False
         return (
@@ -1822,7 +2076,9 @@ class SettingsPanel(QWidget):
             self.ai_key_status_label.setProperty("error", True)
             self.ai_key_status_label.setProperty("saved", False)
         elif self._ai_key_present:
-            self.ai_key_status_label.setText("API Key 已保存到 Windows 凭据管理器")
+            self.ai_key_status_label.setText(
+                "当前地址的 API Key 已保存到 Windows 凭据管理器"
+            )
             self.ai_key_status_label.setProperty("error", False)
             self.ai_key_status_label.setProperty("saved", True)
         else:
@@ -1832,6 +2088,20 @@ class SettingsPanel(QWidget):
         if self.ai_key_status_label.style() is not None:
             self.ai_key_status_label.style().unpolish(self.ai_key_status_label)
             self.ai_key_status_label.style().polish(self.ai_key_status_label)
+
+    def _refresh_ai_key_presence(self) -> None:
+        try:
+            base_url = validate_ai_base_url(self.ai_base_url_input.text())
+        except AICorrectionError:
+            self._ai_key_present = False
+            return
+        try:
+            self._ai_key_present = self._api_key_store.has_key_for_base_url(base_url)
+            self._credential_error = ""
+        except CredentialError as exc:
+            self._ai_key_present = False
+            self._credential_error = str(exc)
+        self._update_ai_key_status()
 
     @Slot()
     def toggle_theme(self) -> None:
@@ -1855,13 +2125,15 @@ class SettingsPanel(QWidget):
 
     def _update_theme_button(self) -> None:
         if self._preferences.result_theme == "dark":
-            self.theme_toggle_button.setText("☀")
+            self.theme_toggle_button.setText("")
+            self.theme_toggle_button.setIcon(line_icon("sun", "#98A2B3"))
             self.theme_toggle_button.setToolTip("切换到浅色主题")
             self.theme_toggle_button.setAccessibleDescription(
                 "当前为深色主题，按下切换到浅色主题"
             )
         else:
-            self.theme_toggle_button.setText("☾")
+            self.theme_toggle_button.setText("")
+            self.theme_toggle_button.setIcon(line_icon("moon", "#667085"))
             self.theme_toggle_button.setToolTip("切换到深色主题")
             self.theme_toggle_button.setAccessibleDescription(
                 "当前为浅色主题，按下切换到深色主题"
@@ -1871,6 +2143,23 @@ class SettingsPanel(QWidget):
                 "#98A8BF" if self._preferences.result_theme == "dark" else "#5F6A79"
             )
         )
+        self.theme_toggle_button.setIconSize(QSize(17, 17))
+        self._update_navigation_icons()
+
+    def _navigation_icon_color(self, *, selected: bool) -> str:
+        dark = self._preferences.result_theme == "dark"
+        if selected:
+            return "#86A5FF" if dark else "#2563EB"
+        return "#98A2B3" if dark else "#667085"
+
+    def _update_navigation_icons(self) -> None:
+        for button, _title in self._nav_entries:
+            button.setIcon(
+                line_icon(
+                    str(button.property("iconName")),
+                    self._navigation_icon_color(selected=button.isChecked()),
+                )
+            )
 
     @Slot()
     def _preset_color_selected(self) -> None:

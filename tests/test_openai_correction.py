@@ -982,6 +982,64 @@ def test_loopback_http_model_request_ignores_environment_proxies(
     assert proxy_requests == []
 
 
+def test_bearer_auth_prevents_default_netrc_on_remote_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    netrc_lookups: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: netrc_lookups.append(url) or ("netrc-user", "netrc-password"),
+    )
+    session = requests.Session()
+    session.auth = openai_correction._BearerAuth("configured-token")
+
+    prepared = session.prepare_request(
+        requests.Request("GET", "https://gateway.example/v1/models")
+    )
+
+    assert prepared.headers["Authorization"] == "Bearer configured-token"
+    assert netrc_lookups == []
+
+
+def test_injected_session_receives_explicit_bearer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    netrc_lookups: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: netrc_lookups.append(url) or ("netrc-user", "netrc-password"),
+    )
+    class CapturingSession(requests.Session):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared: requests.PreparedRequest | None = None
+
+        def get(self, url: str, **kwargs: Any) -> FakeResponse:
+            self.prepared = self.prepare_request(
+                requests.Request(
+                    "GET",
+                    url,
+                    headers=kwargs.get("headers"),
+                    auth=kwargs.get("auth"),
+                )
+            )
+            return FakeResponse(200, {"data": [{"id": "vision-model"}]})
+
+    session = CapturingSession()
+    models = list_compatible_models(
+        "configured-token",
+        "https://gateway.example/v1",
+        client=session,
+    )
+
+    assert models == ("vision-model",)
+    assert session.prepared is not None
+    assert session.prepared.headers["Authorization"] == "Bearer configured-token"
+    assert netrc_lookups == []
+
+
 def test_model_access_check_runs_tiny_multimodal_request() -> None:
     client = FakeClient(
         post_response=FakeResponse(200, _chat_payload("x"))

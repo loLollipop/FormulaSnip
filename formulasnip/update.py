@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 import requests
+from requests.auth import AuthBase
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
@@ -128,6 +129,26 @@ class UpdateCancellation:
             return True
 
 
+class _AnonymousAuth(AuthBase):
+    """Explicitly disable netrc credentials without disabling proxy/CA settings."""
+
+    def __call__(self, request: Any) -> Any:
+        request.headers.pop("Authorization", None)
+        return request
+
+
+class _ExplicitAuthClient:
+    """Apply explicit anonymous auth without mutating a caller-owned Session."""
+
+    def __init__(self, client: HttpClient) -> None:
+        self._client = client
+        self._auth = _AnonymousAuth()
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        kwargs["auth"] = self._auth
+        return self._client.get(url, **kwargs)
+
+
 class _ConnectionTracker:
     """Own duplicate socket handles that can interrupt a requests Session."""
 
@@ -221,10 +242,14 @@ def _request_client(
     cancel_event: CancellationSignal | None,
 ) -> Any:
     if client is not requests:
-        yield client
+        if isinstance(client, requests.Session):
+            yield _ExplicitAuthClient(client)
+        else:
+            yield client
         return
     tracker = _ConnectionTracker()
     session = requests.Session()
+    session.auth = _AnonymousAuth()
     adapter = _CancellableHTTPAdapter(tracker)
     session.mount("http://", adapter)
     session.mount("https://", adapter)

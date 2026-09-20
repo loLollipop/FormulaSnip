@@ -20,8 +20,9 @@ from formulasnip.recognition.openai_correction import (
     transcribe_formula,
 )
 from formulasnip.recognition.quality import assess_latex
+from formulasnip.ui.image_conversion import ensure_supported_image_size
 
-_DISAGREEMENT_WARNING = "本地与 AI 结果不一致，可切换对照后复制。"
+_DISAGREEMENT_WARNING = "本地与 AI 结果不一致，请显式选择一个结果、核对后再复制。"
 _LOCAL_DEPENDENT_WARNING_PREFIXES = (
     "识别结果需要人工校对：",
     "当前识别结果无法生成电子公式预览",
@@ -47,17 +48,28 @@ class RecognitionWorker(QRunnable):
     ) -> None:
         super().__init__()
         self.manager = manager
+        ensure_supported_image_size(*image.size)
         self.image: Image.Image | None = image.copy()
         self.backend_key = backend_key
         self.ai_enabled = ai_enabled
         self.ai_api_key = ai_api_key
         self.ai_base_url = ai_base_url
         self.ai_model = ai_model
+        self._task_identity = object()
         self._cancel_event = Event()
+        self._local_cancel_event = Event()
         self._local_result: RecognitionResult | None = None
         self.signals = RecognitionSignals()
 
     def cancel(self) -> None:
+        self._cancel_event.set()
+        self._local_cancel_event.set()
+        if isinstance(self.manager, BackendManager):
+            self.manager.cancel_current(self._task_identity)
+
+    def cancel_ai(self) -> None:
+        """Stop only the optional AI branch and retain local OCR work."""
+
         self._cancel_event.set()
 
     def result_for_delivery(
@@ -91,6 +103,10 @@ class RecognitionWorker(QRunnable):
         if image is None:
             self.ai_api_key = None
             self.signals.failed.emit(self, "识别任务截图不可用。")
+            return
+        if self._local_cancel_event.is_set():
+            self.ai_api_key = None
+            self.signals.failed.emit(self, "识别任务已取消。")
             return
         started = perf_counter()
         ai_key = (self.ai_api_key or "").strip()
@@ -132,7 +148,15 @@ class RecognitionWorker(QRunnable):
         local_result: RecognitionResult | None = None
         local_error: Exception | None = None
         try:
-            local_result = self.manager.recognize(image, self.backend_key)
+            if isinstance(self.manager, BackendManager):
+                local_result = self.manager.recognize(
+                    image,
+                    self.backend_key,
+                    task_identity=self._task_identity,
+                    cancel_event=self._local_cancel_event,
+                )
+            else:
+                local_result = self.manager.recognize(image, self.backend_key)
             self._local_result = local_result
         except Exception as exc:
             local_error = exc.with_traceback(None)
@@ -275,9 +299,10 @@ class RecognitionWorker(QRunnable):
         ]
         if not equivalent:
             warnings.append(_DISAGREEMENT_WARNING)
+        selected = ai_candidate if equivalent else local_candidate
         return RecognitionResult(
-            ai_candidate.latex,
-            ai_candidate.backend,
+            selected.latex,
+            selected.backend,
             elapsed,
             "ai-parallel",
             tuple(dict.fromkeys(warnings)),

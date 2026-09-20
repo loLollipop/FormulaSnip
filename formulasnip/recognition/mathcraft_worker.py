@@ -12,7 +12,7 @@ import multiprocessing
 import sys
 from contextlib import suppress
 from multiprocessing.shared_memory import SharedMemory
-from threading import Lock, RLock
+from threading import Event, Lock, RLock
 from time import monotonic
 from typing import Any
 
@@ -26,6 +26,7 @@ from formulasnip.runtime import configure_runtime
 _LOG = logging.getLogger(__name__)
 STARTUP_TIMEOUT = 180.0
 RECOGNITION_TIMEOUT = 120.0
+MAX_RECOGNITION_IMAGE_PIXELS = 4_000_000
 
 
 def _assign_kill_on_close_job(process: Any) -> int | None:
@@ -194,9 +195,26 @@ class MathCraftWorkerClient:
         with self._request_lock:
             self._ensure_started()
 
-    def recognize(self, image: Image.Image) -> RecognitionResult:
+    def recognize(
+        self,
+        image: Image.Image,
+        *,
+        cancel_event: Event | None = None,
+    ) -> RecognitionResult:
+        width, height = image.size
+        if (
+            width <= 0
+            or height <= 0
+            or width * height > MAX_RECOGNITION_IMAGE_PIXELS
+        ):
+            raise RecognitionError(
+                "截图尺寸过大（最多 400 万像素），请缩小截图范围后重试。"
+            )
+        self._raise_if_cancelled(cancel_event)
         with self._request_lock:
-            self._ensure_started()
+            self._raise_if_cancelled(cancel_event)
+            self._ensure_started(cancel_event)
+            self._raise_if_cancelled(cancel_event)
             self._request_id += 1
             request_id = self._request_id
             memory: SharedMemory | None = None
@@ -208,7 +226,11 @@ class MathCraftWorkerClient:
                 memory = SharedMemory(create=True, size=len(pixels))
                 memory.buf[:] = pixels
                 self._connection.send(("recognize", request_id, (rgb.size, memory.name)))
-                response = self._receive(request_id, self._recognition_timeout)
+                response = self._receive(
+                    request_id,
+                    self._recognition_timeout,
+                    cancel_event,
+                )
                 if response[0] == "error":
                     raise RecognitionError(response[2])
                 if response[0] != "result" or not isinstance(response[2], RecognitionResult):
@@ -225,7 +247,8 @@ class MathCraftWorkerClient:
                     memory.close()
                     memory.unlink()
 
-    def _ensure_started(self) -> None:
+    def _ensure_started(self, cancel_event: Event | None = None) -> None:
+        self._raise_if_cancelled(cancel_event)
         with self._state_lock:
             if self._closed:
                 raise RecognitionError("公式识别服务已关闭。")
@@ -258,7 +281,7 @@ class MathCraftWorkerClient:
                 child.close()
             _LOG.info("mathcraft-worker-start pid=%s", process.pid)
         try:
-            response = self._receive(0, self._startup_timeout)
+            response = self._receive(0, self._startup_timeout, cancel_event)
             if response[0] == "error":
                 raise RecognitionError(response[2])
             if response[0] != "ready":
@@ -271,10 +294,16 @@ class MathCraftWorkerClient:
             self._dispose()
             raise
 
-    def _receive(self, request_id: int, timeout: float) -> tuple[str, int, Any]:
+    def _receive(
+        self,
+        request_id: int,
+        timeout: float,
+        cancel_event: Event | None = None,
+    ) -> tuple[str, int, Any]:
         deadline = monotonic() + timeout
         connection, process = self._connection, self._process
         while True:
+            self._raise_if_cancelled(cancel_event)
             remaining = deadline - monotonic()
             if remaining <= 0:
                 _LOG.warning(
@@ -293,6 +322,11 @@ class MathCraftWorkerClient:
             if not process.is_alive():
                 _LOG.error("mathcraft-worker-unexpected-exit code=%s", process.exitcode)
                 raise self._crash_error()
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_event: Event | None) -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RecognitionError("公式识别任务已取消。")
 
     @staticmethod
     def _crash_error() -> RecognitionError:
@@ -354,3 +388,11 @@ class MathCraftWorkerClient:
         finally:
             if idle:
                 self._request_lock.release()
+
+    def cancel_current(self) -> None:
+        """Interrupt only the native generation currently owned by this client."""
+
+        with self._state_lock:
+            if self._closed or self._process is None:
+                return
+            self._dispose()

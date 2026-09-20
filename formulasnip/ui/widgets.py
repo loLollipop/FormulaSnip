@@ -6,7 +6,11 @@ from typing import Any
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer, QUrl, Signal
 from PySide6.QtWidgets import QLabel, QStackedLayout, QWidget
 
-from formulasnip.core.preview import build_mathjax_html, mathjax_script_path
+from formulasnip.core.preview import (
+    build_mathjax_html,
+    build_mathjax_update_script,
+    mathjax_script_path,
+)
 
 _RENDER_TIMEOUT_MS = 15_000
 _POLL_INTERVAL_MS = 75
@@ -100,6 +104,9 @@ class FormulaPreviewWidget(QWidget):
         self._web_profile: Any | None = None
         self._web_page: Any | None = None
         self._request_interceptor: Any | None = None
+        self._document_started = False
+        self._document_loaded = False
+        self._pending_formula: tuple[int, str] | None = None
         self._initialization_error = "Qt WebEngine 不可用，无法显示公式预览。"
 
         self._layout = QStackedLayout(self)
@@ -153,6 +160,7 @@ class FormulaPreviewWidget(QWidget):
     def set_formula(self, latex: str) -> int:
         self._request_id += 1
         request_id = self._request_id
+        update_script = build_mathjax_update_script(latex, request_id)
         self._completed_request_id = 0
         self._render_clock.start()
         self._poll_timer.stop()
@@ -162,23 +170,34 @@ class FormulaPreviewWidget(QWidget):
             self._show_error(request_id, self._initialization_error)
             return request_id
 
-        script = mathjax_script_path()
-        if not script.is_file():
+        if not mathjax_script_path().is_file():
             self._show_error(request_id, "本地 MathJax 资源缺失，无法显示公式预览。")
             return request_id
 
         self._current_backend = "mathjax"
         self._layout.setCurrentWidget(self._web_view)
-        base_url = QUrl.fromLocalFile(str(script.parent.resolve()) + "/")
+        self._pending_formula = (request_id, update_script)
         self._timeout_timer.start()
-        try:
-            self._web_page.set_preview_html(
-                build_mathjax_html(latex, request_id), base_url
-            )
-        except Exception:
-            self._timeout_timer.stop()
-            raise
+        self.warmup()
+        self._dispatch_pending_formula()
         return request_id
+
+    def warmup(self) -> None:
+        """Load MathJax once without creating a user-visible preview request."""
+
+        if self._web_page is None or self._document_started:
+            return
+        script = mathjax_script_path()
+        if not script.is_file():
+            return
+        self._document_started = True
+        self._document_loaded = False
+        base_url = QUrl.fromLocalFile(str(script.parent.resolve()) + "/")
+        try:
+            self._web_page.set_preview_html(build_mathjax_html("x", 0), base_url)
+        except Exception:
+            self._document_started = False
+            raise
 
     def _initialize_webengine(self) -> None:
         script = mathjax_script_path().resolve()
@@ -210,10 +229,38 @@ class FormulaPreviewWidget(QWidget):
         self._layout.addWidget(self._web_view)
 
     def _web_load_finished(self, successful: bool) -> None:
-        # An older setHtml() call can emit loadFinished(False) after a newer
-        # request has started.  The page state carries the request id, so never
-        # assign this unversioned signal to the current request as an error.
-        del successful
+        self._document_loaded = bool(successful)
+        if not successful:
+            self._document_started = False
+            if self._current_backend == "mathjax":
+                self._show_error(self._request_id, "MathJax 页面加载失败。")
+            return
+        self._dispatch_pending_formula()
+
+    def _dispatch_pending_formula(self) -> None:
+        if (
+            not self._document_loaded
+            or self._web_page is None
+            or self._pending_formula is None
+        ):
+            return
+        request_id, update_script = self._pending_formula
+        if request_id != self._request_id or self._current_backend != "mathjax":
+            return
+        self._pending_formula = None
+        self._web_page.runJavaScript(
+            update_script,
+            lambda dispatched, expected=request_id: self._formula_dispatched(
+                expected, dispatched
+            ),
+        )
+
+    def _formula_dispatched(self, expected_request: int, dispatched: Any) -> None:
+        if expected_request != self._request_id or self._current_backend != "mathjax":
+            return
+        if dispatched is not True:
+            self._show_error(expected_request, "MathJax 预览页面尚未就绪。")
+            return
         self._poll_render_state()
 
     def _poll_render_state(self) -> None:
@@ -268,6 +315,7 @@ class FormulaPreviewWidget(QWidget):
         if expected_request != self._request_id:
             return
         self._timeout_timer.stop()
+        self._pending_formula = None
         self._current_backend = "unavailable"
         self._error_label.setText(detail)
         self._layout.setCurrentWidget(self._error_label)

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from importlib.util import find_spec
+from threading import Event
 from time import perf_counter
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from formulasnip.core.latex import normalize_latex
 from formulasnip.domain import RecognitionResult
@@ -28,13 +29,21 @@ class MathCraftBackend(RecognitionBackend):
     def is_available(cls) -> bool:
         return find_spec("mathcraft_ocr") is not None
 
-    def recognize(self, image: Image.Image) -> RecognitionResult:
+    def recognize(
+        self,
+        image: Image.Image,
+        *,
+        cancel_event: Event | None = None,
+    ) -> RecognitionResult:
         started = perf_counter()
-        result = self._client.recognize(image)
+        result = self._client.recognize(image, cancel_event=cancel_event)
         return RecognitionResult(result.latex, self.display_name, perf_counter() - started)
 
     def warmup(self) -> None:
         self._client.warmup()
+
+    def cancel_current(self) -> None:
+        self._client.cancel_current()
 
     def close(self) -> None:
         self._client.close()
@@ -50,6 +59,7 @@ class _InProcessMathCraftBackend(RecognitionBackend):
     def __init__(self, *, runtime_factory: Callable[..., Any] | None = None) -> None:
         self._runtime: Any | None = None
         self._runtime_factory = runtime_factory
+        self._warmed_up = False
 
     @classmethod
     def is_available(cls) -> bool:
@@ -99,4 +109,15 @@ class _InProcessMathCraftBackend(RecognitionBackend):
         return RecognitionResult(latex, self.display_name, elapsed)
 
     def warmup(self) -> None:
-        self._load_runtime().warmup("formula")
+        if self._warmed_up:
+            return
+        runtime = self._load_runtime()
+        runtime.warmup("formula")
+        # MathCraft's lightweight warmup loads the network, but the first full
+        # request still pays preprocessing, graph planning and decoder setup.
+        # Run one tiny, deterministic probe during application startup so the
+        # user's first screenshot reaches the already exercised inference path.
+        probe = Image.new("RGB", (48, 24), "white")
+        ImageDraw.Draw(probe).text((8, 4), "x", fill="black")
+        runtime.recognize_formula(probe)
+        self._warmed_up = True

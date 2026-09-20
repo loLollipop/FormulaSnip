@@ -202,6 +202,63 @@ def test_close_interrupts_an_inflight_native_call_without_waiting_for_deadline()
     assert errors and isinstance(errors[0], RecognitionError)
 
 
+def test_cancel_current_interrupts_inference_and_next_call_restarts() -> None:
+    context = Context([[READY], [READY, ("result", 2, RESULT)]])
+    client = MathCraftWorkerClient(context=context, recognition_timeout=60)
+    client.warmup()
+    waiting = Event()
+    errors: list[Exception] = []
+    connection = context.parents[0]
+    original_poll = connection.poll
+
+    def poll(timeout: float) -> bool:
+        waiting.set()
+        return original_poll(timeout)
+
+    connection.poll = poll  # type: ignore[method-assign]
+    thread = Thread(
+        target=lambda: _capture_recognition_error(client, errors), daemon=True
+    )
+    thread.start()
+    assert waiting.wait(2)
+    client.cancel_current()
+    thread.join(2)
+
+    assert not thread.is_alive()
+    assert errors and isinstance(errors[0], RecognitionError)
+    try:
+        assert client.recognize(Image.new("RGB", (5, 4))) == RESULT
+    finally:
+        client.close()
+
+
+def _capture_recognition_error(
+    client: MathCraftWorkerClient, errors: list[Exception]
+) -> None:
+    try:
+        client.recognize(Image.new("RGB", (5, 4)))
+    except Exception as exc:
+        errors.append(exc)
+
+
+def test_oversized_image_is_rejected_before_worker_or_shared_memory() -> None:
+    client = MathCraftWorkerClient(context=Context([]))
+    with pytest.raises(RecognitionError, match="400 万像素"):
+        client.recognize(Image.new("L", (4_000_001, 1)))
+    assert client._process is None
+
+
+def test_cancelled_image_is_rejected_before_worker_start() -> None:
+    client = MathCraftWorkerClient(context=Context([]))
+    cancelled = Event()
+    cancelled.set()
+
+    with pytest.raises(RecognitionError, match="已取消"):
+        client.recognize(Image.new("L", (10, 10)), cancel_event=cancelled)
+
+    assert client._process is None
+
+
 def _spawned_crashing_worker(connection: Any) -> None:
     """Exercise OS process death without loading native OCR in the test runner."""
     connection.send(READY)

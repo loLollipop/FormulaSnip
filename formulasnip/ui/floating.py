@@ -4,6 +4,7 @@ import logging
 import time
 from pathlib import Path
 
+from PIL.Image import Image as PILImage
 from PySide6.QtCore import (
     QMimeData,
     QObject,
@@ -20,6 +21,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
+from PySide6.QtCore import QTimer as OrbAnimationTimer
 from PySide6.QtCore import QTimer as PreviewTimer
 from PySide6.QtGui import (
     QCloseEvent,
@@ -29,9 +31,11 @@ from PySide6.QtGui import (
     QHideEvent,
     QImage,
     QMouseEvent,
+    QMoveEvent,
     QPainter,
     QPen,
     QPixmap,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -99,6 +103,9 @@ class FloatingOrb(QWidget):
         self._window_at_press = QPoint()
         self._dragged = False
         self._busy = False
+        self._busy_message = "正在识别中…"
+        self._busy_angle = 0
+        self._initializing = False
         self._has_result = False
         self._color = "blue"
         self._ring_color = DEFAULT_RING_COLOR
@@ -115,7 +122,40 @@ class FloatingOrb(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(68, 68)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("FormulaSnip 悬浮球")
+        self.setAccessibleDescription("左键截取公式 · 拖动调整位置 · 右键打开菜单")
         self.setToolTip("左键截取公式 · 拖动调整位置 · 右键打开菜单")
+
+        self._busy_timer = OrbAnimationTimer(self)
+        self._busy_timer.setInterval(40)
+        self._busy_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._busy_timer.timeout.connect(self._advance_busy_animation)
+        busy_window_flags = (
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self._busy_label = QLabel("", self, busy_window_flags)
+        self._busy_label.setObjectName("OrbBusyStatus")
+        self._busy_label.setAccessibleName("公式识别状态")
+        self._busy_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._busy_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._busy_label.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._busy_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._busy_label.setStyleSheet(
+            "QLabel#OrbBusyStatus {"
+            "background-color: rgba(15, 23, 42, 238);"
+            "color: #F8FAFC;"
+            "border: 1px solid rgba(148, 163, 184, 110);"
+            "border-radius: 8px;"
+            "padding: 6px 10px;"
+            'font-family: "Microsoft YaHei UI", "Segoe UI";'
+            "font-size: 12px;"
+            "font-weight: 500;"
+            "}"
+        )
+        self._busy_label.hide()
         self.set_color(color)
         self.set_logo_path(logo_path)
 
@@ -171,13 +211,77 @@ class FloatingOrb(QWidget):
         self._logo_path = path if image is not None else ""
         self.update()
 
-    def set_busy(self, busy: bool) -> None:
+    def set_busy(self, busy: bool, message: str = "正在识别中…") -> None:
+        if busy and not self._busy:
+            self._busy_angle = 0
         self._busy = busy
-        self.setCursor(Qt.CursorShape.BusyCursor if busy else Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(
-            "正在识别公式…" if busy else "左键截取公式 · 拖动调整位置 · 右键打开菜单"
-        )
+        self._busy_message = message
+        self._refresh_interaction_state()
+        self._sync_busy_indicator()
         self.update()
+
+    @property
+    def busy_indicator_visible(self) -> bool:
+        return self._busy_label.isVisible()
+
+    @property
+    def busy_message(self) -> str:
+        return self._busy_message
+
+    @Slot()
+    def _advance_busy_animation(self) -> None:
+        if not self._busy or not self.isVisible():
+            self._sync_busy_indicator()
+            return
+        self._busy_angle = (self._busy_angle + 9) % 360
+        self.update()
+
+    def _sync_busy_indicator(self) -> None:
+        should_show = self._busy and self.isVisible()
+        if not should_show:
+            self._busy_timer.stop()
+            self._busy_label.hide()
+            return
+        if not self._busy_timer.isActive():
+            self._busy_timer.start()
+        self._busy_label.setText(self._busy_message)
+        self._busy_label.adjustSize()
+        self._position_busy_label()
+        self._busy_label.show()
+        self._busy_label.raise_()
+
+    def _position_busy_label(self) -> None:
+        screen = QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        gap = 8
+        right_x = self.geometry().right() + 1 + gap
+        left_x = self.x() - self._busy_label.width() - gap
+        fits_on_right = right_x + self._busy_label.width() <= area.right() + 1
+        x = right_x if fits_on_right else left_x
+        x = min(max(x, area.left()), area.right() - self._busy_label.width() + 1)
+        y = self.y() + (self.height() - self._busy_label.height()) // 2
+        y = min(max(y, area.top()), area.bottom() - self._busy_label.height() + 1)
+        self._busy_label.move(x, y)
+
+    def set_initializing(self, initializing: bool) -> None:
+        self._initializing = initializing
+        self._refresh_interaction_state()
+        self.update()
+
+    def _refresh_interaction_state(self) -> None:
+        self.setCursor(
+            Qt.CursorShape.BusyCursor if self._busy else Qt.CursorShape.PointingHandCursor
+        )
+        if self._busy:
+            tooltip = self._busy_message
+        elif self._initializing:
+            tooltip = "模型初始化中 · 仍可点击截图"
+        else:
+            tooltip = "左键截取公式 · 拖动调整位置 · 右键打开菜单"
+        self.setToolTip(tooltip)
+        self.setAccessibleDescription(tooltip)
 
     def set_result_available(self, available: bool) -> None:
         self._has_result = available
@@ -191,11 +295,25 @@ class FloatingOrb(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         circle = self.rect().adjusted(4, 4, -4, -4)
-        painter.setPen(QPen(QColor(self._ring_color), 4))
-        painter.setBrush(QColor("#1A2434") if not self._busy else QColor("#3B4658"))
+        ring_color = QColor(self._ring_color)
+        if self._busy:
+            base_ring = QColor(ring_color)
+            base_ring.setAlpha(78)
+            painter.setPen(QPen(base_ring, 4))
+        else:
+            painter.setPen(QPen(ring_color, 4))
+        painter.setBrush(QColor("#1A2434"))
         painter.drawEllipse(circle)
 
-        if not self._busy and not self._logo.isNull():
+        if self._busy:
+            active_ring = QColor(ring_color).lighter(135)
+            active_pen = QPen(active_ring, 5)
+            active_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(active_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawArc(circle, (90 - self._busy_angle) * 16, -112 * 16)
+
+        if not self._logo.isNull():
             target = self._logo.size().scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio)
             logo_rect = QRect(QPoint(), target)
             logo_rect.moveCenter(circle.center())
@@ -204,13 +322,13 @@ class FloatingOrb(QWidget):
             painter.setPen(QColor("#ffffff"))
             font = painter.font()
             font.setBold(True)
-            font.setPointSize(15 if not self._busy else 13)
+            font.setPointSize(15)
             painter.setFont(font)
-            painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, "···" if self._busy else "fx")
+            painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, "fx")
 
-        if self._has_result and not self._busy:
+        if (self._has_result or self._initializing) and not self._busy:
             painter.setPen(QPen(QColor("#0f172a"), 2))
-            painter.setBrush(QColor("#34d399"))
+            painter.setBrush(QColor("#34d399" if self._has_result else "#f59e0b"))
             painter.drawEllipse(self.width() - 18, 7, 11, 11)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -241,6 +359,20 @@ class FloatingOrb(QWidget):
             self._snap_to_edge()
         elif not self._busy:
             self.capture_requested.emit()
+
+    def moveEvent(self, event: QMoveEvent) -> None:  # noqa: N802
+        super().moveEvent(event)
+        if self._busy:
+            self._position_busy_label()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._sync_busy_indicator()
+
+    def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
+        self._busy_timer.stop()
+        self._busy_label.hide()
+        super().hideEvent(event)
 
     def _clamped_position(self, position: QPoint) -> QPoint:
         screen = QApplication.screenAt(position + self.rect().center())
@@ -505,14 +637,9 @@ class FloatingResultPanel(QWidget):
             if source in self._source_candidates:
                 selected_source = source
             else:
-                selected_source = next(
-                    (
-                        candidate_source
-                        for candidate_source, candidate in self._source_candidates.items()
-                        if draft is not None and draft == candidate.latex
-                    ),
-                    "ai",
-                )
+                # Disagreeing OCR branches require an explicit user choice.
+                # A remembered draft alone must not silently select either source.
+                return None
             self._active_source = selected_source
             selected_button = (
                 self.local_result_button
@@ -679,7 +806,16 @@ class FloatingResultPanel(QWidget):
         self._render_preview(self.latex_view.toPlainText(), edited=True)
 
     def _update_copy_buttons(self) -> None:
-        enabled = self._result is not None and bool(self.latex_view.toPlainText().strip())
+        source_selected = (
+            self._result is None
+            or self._result.comparison != "different"
+            or self._active_source in self._source_candidates
+        )
+        enabled = (
+            self._result is not None
+            and source_selected
+            and bool(self.latex_view.toPlainText().strip())
+        )
         self.copy_latex_button.setEnabled(enabled)
         self.copy_mathml_button.setEnabled(enabled)
 
@@ -867,6 +1003,8 @@ class FloatingFormulaAssistant(QObject):
         self._tray_menu: QMenu | None = None
         self._thread_pool = QThreadPool.globalInstance()
         self._warmup_worker: ModelWarmupWorker | None = None
+        self._model_warmup_state = "idle"
+        self._pending_recognition_image: PILImage | None = None
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_download_worker: UpdateDownloadWorker | None = None
         self._update_dialog: UpdateDialog | None = None
@@ -934,21 +1072,33 @@ class FloatingFormulaAssistant(QObject):
     def start_model_warmup(self) -> None:
         """Start one ordered, non-blocking model warmup run."""
 
-        if self._warmup_worker is not None:
+        if (
+            self._shutdown
+            or self._warmup_worker is not None
+            or self._model_warmup_state == "ready"
+        ):
             return
+        self._model_warmup_state = "warming"
+        self.orb.set_initializing(True)
         worker = ModelWarmupWorker(self.manager, ("mathcraft",))
         worker.signals.started.connect(
             lambda key: self.settings_panel.set_engine_status(key, "started")
         )
-        worker.signals.succeeded.connect(
-            lambda key: self.settings_panel.set_engine_status(key, "succeeded")
-        )
-        worker.signals.failed.connect(
-            lambda key, _message: self.settings_panel.set_engine_status(key, "failed")
-        )
+        worker.signals.succeeded.connect(self._model_warmup_succeeded)
+        worker.signals.failed.connect(self._model_warmup_failed)
         worker.signals.finished.connect(self._model_warmup_finished)
         self._warmup_worker = worker
         self._thread_pool.start(worker)
+
+    def start_preview_warmup(self) -> None:
+        """Load the persistent offline MathJax page on the GUI thread."""
+
+        if self._shutdown:
+            return
+        try:
+            self.panel.formula_preview.warmup()
+        except Exception:
+            logging.getLogger(__name__).exception("preview-warmup-failed")
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -974,6 +1124,9 @@ class FloatingFormulaAssistant(QObject):
                 )
         if self._worker is not None:
             self._worker.cancel()
+        self._clear_pending_recognition()
+        self.orb.set_busy(False)
+        self.orb.set_initializing(False)
         self.settings_panel.cancel_ai_request()
         if self._pending_update_install is not None:
             self._try_launch_pending_installer(force=True, quit_application=False)
@@ -993,11 +1146,33 @@ class FloatingFormulaAssistant(QObject):
             menu.close()
             menu.deleteLater()
 
+    @Slot(str)
+    def _model_warmup_succeeded(self, key: str) -> None:
+        if self._shutdown:
+            return
+        self._model_warmup_state = "ready"
+        self.settings_panel.set_engine_status(key, "succeeded")
+
+    @Slot(str, str)
+    def _model_warmup_failed(self, key: str, _message: str) -> None:
+        if self._shutdown:
+            return
+        self._model_warmup_state = "failed"
+        self.settings_panel.set_engine_status(key, "failed")
+
     @Slot()
     def _model_warmup_finished(self) -> None:
         self._warmup_worker = None
+        self.orb.set_initializing(False)
         if self._shutdown:
+            self._clear_pending_recognition()
             return
+        if self._model_warmup_state == "warming":
+            self._model_warmup_state = "failed"
+        pending_image = self._pending_recognition_image
+        self._pending_recognition_image = None
+        if pending_image is not None:
+            self._start_recognition(pending_image)
         self._try_launch_pending_installer()
 
     def show(self) -> None:
@@ -1022,6 +1197,11 @@ class FloatingFormulaAssistant(QObject):
     def check_for_updates(self, *, manual: bool = False, force: bool = False) -> None:
         if self._shutdown:
             return
+        if (
+            self._update_download_worker is not None
+            or self._pending_update_install is not None
+        ):
+            return
         if self._update_check_worker is not None:
             if manual:
                 self._update_check_manual_requested = True
@@ -1040,21 +1220,40 @@ class FloatingFormulaAssistant(QObject):
         self._update_check_manual_requested = manual
         worker = UpdateCheckWorker(application_version())
         worker.signals.available.connect(
-            lambda release, requested=manual: self._update_available(release, requested)
+            lambda release, requested=manual, task=worker: self._update_available(
+                release, requested, task
+            )
         )
         worker.signals.no_update.connect(
-            lambda requested=manual: self._update_not_available(requested)
+            lambda requested=manual, task=worker: self._update_not_available(
+                requested, task
+            )
         )
         worker.signals.failed.connect(
-            lambda message, requested=manual: self._update_check_failed(message, requested)
+            lambda message, requested=manual, task=worker: self._update_check_failed(
+                message, requested, task
+            )
         )
         self._update_check_worker = worker
         self._thread_pool.start(worker)
 
     @Slot(object)
-    def _update_available(self, release: ReleaseInfo, manual: bool) -> None:
+    def _update_available(
+        self,
+        release: ReleaseInfo,
+        manual: bool,
+        worker: UpdateCheckWorker | None = None,
+    ) -> None:
+        if worker is not None and worker is not self._update_check_worker:
+            return
         self._update_check_worker = None
-        if self._shutdown:
+        if (
+            self._shutdown
+            or self._update_download_worker is not None
+            or self._pending_update_install is not None
+        ):
+            self._update_check_manual_requested = False
+            self._restart_update_timer()
             return
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
@@ -1063,15 +1262,24 @@ class FloatingFormulaAssistant(QObject):
         self.settings_store.sync()
         if manual:
             self.settings_panel.set_update_status(f"发现新版本 v{release.version}")
+        previous_dialog = self._update_dialog
+        if previous_dialog is not None:
+            previous_dialog.close()
         dialog = UpdateDialog(application_version(), release)
-        dialog.update_requested.connect(lambda: self._begin_update(release))
+        dialog.update_requested.connect(
+            lambda task=dialog: self._begin_update(release, task)
+        )
         self._update_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
 
     @Slot()
-    def _update_not_available(self, manual: bool) -> None:
+    def _update_not_available(
+        self, manual: bool, worker: UpdateCheckWorker | None = None
+    ) -> None:
+        if worker is not None and worker is not self._update_check_worker:
+            return
         self._update_check_worker = None
         if self._shutdown:
             return
@@ -1084,7 +1292,14 @@ class FloatingFormulaAssistant(QObject):
             self.settings_panel.set_update_status("已是最新版本")
 
     @Slot(str)
-    def _update_check_failed(self, message: str, manual: bool) -> None:
+    def _update_check_failed(
+        self,
+        message: str,
+        manual: bool,
+        worker: UpdateCheckWorker | None = None,
+    ) -> None:
+        if worker is not None and worker is not self._update_check_worker:
+            return
         self._update_check_worker = None
         if self._shutdown:
             return
@@ -1094,11 +1309,20 @@ class FloatingFormulaAssistant(QObject):
         if manual:
             self.settings_panel.set_update_status(f"检查失败：{message}")
 
-    def _begin_update(self, release: ReleaseInfo) -> None:
+    def _begin_update(
+        self,
+        release: ReleaseInfo,
+        source_dialog: UpdateDialog | None = None,
+    ) -> None:
         if self._shutdown:
             return
         dialog = self._update_dialog
-        if dialog is None or self._update_download_worker is not None:
+        if (
+            dialog is None
+            or (source_dialog is not None and source_dialog is not dialog)
+            or self._update_download_worker is not None
+            or self._pending_update_install is not None
+        ):
             return
         if not is_installed_build():
             QDesktopServices.openUrl(QUrl(release.page_url))
@@ -1110,18 +1334,39 @@ class FloatingFormulaAssistant(QObject):
         if not cache_root:
             dialog.show_error("无法找到用户缓存目录。")
             return
+        update_check_worker = self._update_check_worker
+        if update_check_worker is not None:
+            update_check_worker.cancel()
+            self._update_check_worker = None
+            self._update_check_manual_requested = False
+            self.settings_panel.set_update_status("正在下载更新…")
         dialog.show_downloading()
         worker = UpdateDownloadWorker(release, Path(cache_root) / "updates")
-        worker.signals.progress.connect(self._update_download_progress)
-        worker.signals.finished.connect(
-            lambda path, selected=release: self._update_downloaded(path, selected)
+        worker.signals.progress.connect(
+            lambda received, total, task=worker: self._update_download_progress(
+                received, total, task
+            )
         )
-        worker.signals.failed.connect(self._update_download_failed)
+        worker.signals.finished.connect(
+            lambda path, selected=release, task=worker: self._update_downloaded(
+                path, selected, task
+            )
+        )
+        worker.signals.failed.connect(
+            lambda message, task=worker: self._update_download_failed(message, task)
+        )
         self._update_download_worker = worker
         self._thread_pool.start(worker)
 
     @Slot(object)
-    def _update_downloaded(self, path: Path, release: ReleaseInfo) -> None:
+    def _update_downloaded(
+        self,
+        path: Path,
+        release: ReleaseInfo,
+        worker: UpdateDownloadWorker | None = None,
+    ) -> None:
+        if worker is not None and worker is not self._update_download_worker:
+            return
         self._update_download_worker = None
         if self._shutdown:
             return
@@ -1135,12 +1380,13 @@ class FloatingFormulaAssistant(QObject):
         quit_application: bool = True,
     ) -> bool:
         pending = self._pending_update_install
-        if pending is None:
+        if pending is None or self._update_download_worker is not None:
             return False
         dialog = self._update_dialog
         if not force and (
             self._worker is not None
             or self._warmup_worker is not None
+            or self._pending_recognition_image is not None
             or self._capture_pending
             or self._overlay is not None
         ):
@@ -1186,13 +1432,27 @@ class FloatingFormulaAssistant(QObject):
         self.settings_store.sync()
 
     @Slot(object, object)
-    def _update_download_progress(self, received: int, total: int) -> None:
-        if self._shutdown or self._update_dialog is None:
+    def _update_download_progress(
+        self,
+        received: int,
+        total: int,
+        worker: UpdateDownloadWorker | None = None,
+    ) -> None:
+        if (
+            worker is not None
+            and worker is not self._update_download_worker
+            or self._shutdown
+            or self._update_dialog is None
+        ):
             return
         self._update_dialog.set_download_progress(received, total)
 
     @Slot(str)
-    def _update_download_failed(self, message: str) -> None:
+    def _update_download_failed(
+        self, message: str, worker: UpdateDownloadWorker | None = None
+    ) -> None:
+        if worker is not None and worker is not self._update_download_worker:
+            return
         self._update_download_worker = None
         if self._shutdown:
             return
@@ -1237,6 +1497,7 @@ class FloatingFormulaAssistant(QObject):
             not self._shutdown
             and self._pending_update_install is None
             and self._worker is None
+            and self._pending_recognition_image is None
             and not self._capture_in_progress()
         )
 
@@ -1288,12 +1549,16 @@ class FloatingFormulaAssistant(QObject):
     def _apply_preferences(self, preferences: FloatingPreferences) -> None:
         previous = self.preferences
         self.preferences = preferences
-        if self._worker is not None and (
-            not preferences.ai_correction_enabled
-            or preferences.ai_base_url != previous.ai_base_url
-            or preferences.ai_model != previous.ai_model
+        if (
+            self._worker is not None
+            and self._worker.ai_enabled
+            and (
+                not preferences.ai_correction_enabled
+                or preferences.ai_base_url != previous.ai_base_url
+                or preferences.ai_model != previous.ai_model
+            )
         ):
-            self._worker.cancel()
+            self._worker.cancel_ai()
         self.orb.set_color(preferences.effective_ring_color)
         self.orb.set_logo_path(preferences.effective_logo_path)
         self.panel.set_theme(preferences.result_theme)
@@ -1301,8 +1566,8 @@ class FloatingFormulaAssistant(QObject):
 
     @Slot()
     def _cancel_active_recognition(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
+        if self._worker is not None and self._worker.ai_enabled:
+            self._worker.cancel_ai()
 
     @Slot()
     def start_capture(self) -> None:
@@ -1357,25 +1622,48 @@ class FloatingFormulaAssistant(QObject):
         except ValueError as exc:
             self._recognition_failed(str(exc))
             return
+        if self._model_warmup_state == "warming":
+            self._pending_recognition_image = image
+            self.orb.set_busy(True, "模型初始化中，完成后自动识别…")
+            return
+        self._start_recognition(image)
+
+    def _start_recognition(self, image: PILImage) -> None:
         ai_api_key: str | None = None
         if self.preferences.ai_correction_enabled:
             try:
-                ai_api_key = self._api_key_store.load()
+                ai_api_key = self._api_key_store.load_for_base_url(
+                    self.preferences.ai_base_url
+                )
             except CredentialError:
                 ai_api_key = None
-        worker = RecognitionWorker(
-            self.manager,
-            image,
-            self.preferences.recognition_mode,
-            ai_enabled=self.preferences.ai_correction_enabled,
-            ai_api_key=ai_api_key,
-            ai_base_url=self.preferences.ai_base_url,
-            ai_model=self.preferences.ai_model,
-        )
+        ai_enabled = self.preferences.ai_correction_enabled and ai_api_key is not None
+        try:
+            worker = RecognitionWorker(
+                self.manager,
+                image,
+                self.preferences.recognition_mode,
+                ai_enabled=ai_enabled,
+                ai_api_key=ai_api_key,
+                ai_base_url=self.preferences.ai_base_url,
+                ai_model=self.preferences.ai_model,
+            )
+        except Exception as exc:
+            self._recognition_failed(f"无法启动识别任务：{exc}")
+            return
+        finally:
+            image.close()
         worker.signals.finished.connect(self._worker_recognition_finished)
         worker.signals.failed.connect(self._worker_recognition_failed)
         self._worker = worker
+        self.orb.set_busy(True)
         self._thread_pool.start(worker)
+
+    def _clear_pending_recognition(self) -> None:
+        pending_image = self._pending_recognition_image
+        self._pending_recognition_image = None
+        if pending_image is not None:
+            pending_image.close()
 
     @Slot()
     def _capture_cancelled(self) -> None:
@@ -1397,7 +1685,7 @@ class FloatingFormulaAssistant(QObject):
     def _recognition_finished(self, result: RecognitionResult) -> None:
         self._worker = None
         self._last_result = result
-        self._last_result_draft = result.latex
+        self._last_result_draft = None if result.comparison == "different" else result.latex
         self._last_result_source = None
         self._pending_error = None
         self.orb.set_busy(False)

@@ -56,6 +56,7 @@ def main() -> int:
     app.aboutToQuit.connect(assistant.shutdown)
     assistant.show()
     QTimer.singleShot(0, assistant.start_model_warmup)
+    QTimer.singleShot(0, assistant.start_preview_warmup)
     assistant.start_update_checks()
     try:
         return app.exec()

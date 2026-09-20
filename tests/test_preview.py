@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_module
+import json
 import re
 
 import pytest
@@ -65,6 +66,19 @@ def test_mathjax_html_is_offline_scrollable_and_keeps_readable_type() -> None:
     assert "enableMenu: false" in document
     assert "pointer-events: none" in document
     assert "mjx-merror, g[data-mml-node=\"merror\"]" in document
+    assert "tex.parseOptions.clear()" in document
+    assert "['new-Command', 'new-Delimiter', 'new-Environment']" in document
+    assert "userMap.map.clear()" in document
+
+
+def test_mathjax_update_script_encodes_formula_and_request_id_safely() -> None:
+    latex = 'x + "quoted" + </script> + \\alpha'
+
+    script = preview.build_mathjax_update_script(latex, 17)
+
+    assert json.dumps(latex, ensure_ascii=True) in script
+    assert "window.__setFormulaPreview" in script
+    assert ", 17)" in script
 
 
 def test_mathjax_resource_is_vendored_as_expected() -> None:

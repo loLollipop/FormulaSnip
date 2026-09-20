@@ -87,4 +87,7 @@ def test_mathcraft_warmup_loads_once_and_uses_formula_profile() -> None:
     backend.warmup()
 
     assert len(runtimes) == 1
-    assert runtimes[0].warmups == ["formula", "formula"]
+    assert runtimes[0].warmups == ["formula"]
+    assert len(runtimes[0].images) == 1
+    assert runtimes[0].images[0].mode == "RGB"
+    assert runtimes[0].images[0].size == (48, 24)

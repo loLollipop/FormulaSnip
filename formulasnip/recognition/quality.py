@@ -127,9 +127,9 @@ def has_complex_image_layout(image: Image.Image) -> bool:
         return False
     foreground_width = bounds[2] - bounds[0]
     foreground_height = bounds[3] - bounds[1]
-    return foreground_height >= 44 or (
-        foreground_width >= 180 and foreground_height >= 30
-    )
+    # Absolute glyph height alone mostly reflects font size. Requiring both axes
+    # avoids labelling a large but ordinary one-line expression as 2-D layout.
+    return foreground_width >= 180 and foreground_height >= 30
 
 
 def has_complex_structure(latex: str) -> bool:

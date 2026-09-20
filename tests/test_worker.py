@@ -51,10 +51,10 @@ def test_worker_starts_local_and_ai_concurrently(monkeypatch: Any) -> None:
     worker.run()
 
     assert len(set(image_ids)) == 2
-    assert results[0].latex == "y"
+    assert results[0].latex == "x"
     assert results[0].comparison == "different"
     assert [candidate.source for candidate in results[0].alternatives] == ["local", "ai"]
-    assert "可切换对照" in results[0].warnings[-1]
+    assert "显式选择" in results[0].warnings[-1]
     assert worker.ai_api_key is None
 
 
@@ -110,7 +110,7 @@ def test_worker_preserves_multiline_disagreement_for_source_switch(
         local_latex,
         ai_latex,
     ]
-    assert "可切换对照" in results[0].warnings[-1]
+    assert "显式选择" in results[0].warnings[-1]
 
 
 def test_worker_keeps_local_result_when_ai_fails(monkeypatch: Any) -> None:
@@ -187,6 +187,39 @@ def test_worker_replaces_ai_result_when_cancelled_before_emit(monkeypatch: Any) 
     assert results[0][1].backend_name == "MathCraft"
     assert results[0][1].strategy != "ai-assisted"
     assert "已取消" in results[0][1].warnings[-1]
+
+
+def test_ai_only_cancel_before_run_still_delivers_local_result() -> None:
+    calls: list[tuple[Image.Image, str]] = []
+
+    class TrackingManager:
+        def recognize(self, image: Image.Image, backend_key: str) -> RecognitionResult:
+            calls.append((image, backend_key))
+            return RecognitionResult("local-x", "MathCraft", 0.1)
+
+    worker = RecognitionWorker(
+        TrackingManager(),  # type: ignore[arg-type]
+        Image.new("RGB", (8, 8), "white"),
+        "mathcraft",
+        ai_enabled=True,
+        ai_api_key="unit-test-token",
+    )
+    results: list[RecognitionResult] = []
+    failures: list[str] = []
+    worker.signals.finished.connect(lambda _task, result: results.append(result))
+    worker.signals.failed.connect(lambda _task, message: failures.append(message))
+
+    worker.cancel_ai()
+    worker.run()
+
+    assert worker._cancel_event.is_set()
+    assert not worker._local_cancel_event.is_set()
+    assert len(calls) == 1
+    assert calls[0][1] == "mathcraft"
+    assert failures == []
+    assert results[0].latex == "local-x"
+    assert results[0].backend_name == "MathCraft"
+    assert "AI 识别已取消" in results[0].warnings[-1]
 
 
 def test_worker_does_not_call_ai_when_disabled(monkeypatch: Any) -> None:

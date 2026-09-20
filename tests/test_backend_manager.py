@@ -107,6 +107,34 @@ def test_quality_preview_and_image_warnings_are_preserved(monkeypatch: Any) -> N
     assert "上游提示" in result.warnings
 
 
+def test_complex_formula_adds_review_warning_without_changing_result(
+    monkeypatch: Any,
+) -> None:
+    configure_availability(monkeypatch, True)
+    backend = FakeBackend(RecognitionResult(r"\int_0^1 x\,dx", "MathCraft", 0.2))
+    manager = BackendManager()
+    manager._instances = {"mathcraft": backend}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert result.latex == r"\int_0^1 x\,dx"
+    assert any("结构较复杂" in warning for warning in result.warnings)
+
+
+def test_complex_review_warning_is_not_duplicated(monkeypatch: Any) -> None:
+    configure_availability(monkeypatch, True)
+    warning = "公式版式或结构较复杂，请对照原图人工核对。"
+    backend = FakeBackend(
+        RecognitionResult(r"\int_0^1 x\,dx", "MathCraft", 0.2, warnings=(warning,))
+    )
+    manager = BackendManager()
+    manager._instances = {"mathcraft": backend}  # type: ignore[dict-item]
+
+    result = manager.recognize(formula_image())
+
+    assert result.warnings.count(warning) == 1
+
+
 def test_warmup_reuses_backend_and_failure_can_be_retried(monkeypatch: Any) -> None:
     configure_availability(monkeypatch, True)
 

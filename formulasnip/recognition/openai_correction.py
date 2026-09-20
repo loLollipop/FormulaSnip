@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from PIL import Image, ImageDraw
+from requests.auth import AuthBase
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 
@@ -84,6 +85,17 @@ class CancellationSignal(Protocol):
 
 class AICorrectionError(RuntimeError):
     """The optional AI pass failed and the local result should be retained."""
+
+
+class _BearerAuth(AuthBase):
+    """Apply the configured token and make requests skip implicit netrc auth."""
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    def __call__(self, request: Any) -> Any:
+        request.headers["Authorization"] = f"Bearer {self._api_key}"
+        return request
 
 
 class _ConnectionTracker:
@@ -476,6 +488,7 @@ def _post_chat_completion(
             },
             deadline=deadline,
             cancel_event=cancel_event,
+            auth=_BearerAuth(api_key),
             check_status=_check_formula_api_status,
             invalid_message="AI 辅助返回了无效数据，已保留本地结果。",
             oversized_message="AI 辅助响应过大，已保留本地结果。",
@@ -504,6 +517,7 @@ def _get_models_payload(
             request_kwargs={"headers": _request_headers(api_key)},
             deadline=deadline,
             cancel_event=cancel_event,
+            auth=_BearerAuth(api_key),
             check_status=_check_model_api_status,
             invalid_message="模型列表返回了无效数据。",
             oversized_message="模型列表响应过大。",
@@ -522,6 +536,7 @@ def _request_json_response(
     request_kwargs: Mapping[str, object],
     deadline: float,
     cancel_event: CancellationSignal | None,
+    auth: AuthBase,
     check_status: Callable[[Any], None],
     invalid_message: str,
     oversized_message: str,
@@ -534,6 +549,9 @@ def _request_json_response(
     owned_session: requests.Session | None = None
     if client is requests:
         owned_session = requests.Session()
+        # An explicit AuthBase object prevents requests from consulting netrc,
+        # while trust_env can remain enabled for system proxies and CA bundles.
+        owned_session.auth = auth
         if _is_loopback_http_url(url):
             owned_session.trust_env = False
         adapter = _CancellableHTTPAdapter(tracker)
@@ -552,6 +570,7 @@ def _request_json_response(
             response = call(
                 url,
                 **request_kwargs,
+                auth=auth,
                 timeout=_bounded_request_timeout(deadline),
                 allow_redirects=False,
                 stream=True,

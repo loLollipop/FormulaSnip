@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from threading import Lock
+from threading import Event, Lock
 
 from PIL import Image
 
@@ -11,7 +11,12 @@ from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import BackendUnavailableError, RecognitionError
 from formulasnip.recognition.base import RecognitionBackend
 from formulasnip.recognition.mathcraft_backend import MathCraftBackend
-from formulasnip.recognition.quality import assess_latex, diagnose_image
+from formulasnip.recognition.quality import (
+    assess_latex,
+    diagnose_image,
+    has_complex_image_layout,
+    has_complex_structure,
+)
 
 _BACKEND_TYPES: tuple[type[RecognitionBackend], ...] = (MathCraftBackend,)
 _LEGACY_BACKEND_KEYS = frozenset({"auto", "rapid", "paddle"})
@@ -32,20 +37,49 @@ class BackendManager:
         self._lock = Lock()
         self._state_lock = Lock()
         self._closed = False
+        self._active_task_identity: object | None = None
+        self._cancelled_task_identity: object | None = None
 
     def recognize(
-        self, image: Image.Image, selected_key: str = "mathcraft"
+        self,
+        image: Image.Image,
+        selected_key: str = "mathcraft",
+        *,
+        task_identity: object | None = None,
+        cancel_event: Event | None = None,
     ) -> RecognitionResult:
         with self._lock:
+            with self._state_lock:
+                self._active_task_identity = task_identity
+                self._cancelled_task_identity = None
             _LOG.info("recognition-start mode=%s width=%d height=%d", selected_key, *image.size)
             try:
+                backend = self._get_backend(selected_key)
+                with self._state_lock:
+                    if (
+                        task_identity is not None
+                        and self._cancelled_task_identity is task_identity
+                    ):
+                        raise RecognitionError("公式识别任务已取消。")
+                backend_result = (
+                    backend.recognize(image, cancel_event=cancel_event)
+                    if isinstance(backend, MathCraftBackend)
+                    else backend.recognize(image)
+                )
                 result = _with_quality_warning(
-                    self._get_backend(selected_key).recognize(image),
+                    backend_result,
                     diagnose_image(image),
+                    image=image,
                 )
             except Exception as exc:
                 log_exception("recognition-failed", exc)
                 raise
+            finally:
+                with self._state_lock:
+                    if self._active_task_identity is task_identity:
+                        self._active_task_identity = None
+                    if self._cancelled_task_identity is task_identity:
+                        self._cancelled_task_identity = None
             _LOG.info(
                 "recognition-done backend=%s strategy=%s seconds=%.3f warnings=%d",
                 result.backend_name,
@@ -54,6 +88,22 @@ class BackendManager:
                 len(result.warnings),
             )
             return result
+
+    def cancel_current(self, task_identity: object) -> bool:
+        """Cancel the matching active task without invalidating manager reuse."""
+
+        with self._state_lock:
+            if self._active_task_identity is not task_identity:
+                return False
+            self._cancelled_task_identity = task_identity
+            backend = self._instances.get("mathcraft")
+            if backend is not None:
+                cancel = getattr(backend, "cancel_current", None)
+                if callable(cancel):
+                    # Keep task ownership stable until the native generation is
+                    # disposed, so a delayed cancel cannot terminate its successor.
+                    cancel()
+            return True
 
     def warmup(self, key: str = "mathcraft") -> None:
         """Warm the MathCraft backend without blocking an active recognition call."""
@@ -129,10 +179,19 @@ def _candidate_warnings(
 
 
 def _with_quality_warning(
-    result: RecognitionResult, image_warnings: tuple[str, ...] = ()
+    result: RecognitionResult,
+    image_warnings: tuple[str, ...] = (),
+    *,
+    image: Image.Image | None = None,
 ) -> RecognitionResult:
     candidate = _candidate(result)
+    complexity_warnings: tuple[str, ...] = ()
+    if has_complex_structure(result.latex) or (
+        image is not None and has_complex_image_layout(image)
+    ):
+        complexity_warnings = ("公式版式或结构较复杂，请对照原图人工核对。",)
     warnings = _candidate_warnings(candidate, (*result.warnings, *image_warnings))
+    warnings = tuple(dict.fromkeys((*warnings, *complexity_warnings)))
     alternatives = result.alternatives or (candidate,)
     if warnings == result.warnings and alternatives == result.alternatives:
         return result

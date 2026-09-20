@@ -12,6 +12,7 @@ import pytest
 import requests
 from PySide6.QtCore import Qt
 
+from formulasnip import update as update_module
 from formulasnip.update import (
     INSTALLER_ARGUMENTS,
     LATEST_RELEASE_API,
@@ -128,6 +129,60 @@ def test_version_comparison_and_release_policy() -> None:
     assert parse_release(_payload(draft=True), "0.2.0") is None
     assert parse_release(_payload(prerelease=True), "0.2.0") is None
     assert parse_release(_payload(tag="v0.2.0"), "0.2.0") is None
+
+
+def test_update_session_is_anonymous_without_disabling_environment(
+    monkeypatch: Any,
+) -> None:
+    netrc_lookups: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: netrc_lookups.append(url) or ("netrc-user", "netrc-password"),
+    )
+
+    with update_module._request_client(requests, None) as session:
+        assert session.trust_env is True
+        prepared = session.prepare_request(
+            requests.Request("GET", "https://api.github.com/repos/example/releases")
+        )
+
+    assert "Authorization" not in prepared.headers
+    assert netrc_lookups == []
+
+
+def test_injected_update_session_is_wrapped_with_anonymous_auth(
+    monkeypatch: Any,
+) -> None:
+    netrc_lookups: list[str] = []
+    monkeypatch.setattr(
+        requests.sessions,
+        "get_netrc_auth",
+        lambda url: netrc_lookups.append(url) or ("netrc-user", "netrc-password"),
+    )
+    class CapturingSession(requests.Session):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prepared: requests.PreparedRequest | None = None
+
+        def get(self, url: str, **kwargs: Any) -> object:
+            self.prepared = self.prepare_request(
+                requests.Request(
+                    "GET",
+                    url,
+                    headers=kwargs.get("headers"),
+                    auth=kwargs.get("auth"),
+                )
+            )
+            return object()
+
+    session = CapturingSession()
+    with update_module._request_client(session, None) as client:
+        client.get("https://api.github.com/repos/example/releases")
+
+    assert session.prepared is not None
+    assert "Authorization" not in session.prepared.headers
+    assert netrc_lookups == []
 
 
 def test_release_json_requires_one_exact_safe_asset_and_digest() -> None:

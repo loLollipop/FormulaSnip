@@ -132,6 +132,10 @@ def test_complex_image_layout_uses_foreground_not_rapid_text() -> None:
     ImageDraw.Draw(long_two_dimensional).rectangle((20, 20, 230, 65), fill="black")
     assert has_complex_image_layout(long_two_dimensional)
 
+    large_single_line = Image.new("L", (120, 80), "white")
+    ImageDraw.Draw(large_single_line).rectangle((20, 15, 99, 60), fill="black")
+    assert not has_complex_image_layout(large_single_line)
+
 
 @pytest.mark.parametrize("latex", (
     r"\frac{partial u}{partial x}",

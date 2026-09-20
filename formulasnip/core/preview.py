@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from pathlib import Path
 
@@ -39,7 +40,12 @@ def mathjax_script_path() -> Path:
 
 
 def build_mathjax_html(latex: str, request_id: int) -> str:
-    """Build one offline MathJax document without interpolating TeX into JS."""
+    """Build the reusable offline MathJax document.
+
+    The initial formula is inserted as escaped text. Later previews update this
+    same document through :func:`build_mathjax_update_script`, so the 2.3 MiB
+    MathJax runtime only needs to be loaded once per application session.
+    """
 
     normalized = normalize_latex(latex)
     if not normalized:
@@ -81,6 +87,83 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
   </style>
   <script>
     window.__formulaPreview = {{requestId: {safe_request_id}, state: 'loading', error: ''}};
+    window.__formulaGeneration = 0;
+    window.__queuedFormula = null;
+    window.__mathJaxReady = false;
+    window.__renderQueue = Promise.resolve();
+
+    window.__finishFormulaPreview = function (requestId, generation) {{
+      if (generation !== window.__formulaGeneration ||
+          requestId !== window.__formulaPreview.requestId) {{
+        return;
+      }}
+      var error = document.querySelector(
+        'mjx-merror, g[data-mml-node="merror"]'
+      );
+      if (error) {{
+        window.__formulaPreview.state = 'error';
+        window.__formulaPreview.error = error.textContent || 'MathJax parse error';
+      }} else {{
+        window.__formulaPreview.state = 'ready';
+        window.__formulaPreview.error = '';
+      }}
+    }};
+
+    window.__renderFormulaPreview = function (latex, requestId, generation) {{
+      window.__renderQueue = window.__renderQueue.catch(function () {{}}).then(
+        function () {{
+          if (generation !== window.__formulaGeneration) {{
+            return;
+          }}
+          var target = document.getElementById('formula');
+          MathJax.typesetClear([target]);
+          MathJax.texReset();
+          var inputJax = MathJax.startup.document.inputJax;
+          var tex = inputJax.find(function (jax) {{
+            return jax.name === 'TeX' && jax.parseOptions;
+          }});
+          if (!tex) {{
+            throw new Error('MathJax TeX input unavailable');
+          }}
+          tex.parseOptions.clear();
+          ['new-Command', 'new-Delimiter', 'new-Environment'].forEach(
+            function (mapName) {{
+              var userMap = tex.parseOptions.handlers.retrieve(mapName);
+              if (userMap && userMap.map) {{
+                userMap.map.clear();
+              }}
+            }}
+          );
+          target.textContent = '\\\\[' + latex + '\\\\]';
+          return MathJax.typesetPromise([target]).then(function () {{
+            window.__finishFormulaPreview(requestId, generation);
+          }}).catch(function (error) {{
+            if (generation === window.__formulaGeneration &&
+                requestId === window.__formulaPreview.requestId) {{
+              window.__formulaPreview.state = 'error';
+              window.__formulaPreview.error = String(error);
+            }}
+          }});
+        }}
+      );
+    }};
+
+    window.__setFormulaPreview = function (latex, requestId) {{
+      var generation = ++window.__formulaGeneration;
+      window.__formulaPreview = {{requestId: requestId, state: 'loading', error: ''}};
+      window.__queuedFormula = {{
+        latex: latex, requestId: requestId, generation: generation
+      }};
+      if (window.__mathJaxReady) {{
+        var queued = window.__queuedFormula;
+        window.__queuedFormula = null;
+        window.__renderFormulaPreview(
+          queued.latex, queued.requestId, queued.generation
+        );
+      }}
+      return true;
+    }};
+
     window.MathJax = {{
       tex: {{
         inlineMath: [['\\\\(', '\\\\)']],
@@ -95,16 +178,17 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
       options: {{enableMenu: false}},
       startup: {{
         ready: function () {{
-          MathJax.startup.defaultReady();
-          MathJax.startup.promise.then(function () {{
-            var error = document.querySelector(
-              'mjx-merror, g[data-mml-node="merror"]'
-            );
-            if (error) {{
-              window.__formulaPreview.state = 'error';
-              window.__formulaPreview.error = error.textContent || 'MathJax parse error';
+           MathJax.startup.defaultReady();
+           MathJax.startup.promise.then(function () {{
+            window.__mathJaxReady = true;
+            if (window.__queuedFormula) {{
+              var queued = window.__queuedFormula;
+              window.__queuedFormula = null;
+              window.__renderFormulaPreview(
+                queued.latex, queued.requestId, queued.generation
+              );
             }} else {{
-              window.__formulaPreview.state = 'ready';
+              window.__finishFormulaPreview({safe_request_id}, 0);
             }}
           }}).catch(function (error) {{
             window.__formulaPreview.state = 'error';
@@ -122,6 +206,22 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
                    window.__formulaPreview.error='MathJax resource unavailable';"></script>
 </body>
 </html>"""
+
+
+def build_mathjax_update_script(latex: str, request_id: int) -> str:
+    """Build a safe JavaScript call that updates the persistent preview page."""
+
+    normalized = normalize_latex(latex)
+    if not normalized:
+        raise ValueError("公式预览内容为空")
+    encoded_formula = json.dumps(normalized, ensure_ascii=True)
+    safe_request_id = int(request_id)
+    return f"""(function () {{
+      if (typeof window.__setFormulaPreview !== 'function') {{
+        return false;
+      }}
+      return window.__setFormulaPreview({encoded_formula}, {safe_request_id});
+    }})()"""
 
 
 def _has_balanced_environments(latex: str) -> bool:

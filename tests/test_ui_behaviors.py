@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
+import re
 import time
 import weakref
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -40,10 +43,11 @@ from formulasnip.ui.settings import (
     read_logo_image,
 )
 from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, OVERLAY_COLOR, SnipOverlay
-from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.styles import application_stylesheet, apply_application_theme
+from formulasnip.ui.update_dialog import UpdateDialog
 from formulasnip.ui.widgets import FormulaPreviewWidget
 from formulasnip.ui.worker import ModelWarmupWorker
-from formulasnip.update import ReleaseInfo, UpdateAsset
+from formulasnip.update import MAX_RELEASE_NOTES_LENGTH, ReleaseInfo, UpdateAsset
 
 
 def _application() -> QApplication:
@@ -56,9 +60,138 @@ def _settings(tmp_path: Path) -> QSettings:
     return settings
 
 
+def _update_release(notes: str = "") -> ReleaseInfo:
+    asset = UpdateAsset(
+        "FormulaSnip-v0.3.0-windows-x64-setup.exe",
+        "https://example.invalid/setup.exe",
+        96 * 1024 * 1024,
+        "0" * 64,
+    )
+    return ReleaseInfo("0.3.0", "v0.3.0", notes, asset)
+
+
+def test_update_release_notes_are_formatted_and_escaped() -> None:
+    application = _application()
+    notes = """# 主要更新
+- 提升 **复杂公式** 识别精度
+- 优化 `MathML` 复制
+
+详情请查看 [发布页](https://example.invalid)。
+<script>alert('unsafe')</script>
+"""
+    dialog = UpdateDialog("0.2.8", _update_release(notes))
+
+    plain_text = dialog.notes.toPlainText()
+    rendered_html = dialog.notes.toHtml().casefold()
+    assert "主要更新" in plain_text
+    assert "提升 复杂公式 识别精度" in plain_text
+    assert "发布页" in plain_text
+    assert "https://example.invalid" not in plain_text
+    assert "<script>" not in rendered_html
+    assert dialog.current_version_label.text() == "v0.2.8"
+    assert dialog.latest_version_label.text() == "v0.3.0"
+    assert dialog.minimumHeight() == 0
+    assert dialog.notes.accessibleName() == "更新内容"
+    dialog.close()
+    application.processEvents()
+
+
+def test_update_release_notes_are_bounded_and_have_empty_fallback() -> None:
+    application = _application()
+    long_notes = "A" * MAX_RELEASE_NOTES_LENGTH + "SHOULD_NOT_RENDER"
+    dialog = UpdateDialog("0.2.8", _update_release(long_notes))
+    assert "SHOULD_NOT_RENDER" not in dialog.notes.toPlainText()
+    dialog.close()
+
+    empty_dialog = UpdateDialog("0.2.8", _update_release("   \n"))
+    assert empty_dialog.notes.toPlainText().strip() == "本次更新未提供更新说明。"
+    empty_dialog.close()
+    application.processEvents()
+
+
+def test_update_dialog_presents_download_waiting_and_error_states() -> None:
+    application = _application()
+    dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
+
+    assert dialog.status_panel.isHidden()
+    dialog.show_downloading()
+    assert not dialog.status_panel.isHidden()
+    assert not dialog.progress_bar.isHidden()
+    assert dialog.update_button.text() == "正在更新…"
+    assert not dialog.update_button.isEnabled()
+    dialog.set_download_progress(3, 4)
+    assert dialog.progress_bar.value() == 75
+    assert dialog.progress_detail_label.text() == "75%"
+
+    dialog.show_waiting_for_recognition()
+    assert dialog.progress_bar.isHidden()
+    assert dialog.update_button.text() == "等待安装"
+    assert "识别完成后" in dialog.status_label.text()
+
+    dialog.show_error("更新失败：网络不可用")
+    assert dialog.status_panel.property("state") == "error"
+    assert dialog.update_button.text() == "重试更新"
+    assert dialog.update_button.isEnabled()
+    assert dialog.later_button.isEnabled()
+    dialog.close()
+    application.processEvents()
+
+
+def test_update_dialog_keeps_footer_visible_at_constrained_height() -> None:
+    application = _application()
+    dialog = UpdateDialog("0.2.8", _update_release("- 修复问题\n" * 20))
+    dialog.resize(620, 430)
+    dialog.show()
+    application.processEvents()
+
+    assert dialog.height() <= 430
+    button_bottom = dialog.update_button.mapTo(
+        dialog, dialog.update_button.rect().bottomRight()
+    ).y()
+    assert button_bottom < dialog.height()
+
+    dialog.show_downloading()
+    application.processEvents()
+
+    assert dialog.height() <= 430
+    button_bottom = dialog.update_button.mapTo(
+        dialog, dialog.update_button.rect().bottomRight()
+    ).y()
+    assert button_bottom < dialog.height()
+    dialog.close()
+    application.processEvents()
+
+
+def test_update_dialog_style_contract_exists_in_both_themes() -> None:
+    for theme in ("light", "dark"):
+        stylesheet = application_stylesheet(theme)
+        assert "QFrame#UpdateHeader" in stylesheet
+        assert "QTextBrowser#UpdateNotes" in stylesheet
+        assert 'QFrame#UpdateStatusPanel[state="error"]' in stylesheet
+        assert "QProgressBar#UpdateProgress" in stylesheet
+
+
+def test_update_dialog_source_build_state_keeps_release_action_available() -> None:
+    application = _application()
+    dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
+    requested = QSignalSpy(dialog.update_requested)
+
+    dialog.show_source_build_message()
+    assert dialog.status_panel.property("state") == "info"
+    assert "GitHub 发布页" in dialog.status_label.text()
+    assert dialog.progress_bar.isHidden()
+    assert dialog.update_button.text() == "再次打开发布页"
+    assert dialog.update_button.isEnabled()
+    dialog.update_button.click()
+    assert requested.count() == 1
+    dialog.close()
+    application.processEvents()
+
+
 class FakeApiKeyStore:
-    def __init__(self, key: str | None = None) -> None:
+    def __init__(self, key: str | None = None, base_url: str | None = None) -> None:
         self.key = key
+        self.base_url = base_url
 
     def load(self) -> str | None:
         return self.key
@@ -66,11 +199,23 @@ class FakeApiKeyStore:
     def has_key(self) -> bool:
         return self.key is not None
 
-    def save(self, value: str) -> None:
+    def load_for_base_url(self, base_url: str) -> str | None:
+        if self.key is None:
+            return None
+        if self.base_url is not None and base_url != self.base_url:
+            return None
+        return self.key
+
+    def has_key_for_base_url(self, base_url: str) -> bool:
+        return self.load_for_base_url(base_url) is not None
+
+    def save(self, value: str, base_url: str) -> None:
         self.key = value
+        self.base_url = base_url
 
     def delete(self) -> None:
         self.key = None
+        self.base_url = None
 
 
 class MouseRelease:
@@ -145,6 +290,7 @@ def test_floating_orb_click_menu_and_busy_state() -> None:
     application.processEvents()
 
     assert orb.menu_action_texts() == ["打开设置", "退出软件"]
+    assert "左键截取公式" in orb.accessibleDescription()
     popup_position = orb._context_menu_position_below()
     assert popup_position.y() > orb.geometry().bottom()
     screen = application.primaryScreen()
@@ -157,9 +303,40 @@ def test_floating_orb_click_menu_and_busy_state() -> None:
     QTest.mouseClick(orb, Qt.MouseButton.LeftButton, pos=orb.rect().center())
     assert requests == [True]
 
-    orb.set_busy(True)
+    orb.set_initializing(True)
+    assert "仍可点击截图" in orb.toolTip()
     QTest.mouseClick(orb, Qt.MouseButton.LeftButton, pos=orb.rect().center())
-    assert requests == [True]
+    assert requests == [True, True]
+
+    orb.set_busy(True)
+    application.processEvents()
+    initial_angle = orb._busy_angle
+    assert orb.busy_message == "正在识别中…"
+    assert orb.busy_indicator_visible
+    assert orb._busy_timer.isActive()
+    assert orb._busy_label.text() == "正在识别中…"
+    QTest.qWait(90)
+    assert orb._busy_angle != initial_angle
+    QTest.mouseClick(orb, Qt.MouseButton.LeftButton, pos=orb.rect().center())
+    assert requests == [True, True]
+
+    orb.set_busy(True, "模型初始化中，完成后自动识别…")
+    application.processEvents()
+    assert orb._busy_label.text() == "模型初始化中，完成后自动识别…"
+    orb.hide()
+    application.processEvents()
+    assert not orb.busy_indicator_visible
+    assert not orb._busy_timer.isActive()
+    orb.show()
+    application.processEvents()
+    assert orb.busy_indicator_visible
+    assert orb._busy_timer.isActive()
+
+    orb.set_busy(False)
+    application.processEvents()
+    assert not orb.busy_indicator_visible
+    assert not orb._busy_timer.isActive()
+    assert orb.cursor().shape() == Qt.CursorShape.PointingHandCursor
     orb.close()
 
 
@@ -236,6 +413,59 @@ def test_mathjax_preview_ignores_stale_async_completion() -> None:
     preview.close()
 
 
+def test_mathjax_warmup_loads_one_persistent_page_and_reuses_it() -> None:
+    _application()
+    preview = FormulaPreviewWidget(webengine_enabled=False)
+    rendered = QSignalSpy(preview.rendered)
+
+    class Page:
+        def __init__(self) -> None:
+            self.documents: list[str] = []
+            self.updates: list[str] = []
+            self.request_id = 0
+
+        def set_preview_html(self, document: str, _base_url: Any) -> None:
+            self.documents.append(document)
+
+        def runJavaScript(self, script: str, callback: Any) -> None:  # noqa: N802
+            if "__setFormulaPreview" in script:
+                self.updates.append(script)
+                match = re.search(r",\s*(\d+)\);", script)
+                assert match is not None
+                self.request_id = int(match.group(1))
+                callback(True)
+            else:
+                callback(
+                    json.dumps(
+                        {
+                            "requestId": self.request_id,
+                            "state": "ready",
+                            "error": "",
+                        }
+                    )
+                )
+
+    page = Page()
+    preview._web_page = page
+    preview._web_view = preview._error_label
+
+    preview.warmup()
+    preview.warmup()
+    assert preview.request_id == 0
+    assert len(page.documents) == 1
+    assert rendered.count() == 0
+
+    preview._web_load_finished(True)
+    first_request = preview.set_formula("x+y")
+    second_request = preview.set_formula(r"\frac{x}{y}")
+
+    assert (first_request, second_request) == (1, 2)
+    assert len(page.documents) == 1
+    assert len(page.updates) == 2
+    assert rendered.count() == 2
+    preview.close()
+
+
 def test_mathjax_preview_watchdog_fails_without_browser_callback() -> None:
     _application()
     preview = FormulaPreviewWidget(webengine_enabled=False)
@@ -262,13 +492,89 @@ def test_mathjax_preview_rejects_unknown_command() -> None:
     rendered = QSignalSpy(preview.rendered)
     failures = QSignalSpy(preview.failed)
 
+    preview.warmup()
+    deadline = time.monotonic() + 15
+    while not preview._document_loaded and time.monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(10)
+    assert preview._document_loaded
+    assert preview.request_id == 0
+    assert rendered.count() == 0
+    assert failures.count() == 0
+
     preview.resize(480, 168)
     preview.show()
+    valid_request = preview.set_formula(r"\frac{x}{y}")
+    assert rendered.count() or rendered.wait(15_000)
+    assert rendered.at(0) == [valid_request, "mathjax"]
+
     request_id = preview.set_formula(r"\notacommand{x}")
 
     assert failures.count() or failures.wait(15_000)
     assert failures.at(0)[0] == request_id
-    assert rendered.count() == 0
+    assert rendered.count() == 1
+    preview.close()
+    application.processEvents()
+
+
+def test_mathjax_preview_does_not_leak_user_macros_between_requests() -> None:
+    application = _application()
+    preview = FormulaPreviewWidget()
+    if not preview.webengine_available:
+        pytest.skip("Qt WebEngine is unavailable")
+    rendered = QSignalSpy(preview.rendered)
+    failures = QSignalSpy(preview.failed)
+
+    preview.warmup()
+    deadline = time.monotonic() + 15
+    while not preview._document_loaded and time.monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(10)
+    assert preview._document_loaded
+
+    defining_request = preview.set_formula(
+        r"\renewcommand{\formulaLeak}{x}\formulaLeak"
+    )
+    assert rendered.count() or rendered.wait(15_000)
+    assert rendered.at(0) == [defining_request, "mathjax"]
+    assert failures.count() == 0
+
+    isolated_request = preview.set_formula(r"\formulaLeak")
+    assert failures.count() or failures.wait(15_000)
+    assert failures.at(0)[0] == isolated_request
+    assert rendered.count() == 1
+    preview.close()
+    application.processEvents()
+
+
+def test_mathjax_preview_does_not_leak_labels_between_requests() -> None:
+    application = _application()
+    preview = FormulaPreviewWidget()
+    if not preview.webengine_available:
+        pytest.skip("Qt WebEngine is unavailable")
+    rendered = QSignalSpy(preview.rendered)
+    failures = QSignalSpy(preview.failed)
+
+    preview.warmup()
+    deadline = time.monotonic() + 15
+    while not preview._document_loaded and time.monotonic() < deadline:
+        application.processEvents()
+        QTest.qWait(10)
+    assert preview._document_loaded
+
+    first_request = preview.set_formula(
+        r"\begin{equation}x\label{formula-repeat}\end{equation}"
+    )
+    assert rendered.count() or rendered.wait(15_000)
+    assert rendered.at(0) == [first_request, "mathjax"]
+    assert failures.count() == 0
+
+    second_request = preview.set_formula(
+        r"\begin{equation}y\label{formula-repeat}\end{equation}"
+    )
+    assert rendered.count() >= 2 or rendered.wait(15_000)
+    assert rendered.at(1) == [second_request, "mathjax"]
+    assert failures.count() == 0
     preview.close()
     application.processEvents()
 
@@ -317,15 +623,20 @@ def test_result_panel_only_reports_success_for_current_render_request(
     application.processEvents()
 
 
-def test_aborted_old_page_load_does_not_fail_current_request() -> None:
+def test_persistent_preview_page_load_failure_fails_current_request() -> None:
     _application()
     preview = FormulaPreviewWidget(webengine_enabled=False)
+    failures = QSignalSpy(preview.failed)
     preview._request_id = 2
     preview._current_backend = "mathjax"
 
     preview._web_load_finished(False)
+    QTest.qWait(10)
 
-    assert preview.current_backend == "mathjax"
+    assert preview.current_backend == "unavailable"
+    assert failures.count() == 1
+    assert failures.at(0)[0] == 2
+    assert "加载失败" in failures.at(0)[1]
     preview.close()
 
 
@@ -337,8 +648,8 @@ def test_result_panel_switches_disagreeing_local_and_ai_candidates(
     local = RecognitionCandidate("x", "MathCraft", 0.2, source="local")
     ai = RecognitionCandidate("y", "AI · vision-model", 0.3, source="ai")
     result = RecognitionResult(
-        "y",
-        ai.backend,
+        "x",
+        local.backend,
         0.35,
         "ai-parallel",
         ("本地与 AI 结果不一致，可切换对照后复制。",),
@@ -358,11 +669,15 @@ def test_result_panel_switches_disagreeing_local_and_ai_candidates(
 
     panel.show_result(result, QRect(20, 20, 68, 68))
     assert panel.source_switch.isVisible()
-    assert panel.ai_result_button.isChecked()
-    assert panel.latex_view.toPlainText() == "y"
-    assert "AI · vision-model" in panel.backend_label.text()
+    assert not panel.local_result_button.isChecked()
+    assert not panel.ai_result_button.isChecked()
+    assert panel.latex_view.toPlainText() == "x"
+    assert "MathCraft" in panel.backend_label.text()
+    assert not panel.copy_latex_button.isEnabled()
+    assert not panel.copy_mathml_button.isEnabled()
 
     panel.local_result_button.click()
+    assert panel.copy_latex_button.isEnabled()
     assert panel.latex_view.toPlainText() == "x"
     assert "MathCraft" in panel.backend_label.text()
     assert sources == ["local"]
@@ -636,14 +951,18 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
     worker = pool.started[0]
     assert worker.backend_keys == ("mathcraft",)
     assert assistant._warmup_worker is worker
+    assert assistant._model_warmup_state == "warming"
+    assert "初始化中" in assistant.orb.toolTip()
     worker.signals.started.emit("mathcraft")
     assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "正在初始化"
     worker.signals.succeeded.emit("mathcraft")
     assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "已初始化"
+    assert assistant._model_warmup_state == "ready"
     worker.signals.failed.emit("mathcraft", "offline")
     assert "初始化失败" in assistant.settings_panel.engine_status_labels["mathcraft"].text()
     worker.signals.finished.emit()
     assert assistant._warmup_worker is None
+    assert "初始化中" not in assistant.orb.toolTip()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -723,10 +1042,10 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     _application()
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
 
-    assert panel.size().width() == 1180
-    assert panel.size().height() == 760
-    assert panel.minimumWidth() == 1040
-    assert panel.minimumHeight() == 680
+    assert panel.size().width() == 1080
+    assert panel.size().height() == 700
+    assert panel.minimumWidth() == 960
+    assert panel.minimumHeight() == 620
     assert panel.pages.count() == 4
     assert [button.text().strip() for button, _title in panel._nav_entries] == [
         "常规",
@@ -734,12 +1053,14 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
         "悬浮球",
         "使用方法",
     ]
-    assert panel.sidebar.width() == 216
+    assert panel.sidebar.width() == 220
     assert panel.header.height() == 64
     assert panel.brand_logo.size().width() == 30
-    assert all(button.height() == 38 for button, _title in panel._nav_entries)
+    assert all(button.height() == 44 for button, _title in panel._nav_entries)
+    assert all(not button.icon().isNull() for button, _title in panel._nav_entries)
     assert panel.theme_toggle_button.size().width() == 34
     assert panel.theme_toggle_button.size().height() == 34
+    assert not panel.theme_toggle_button.icon().isNull()
     assert panel.theme_toggle_button.toolTip()
     assert panel.theme_toggle_button.accessibleName() == "切换明暗主题"
     scroll = panel.settings_page.findChild(QScrollArea)
@@ -748,12 +1069,12 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert body_layout is not None
     margins = body_layout.contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        28,
         24,
-        20,
-        24,
-        24,
+        28,
+        28,
     )
-    assert body_layout.spacing() == 12
+    assert body_layout.spacing() == 16
     assert panel.startup_checkbox.isCheckable()
     assert not application_icon().isNull()
     assert not tutorial_formula_image().isNull()
@@ -849,19 +1170,66 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
         FloatingPreferences(),
         api_key_store=key_store,  # type: ignore[arg-type]
     )
+    preference_changes = QSignalSpy(panel.preferences_changed)
 
     assert panel.ai_correction_toggle.isChecked() is False
-    assert panel.ai_correction_toggle.isEnabled() is False
+    assert panel.ai_correction_toggle.isEnabled() is True
+    assert panel.ai_configuration_widget.isHidden()
+    assert panel.ai_base_url_input.text() == ""
+    assert panel.ai_model_combo.count() == 0
+    assert panel.ai_model_combo.currentIndex() == -1
+    assert not panel.ai_save_config_button.isEnabled()
+
+    panel.ai_correction_toggle.click()
+    assert not panel.ai_configuration_widget.isHidden()
+    assert panel.preferences.ai_correction_enabled is False
+    assert preference_changes.count() == 0
+    panel.ai_base_url_input.setText("https://gateway.example/v1")
     panel.ai_api_key_input.setText("unit-test-token")
     panel.ai_save_key_button.click()
     assert key_store.key == "unit-test-token"
     assert panel.ai_api_key_input.text() == ""
-    assert panel.ai_correction_toggle.isEnabled() is True
     assert "Windows 凭据管理器" in panel.ai_key_status_label.text()
+    assert panel.preferences.ai_base_url == ""
+    assert settings.value("recognition/ai_base_url") is None
+    assert preference_changes.count() == 0
+    assert panel.ai_refresh_models_button.isEnabled()
+    assert not panel.ai_test_connection_button.isEnabled()
 
-    panel.ai_correction_toggle.click()
+    class ListedModels:
+        action = "list"
+        base_url = "https://gateway.example/v1"
+
+    list_worker = ListedModels()
+    panel._ai_model_worker = list_worker  # type: ignore[assignment]
+    panel._ai_active_context = (
+        "list",
+        "https://gateway.example/v1",
+        "",
+        panel._ai_credential_generation,
+    )
+    panel._ai_model_request_succeeded(  # type: ignore[arg-type]
+        list_worker, ("vision-a", "vision-b")
+    )
+    panel._ai_model_request_finished(list_worker)  # type: ignore[arg-type]
+    assert panel.ai_model_combo.currentIndex() == -1
+    assert not panel.ai_test_connection_button.isEnabled()
+
+    panel.ai_model_combo.setCurrentIndex(1)
+    assert panel.ai_save_config_button.isEnabled()
+    assert panel.preferences.ai_correction_enabled is False
+    assert settings.value("recognition/ai_correction_enabled") is None
+    assert preference_changes.count() == 0
+
+    panel.ai_save_config_button.click()
     assert panel.preferences.ai_correction_enabled is True
     assert settings.value("recognition/ai_correction_enabled") is True
+    assert settings.value("recognition/ai_base_url") == "https://gateway.example/v1"
+    assert settings.value("recognition/ai_model") == "vision-b"
+    assert panel.ai_connection_status_label.text() == "配置已保存并生效"
+    assert not panel.ai_save_config_button.isEnabled()
+    assert panel.ai_test_connection_button.isEnabled()
+    assert preference_changes.count() == 1
     assert all(
         "unit-test-token" not in str(settings.value(key))
         for key in settings.allKeys()
@@ -870,8 +1238,73 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
     panel.ai_delete_key_button.click()
     assert key_store.key is None
     assert panel.ai_correction_toggle.isChecked() is False
+    assert panel.ai_configuration_widget.isHidden()
     assert panel.preferences.ai_correction_enabled is False
     assert settings.value("recognition/ai_correction_enabled") is False
+    assert preference_changes.count() == 2
+    panel.hide()
+
+
+def test_invalid_ai_draft_does_not_replace_saved_configuration(
+    tmp_path: Path,
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    saved = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://saved.example/v1",
+        ai_model="saved-model",
+    )
+    saved.save(settings)
+    panel = SettingsPanel(
+        settings,
+        saved,
+        api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
+    )
+
+    assert not panel.ai_save_config_button.isEnabled()
+    panel.ai_model_combo.addItem("invalid model")
+    panel.ai_model_combo.setCurrentIndex(1)
+    assert panel.ai_save_config_button.isEnabled()
+
+    panel.ai_save_config_button.click()
+
+    assert panel.ai_model_combo.currentText() == "invalid model"
+    assert panel.preferences == saved
+    assert settings.value("recognition/ai_base_url") == "https://saved.example/v1"
+    assert settings.value("recognition/ai_model") == "saved-model"
+    assert settings.value("recognition/ai_correction_enabled") is True
+    assert panel.ai_connection_status_label.property("error") is True
+    panel.hide()
+
+
+def test_ai_configuration_save_is_disabled_while_request_is_active(
+    tmp_path: Path,
+) -> None:
+    _application()
+    panel = SettingsPanel(
+        _settings(tmp_path),
+        FloatingPreferences(),
+        api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
+    )
+    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_base_url_input.setText("https://gateway.example/v1")
+    panel.ai_model_combo.addItem("vision-model")
+    panel.ai_model_combo.setCurrentIndex(0)
+    assert panel.ai_save_config_button.isEnabled()
+
+    class PendingWorker:
+        action = "test"
+
+        def cancel(self) -> None:
+            pass
+
+    panel._ai_model_worker = PendingWorker()  # type: ignore[assignment]
+    panel._update_ai_action_state()
+
+    assert not panel.ai_save_config_button.isEnabled()
+    panel.cancel_ai_request()
+    assert panel.ai_save_config_button.isEnabled()
     panel.hide()
 
 
@@ -960,7 +1393,7 @@ def test_unsafe_ai_provider_url_is_not_persisted(tmp_path: Path) -> None:
         ai_base_url="https://gateway.example/v1?api_key=secret"
     ).save(settings)
 
-    assert settings.value("recognition/ai_base_url") == "https://api.openai.com/v1"
+    assert settings.value("recognition/ai_base_url") == ""
     assert settings.value("recognition/ai_correction_enabled") is False
 
 
@@ -973,7 +1406,7 @@ def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path)
     loaded = FloatingPreferences.load(settings)
 
     assert loaded.ai_correction_enabled is False
-    assert loaded.ai_base_url == "https://api.openai.com/v1"
+    assert loaded.ai_base_url == ""
     assert settings.value("recognition/ai_correction_enabled") is False
 
 
@@ -986,6 +1419,11 @@ def test_stale_model_list_does_not_overwrite_new_provider_config(
         FloatingPreferences(),
         api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
     )
+    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_base_url_input.setText("https://first.example/v1")
+    panel.ai_model_combo.addItems(("vision-a", "vision-b"))
+    panel.ai_model_combo.setCurrentIndex(0)
+    panel._ai_models_base_url = "https://first.example/v1"
 
     class PendingWorker:
         action = "list"
@@ -999,7 +1437,7 @@ def test_stale_model_list_does_not_overwrite_new_provider_config(
     panel._ai_active_context = (
         "list",
         "https://first.example/v1",
-        "gpt-5.6-luna",
+        "",
         0,
     )
     panel.ai_refresh_models_button.setEnabled(False)
@@ -1009,7 +1447,9 @@ def test_stale_model_list_does_not_overwrite_new_provider_config(
     assert worker.cancelled is True
     assert panel._ai_model_worker is None
     assert panel.ai_refresh_models_button.isEnabled()
-    assert panel.ai_test_connection_button.isEnabled()
+    assert not panel.ai_test_connection_button.isEnabled()
+    assert panel.ai_model_combo.count() == 0
+    assert panel.ai_model_combo.currentIndex() == -1
     assert "已取消" in panel.ai_connection_status_label.text()
 
     replacement_worker = PendingWorker()
@@ -1017,7 +1457,7 @@ def test_stale_model_list_does_not_overwrite_new_provider_config(
     panel._ai_active_context = (
         "list",
         "https://second.example/v1",
-        "gpt-5.6-luna",
+        "",
         0,
     )
     panel.ai_refresh_models_button.setEnabled(False)
@@ -1050,6 +1490,8 @@ def test_ai_model_request_terminal_releases_workers(
         FloatingPreferences(),
         api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
     )
+    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_base_url_input.setText("https://gateway.example/v1")
 
     def request_models(*_args: Any, **kwargs: Any) -> tuple[str, ...]:
         if terminal == "cancel":
@@ -1081,6 +1523,7 @@ def test_ai_model_request_terminal_releases_workers(
         panel._start_ai_model_request("list")
         worker = pool.worker
         assert worker is not None
+        assert worker.model == ""
         worker_refs.append(weakref.ref(worker))
         if terminal == "cancel":
             panel.cancel_ai_request()
@@ -1104,13 +1547,16 @@ def test_replacing_ai_key_cancels_active_recognition_without_preference_change(
     monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
     settings = _settings(tmp_path)
     settings.setValue("recognition/ai_correction_enabled", True)
+    settings.setValue("recognition/ai_base_url", "https://gateway.example/v1")
+    settings.setValue("recognition/ai_model", "vision-model")
     assistant = FloatingFormulaAssistant(settings=settings)
     initial_preferences = assistant.preferences
 
     class ActiveWorker:
         cancel_count = 0
+        ai_enabled = True
 
-        def cancel(self) -> None:
+        def cancel_ai(self) -> None:
             self.cancel_count += 1
 
     worker = ActiveWorker()
@@ -1125,6 +1571,28 @@ def test_replacing_ai_key_cancels_active_recognition_without_preference_change(
         "placeholder" not in str(settings.value(key)) for key in settings.allKeys()
     )
     assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_appearance_change_does_not_cancel_local_recognition(tmp_path: Path) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    worker = worker_module.RecognitionWorker(
+        assistant.manager,
+        Image.new("RGB", (20, 10), "white"),
+        "mathcraft",
+    )
+    assistant._worker = worker
+
+    assistant._apply_preferences(FloatingPreferences(result_theme="light"))
+
+    assert not worker._cancel_event.is_set()
+    assert not worker._local_cancel_event.is_set()
+    worker.release_resources()
+    assistant._worker = None
+    assistant.shutdown()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -1194,7 +1662,7 @@ def test_theme_toggle_updates_application_result_panel_and_storage(tmp_path: Pat
     assert assistant.panel.theme_name == "light"
     assert application.property("theme") == "light"
     assert settings.value("appearance/theme") == "light"
-    assert "#f6f7f9" in application.styleSheet()
+    assert "#F7F8FA" in application.styleSheet()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -1556,6 +2024,108 @@ def test_manual_request_during_automatic_check_restores_update_button(
     assert assistant.settings_panel.update_status_label.text() == "已是最新版本"
 
 
+def test_new_update_dialog_replaces_old_transaction(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+
+    class Signal:
+        def __init__(self) -> None:
+            self.callback: Any = None
+
+        def connect(self, callback: Any) -> None:
+            self.callback = callback
+
+    class Dialog:
+        def __init__(self, _current: str, release: ReleaseInfo) -> None:
+            self.release = release
+            self.update_requested = Signal()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+        def show(self) -> None:
+            pass
+
+        def raise_(self) -> None:
+            pass
+
+        def activateWindow(self) -> None:  # noqa: N802
+            pass
+
+    monkeypatch.setattr(floating, "UpdateDialog", Dialog)
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    asset = UpdateAsset("setup.exe", "https://example.invalid/setup.exe", 5, "0" * 64)
+    first_release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    second_release = ReleaseInfo("0.4.0", "v0.4.0", "", asset)
+    first_worker = object()
+    second_worker = object()
+
+    assistant._update_check_worker = first_worker  # type: ignore[assignment]
+    assistant._update_available(first_release, True, first_worker)  # type: ignore[arg-type]
+    first_dialog = assistant._update_dialog
+    assert isinstance(first_dialog, Dialog)
+
+    assistant._update_check_worker = second_worker  # type: ignore[assignment]
+    assistant._update_available(second_release, True, second_worker)  # type: ignore[arg-type]
+
+    assert first_dialog.closed is True
+    assert assistant._update_dialog is not first_dialog
+    assistant._begin_update(first_release, first_dialog)  # type: ignore[arg-type]
+    assert assistant._update_download_worker is None
+    assistant.shutdown()
+
+
+def test_starting_download_cancels_overlapping_update_check(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+
+    class CheckWorker:
+        cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class Dialog:
+        def show_downloading(self) -> None:
+            pass
+
+    class Pool:
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+
+        def start(self, worker: Any) -> None:
+            self.started.append(worker)
+
+    monkeypatch.setattr(floating, "is_installed_build", lambda: True)
+    monkeypatch.setattr(
+        floating.QStandardPaths,
+        "writableLocation",
+        lambda _location: str(tmp_path),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._thread_pool = Pool()  # type: ignore[assignment]
+    dialog = Dialog()
+    assistant._update_dialog = dialog  # type: ignore[assignment]
+    check_worker = CheckWorker()
+    assistant._update_check_worker = check_worker  # type: ignore[assignment]
+    assistant._update_check_manual_requested = True
+    assistant.settings_panel.set_update_status("正在检查更新…", checking=True)
+    asset = UpdateAsset("setup.exe", "https://example.invalid/setup.exe", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+
+    assistant._begin_update(release, dialog)  # type: ignore[arg-type]
+
+    assert check_worker.cancelled is True
+    assert assistant._update_check_worker is None
+    assert assistant._update_check_manual_requested is False
+    assert assistant.settings_panel.check_update_button.isEnabled()
+    assert len(assistant._thread_pool.started) == 1  # type: ignore[attr-defined]
+    assistant.shutdown()
+
+
 def test_update_waits_for_active_recognition_before_starting_installer(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -1714,10 +2284,88 @@ def test_selected_recognition_mode_is_passed_to_worker(
     assert created[0][3] == {
         "ai_enabled": False,
         "ai_api_key": None,
-        "ai_base_url": "https://api.openai.com/v1",
-        "ai_model": "gpt-5.6-luna",
+        "ai_base_url": "",
+        "ai_model": "",
     }
     assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_capture_during_model_warmup_is_queued_then_started_once(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    _application()
+    created: list[Any] = []
+    started: list[Any] = []
+
+    class Hook:
+        def connect(self, _callback: Any) -> None:
+            pass
+
+    class Signals:
+        finished = Hook()
+        failed = Hook()
+
+    class FakeWorker:
+        signals = Signals()
+
+        def __init__(self, _manager: Any, image: Any, *_args: Any, **_kwargs: Any) -> None:
+            self.image = image.copy()
+            created.append(self)
+
+    class Pool:
+        def start(self, worker: Any) -> None:
+            started.append(worker)
+
+    monkeypatch.setattr(floating, "RecognitionWorker", FakeWorker)
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._thread_pool = Pool()  # type: ignore[assignment]
+    assistant._model_warmup_state = "warming"
+    assistant._warmup_worker = object()  # type: ignore[assignment]
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+
+    pending = assistant._pending_recognition_image
+    assert pending is not None
+    assert created == []
+    assert "完成后自动识别" in assistant.orb.toolTip()
+
+    assistant._model_warmup_finished()
+
+    assert assistant._pending_recognition_image is None
+    assert created == started
+    assert len(created) == 1
+    with pytest.raises(ValueError):
+        pending.getpixel((0, 0))
+    created[0].image.close()
+    assistant._worker = None
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_shutdown_releases_capture_waiting_for_model(
+    tmp_path: Path,
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._model_warmup_state = "warming"
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+    assistant._captured(pixmap)
+    pending = assistant._pending_recognition_image
+    assert pending is not None
+
+    assistant.shutdown()
+
+    assert assistant._pending_recognition_image is None
+    with pytest.raises(ValueError):
+        pending.getpixel((0, 0))
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -1753,6 +2401,8 @@ def test_enabled_ai_configuration_is_passed_to_worker(
     monkeypatch.setattr(floating, "RecognitionWorker", FakeWorker)
     settings = _settings(tmp_path)
     settings.setValue("recognition/ai_correction_enabled", True)
+    settings.setValue("recognition/ai_base_url", "https://api.openai.com/v1")
+    settings.setValue("recognition/ai_model", "gpt-5.6-luna")
     assistant = FloatingFormulaAssistant(settings=settings)
     assistant._thread_pool = Pool()  # type: ignore[assignment]
     pixmap = QPixmap(80, 40)
@@ -1769,6 +2419,83 @@ def test_enabled_ai_configuration_is_passed_to_worker(
         }
     ]
     assistant._worker = None
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+def test_draft_provider_change_disables_ai_before_replacement_key_capture(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    key_store = FakeApiKeyStore("provider-a-key")
+    monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
+    created: list[dict[str, Any]] = []
+
+    class Hook:
+        def connect(self, _callback: Any) -> None:
+            pass
+
+    class Signals:
+        finished = Hook()
+        failed = Hook()
+
+    class FakeWorker:
+        signals = Signals()
+
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            self.ai_enabled = bool(kwargs["ai_enabled"])
+            created.append(kwargs)
+
+    class Pool:
+        def start(self, _worker: Any) -> None:
+            pass
+
+    monkeypatch.setattr(floating, "RecognitionWorker", FakeWorker)
+    settings = _settings(tmp_path)
+    saved = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://provider-a.example/v1",
+        ai_model="provider-a-model",
+    )
+    saved.save(settings)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assistant._thread_pool = Pool()  # type: ignore[assignment]
+
+    assistant.settings_panel.ai_base_url_input.setText(
+        "https://provider-b.example/v1"
+    )
+    assert assistant.preferences.ai_correction_enabled is False
+    assert settings.value("recognition/ai_correction_enabled") is False
+
+    assistant.settings_panel.ai_api_key_input.setText("provider-b-key")
+    assistant.settings_panel.ai_save_key_button.click()
+    assistant.settings_panel.close()
+    settings.sync()
+    restarted_settings = QSettings(settings.fileName(), QSettings.Format.IniFormat)
+
+    assert key_store.key == "provider-b-key"
+    assert FloatingPreferences.load(restarted_settings).ai_correction_enabled is False
+    assert settings.value("recognition/ai_base_url") == "https://provider-a.example/v1"
+    assert all(
+        "provider-b-key" not in str(settings.value(key)) for key in settings.allKeys()
+    )
+
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+    assistant._captured(pixmap)
+
+    assert created == [
+        {
+            "ai_enabled": False,
+            "ai_api_key": None,
+            "ai_base_url": "https://provider-a.example/v1",
+            "ai_model": "provider-a-model",
+        }
+    ]
+    assistant._worker = None
+    assistant.shutdown()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -1942,8 +2669,9 @@ def test_cancelled_queued_ai_result_is_replaced_with_local_result(
 
     class QueuedWorker:
         cancelled = False
+        ai_enabled = True
 
-        def cancel(self) -> None:
+        def cancel_ai(self) -> None:
             self.cancelled = True
 
         def result_for_delivery(self, result: RecognitionResult) -> RecognitionResult:
