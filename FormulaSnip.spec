@@ -11,6 +11,19 @@ from PyInstaller.utils.hooks import (
 
 
 project_root = Path(SPECPATH)
+bundled_formula_model = (
+    project_root
+    / "build"
+    / "bundled-models"
+    / "MathCraft"
+    / "models"
+    / "mathcraft-formula-rec"
+)
+if not bundled_formula_model.is_dir():
+    raise SystemExit(
+        "Pinned MathCraft formula model is missing. "
+        "Run scripts/prepare_bundled_model.py before PyInstaller."
+    )
 
 datas = [
     (str(project_root / "formulasnip" / "assets"), "formulasnip/assets"),
@@ -20,6 +33,8 @@ datas = [
     (str(project_root / "THIRD_PARTY_LICENSES"), "THIRD_PARTY_LICENSES"),
     (str(project_root / "pyproject.toml"), "."),
     (str(project_root / "uv.lock"), "."),
+    (str(project_root / "MODEL_ASSETS.json"), "."),
+    (str(bundled_formula_model), "MathCraft/models/mathcraft-formula-rec"),
 ]
 binaries = []
 hiddenimports = [

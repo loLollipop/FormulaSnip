@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "formulasnip"
-version = "0.2.9"
+version = "0.2.10"
 description = "Offline Windows formula snipping and recognition prototype"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -41,6 +41,7 @@ packages = ["formulasnip"]
 [tool.hatch.build.targets.wheel.shared-data]
 "THIRD_PARTY_NOTICES.md" = "share/formulasnip/THIRD_PARTY_NOTICES.md"
 "THIRD_PARTY_LICENSES" = "share/formulasnip/THIRD_PARTY_LICENSES"
+"MODEL_ASSETS.json" = "share/formulasnip/MODEL_ASSETS.json"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -49,6 +50,7 @@ include = [
   "/README.md",
   "/THIRD_PARTY_NOTICES.md",
   "/THIRD_PARTY_LICENSES",
+  "/MODEL_ASSETS.json",
   "/pyproject.toml",
 ]
 

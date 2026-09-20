@@ -6,7 +6,7 @@ from time import perf_counter
 from PIL import Image
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
-from formulasnip.core.latex import latex_equivalent
+from formulasnip.core.latex import latex_same_content
 from formulasnip.core.preview import is_formula_previewable
 from formulasnip.diagnostics import log_exception
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
@@ -291,7 +291,7 @@ class RecognitionWorker(QRunnable):
         elapsed: float,
     ) -> RecognitionResult:
         local_candidate = self._local_candidate(local_result)
-        equivalent = latex_equivalent(local_candidate.latex, ai_candidate.latex)
+        equivalent = latex_same_content(local_candidate.latex, ai_candidate.latex)
         warnings = [
             warning
             for warning in local_result.warnings

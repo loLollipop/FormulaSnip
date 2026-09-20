@@ -6,6 +6,24 @@ import xml.etree.ElementTree as ET
 from formulasnip.exceptions import FormulaSnipError
 
 _DISPLAY_WRAPPERS = (("$$", "$$"), ("\\[", "\\]"), ("$", "$"))
+_SINGLE_LETTER_ROMAN_SUBSCRIPT = re.compile(
+    r"_\s*\{\s*\\mathrm(?:\s*\{\s*([A-Za-z])\s*\}|\s+([A-Za-z]))\s*\}"
+)
+_OPAQUE_LATEX_COMMANDS = frozenset(
+    {
+        "hbox",
+        "mbox",
+        "operatorname",
+        "text",
+        "textbf",
+        "textit",
+        "textnormal",
+        "textrm",
+        "textsf",
+        "texttt",
+        "url",
+    }
+)
 _WORD_GROUP_COMMANDS = ("mathbb", "mathbf", "mathrm", "mathcal", "mathsf", "mathtt")
 _UNSUPPORTED_WORD_MARKERS = (
     "\\begin",
@@ -88,6 +106,90 @@ def latex_equivalent(left: str, right: str) -> bool:
     except (FormulaSnipError, ET.ParseError, ValueError, TypeError):
         return False
     return _canonical_mathml(left_root) == _canonical_mathml(right_root)
+
+
+def latex_same_content(left: str, right: str) -> bool:
+    """Compare OCR candidates while tolerating one common style-only mismatch.
+
+    MathCraft sometimes emits a spaced ``_{\\mathrm{p}}`` where a vision model
+    emits ``_p``. For a single Latin subscript letter this is a typography choice,
+    so the AI candidate can supply the compact layout. Multi-letter roman labels
+    and other font commands remain semantic and continue to compare strictly.
+    """
+
+    left_opaque = tuple(left[start:end] for start, end in _opaque_latex_ranges(left))
+    right_opaque = tuple(right[start:end] for start, end in _opaque_latex_ranges(right))
+    if left_opaque != right_opaque:
+        return False
+    if latex_equivalent(left, right):
+        return True
+    normalized_left = _normalize_single_letter_roman_subscripts(left)
+    normalized_right = _normalize_single_letter_roman_subscripts(right)
+    if normalized_left == left and normalized_right == right:
+        return False
+    return latex_equivalent(normalized_left, normalized_right)
+
+
+def _normalize_single_letter_roman_subscripts(value: str) -> str:
+    """Drop ``\\mathrm`` only in math syntax, never in opaque text arguments."""
+
+    opaque_ranges = _opaque_latex_ranges(value)
+
+    def replace(match: re.Match[str]) -> str:
+        if _is_escaped_character(value, match.start()) or any(
+            start <= match.start() < end for start, end in opaque_ranges
+        ):
+            return match.group(0)
+        return f"_{{{match.group(1) or match.group(2)}}}"
+
+    return _SINGLE_LETTER_ROMAN_SUBSCRIPT.sub(replace, value)
+
+
+def _opaque_latex_ranges(value: str) -> tuple[tuple[int, int], ...]:
+    """Locate literal-like LaTeX command arguments for conservative rewriting."""
+
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "\\":
+            index += 1
+            continue
+        command_start = index
+        index += 1
+        if index >= len(value) or not value[index].isalpha():
+            index += 1
+            continue
+        command_end = index
+        while command_end < len(value) and value[command_end].isalpha():
+            command_end += 1
+        command = value[index:command_end]
+        cursor = command_end
+        if cursor < len(value) and value[cursor] == "*":
+            cursor += 1
+        if command == "verb":
+            if cursor >= len(value) or value[cursor].isspace():
+                index = cursor
+                continue
+            delimiter = value[cursor]
+            closing = value.find(delimiter, cursor + 1)
+            end = len(value) if closing < 0 else closing + 1
+            ranges.append((command_start, end))
+            index = end
+            continue
+        if command not in _OPAQUE_LATEX_COMMANDS:
+            index = cursor
+            continue
+        cursor = _skip_space(value, cursor)
+        if cursor >= len(value) or value[cursor] != "{":
+            index = cursor
+            continue
+        try:
+            _content, end = _read_group(value, cursor)
+        except FormulaSnipError:
+            end = len(value)
+        ranges.append((command_start, end))
+        index = end
+    return tuple(ranges)
 
 
 def _canonical_mathml(element: ET.Element) -> tuple[object, ...] | None:
@@ -296,6 +398,8 @@ def _read_group(text: str, start: int, opening: str = "{", closing: str = "}") -
     depth = 0
     for index in range(start, len(text)):
         char = text[index]
+        if _is_escaped_character(text, index):
+            continue
         if char == opening:
             depth += 1
         elif char == closing:
@@ -303,6 +407,17 @@ def _read_group(text: str, start: int, opening: str = "{", closing: str = "}") -
             if depth == 0:
                 return text[start + 1 : index], index + 1
     raise FormulaSnipError("公式括号结构不完整，无法安全转换。")
+
+
+def _is_escaped_character(text: str, index: int) -> bool:
+    """Return whether the character at ``index`` follows an odd slash run."""
+
+    slash_count = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        slash_count += 1
+        cursor -= 1
+    return slash_count % 2 == 1
 
 
 def _convert_fragment(text: str) -> str:

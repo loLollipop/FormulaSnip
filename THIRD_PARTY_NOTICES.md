@@ -44,8 +44,9 @@ Additional license texts that are absent from upstream wheels are preserved in
   text in its distribution metadata; it is the same license version included
   in FormulaSnip's root `LICENSE`. FormulaSnip uses only its ONNX CPU formula
   profile. Source: https://github.com/SakuraMathcraft/LaTeXSnipper
-
-The Windows release intentionally excludes separately cached MathCraft model
-files. MathCraft downloads its formula model on first use. Before redistributing
-a release that embeds model files, generate a complete dependency and model
-SBOM and include every required license text.
+- The MathCraft formula-recognition model v1 is distributed under GPL-3.0-only
+  by SakuraMathcraft. Windows packages include its eight pinned runtime files
+  for offline first use. `MODEL_ASSETS.json` records the release URL, archive
+  digest, file sizes, and per-file SHA-256 values. The applicable GPL-3.0-only
+  license text is the root `LICENSE`. Source:
+  https://github.com/SakuraMathcraft/MathCraft-Models

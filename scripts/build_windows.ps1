@@ -52,6 +52,8 @@ if ($appVersion -ne $packageVersion -or $appVersion -ne $installerVersion) {
     throw "Version mismatch: pyproject.toml=$appVersion, formulasnip/__init__.py=$packageVersion, installer/FormulaSnip.iss=$installerVersion."
 }
 $archivePath = Join-Path $distDirectory "FormulaSnip-v$appVersion-windows-x64.zip"
+$modelLockPath = Join-Path $projectRoot "MODEL_ASSETS.json"
+$bundledModelPath = Join-Path $projectRoot "build\bundled-models\MathCraft\models\mathcraft-formula-rec"
 
 if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
     throw "FormulaSnip Windows packages must be built on Windows."
@@ -66,6 +68,11 @@ try {
         uv sync --locked --extra packaging
         if ($LASTEXITCODE -ne 0) { throw "uv sync failed." }
     }
+
+    uv run python scripts\prepare_bundled_model.py `
+        --lock $modelLockPath `
+        --destination $bundledModelPath
+    if ($LASTEXITCODE -ne 0) { throw "Bundled MathCraft model preparation failed." }
 
     uv run pyinstaller --noconfirm --clean FormulaSnip.spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
@@ -88,7 +95,20 @@ try {
         throw "The frozen formula preview smoke test failed with exit code $($smokeProcess.ExitCode)."
     }
 
-    foreach ($documentName in @("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md")) {
+    $modelSmokeProcess = Start-Process `
+        -FilePath $executablePath `
+        -ArgumentList "--smoke-model" `
+        -WindowStyle Hidden `
+        -PassThru
+    if (-not $modelSmokeProcess.WaitForExit(120000)) {
+        $modelSmokeProcess.Kill()
+        throw "The frozen offline MathCraft model smoke test timed out."
+    }
+    if ($modelSmokeProcess.ExitCode -ne 0) {
+        throw "The frozen offline MathCraft model smoke test failed with exit code $($modelSmokeProcess.ExitCode)."
+    }
+
+    foreach ($documentName in @("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "MODEL_ASSETS.json")) {
         Copy-Item `
             -LiteralPath (Join-Path $projectRoot $documentName) `
             -Destination (Join-Path $applicationDirectory $documentName) `

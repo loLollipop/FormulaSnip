@@ -17,7 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QScrollArea, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QSystemTrayIcon
 
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
@@ -346,6 +346,12 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     result = RecognitionResult(r"\frac{x}{y}", "Rapid", 0.25)
     consumed: list[bool] = []
     panel.result_consumed.connect(lambda: consumed.append(True))
+
+    close_button = panel.findChild(QPushButton, "FloatingCloseButton")
+    assert close_button is not None
+    assert close_button.text() == ""
+    assert not close_button.icon().isNull()
+    assert close_button.accessibleName() == "关闭识别结果"
 
     margins = panel.preview_frame.layout().contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (

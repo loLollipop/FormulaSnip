@@ -4,6 +4,7 @@ import pytest
 
 from formulasnip.core.latex import (
     latex_equivalent,
+    latex_same_content,
     latex_to_mathml,
     latex_to_word_linear,
     normalize_latex,
@@ -94,6 +95,58 @@ def test_latex_equivalent_preserves_semantic_differences(local: str, ai: str) ->
 
 def test_latex_equivalent_returns_false_when_conversion_fails() -> None:
     assert not latex_equivalent(r"\begin{matrix}", r"\begin{matrix}")
+
+
+def test_latex_same_content_accepts_compact_ai_single_letter_subscript() -> None:
+    local = (
+        r"\rho c _ { \mathrm { p } } \frac { \partial T } { \partial t } "
+        r"= \frac 1 r \frac { \partial } { \partial r }"
+    )
+    ai = r"\rho c_p\frac{\partial T}{\partial t}=\frac{1}{r}\frac{\partial}{\partial r}"
+
+    assert not latex_equivalent(local, ai)
+    assert latex_same_content(local, ai)
+
+
+def test_latex_same_content_accepts_unbraced_single_letter_roman_subscript() -> None:
+    assert latex_same_content(r"c_{\mathrm p}", r"c_p")
+
+
+@pytest.mark.parametrize(
+    ("local", "ai"),
+    (
+        (r"\verb|_{\mathrm{p}}|", r"\verb|_{p}|"),
+        (r"\text{label_{\mathrm{p}}}", r"\text{label_{p}}"),
+        (r"\operatorname{rate_{\mathrm{p}}}", r"\operatorname{rate_{p}}"),
+        (r"c\_{\mathrm p}", r"c\_{p}"),
+        (r"\text{a\} b c}", r"\text{a\} bc}"),
+        (r"\text{a {b\} c} d}", r"\text{a {b\} cd}"),
+    ),
+)
+def test_latex_same_content_does_not_rewrite_opaque_contexts(
+    local: str, ai: str
+) -> None:
+    assert not latex_same_content(local, ai)
+
+
+@pytest.mark.parametrize(
+    ("local", "ai"),
+    (
+        (r"q_{\mathrm{loss}}", r"q_{loss}"),
+        (r"c_{\mathbf{p}}", r"c_p"),
+    ),
+)
+def test_latex_same_content_keeps_semantic_font_differences(
+    local: str, ai: str
+) -> None:
+    assert not latex_same_content(local, ai)
+
+
+def test_latex_same_content_handles_escaped_brace_before_math_subscript() -> None:
+    assert latex_same_content(
+        r"\text{literal \} brace}c_{\mathrm p}",
+        r"\text{literal \} brace}c_p",
+    )
 
 
 def _mathml_tokens(mathml: str) -> list[tuple[str, str, dict[str, str]]]:

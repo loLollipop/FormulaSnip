@@ -117,17 +117,15 @@ if ($null -ne $retiredRapidEntries) {
     throw "The portable directory still contains the retired RapidLaTeXOCR backend. Rebuild it with scripts\build_windows.ps1 -SkipInstaller first: $retiredRapidEntries"
 }
 
-$mathCraftWeights = Get-ChildItem `
-    -LiteralPath $applicationDirectory `
-    -Recurse `
-    -File `
-    -Filter "*.onnx" |
-    Where-Object {
-        $_.FullName -match '[\\/](mathcraft_ocr|rapidocr|onnxruntime[\\/]datasets)[\\/]'
-    } |
-    Select-Object -First 1
-if ($null -ne $mathCraftWeights) {
-    throw "MathCraft/RapidOCR model weights were found in the portable directory: $($mathCraftWeights.FullName)"
+$modelLockPath = Join-Path $projectRoot "MODEL_ASSETS.json"
+$bundledModelPath = Join-Path $applicationDirectory "_internal\MathCraft\models\mathcraft-formula-rec"
+$prepareModelScript = Join-Path $projectRoot "scripts\prepare_bundled_model.py"
+uv run --project $projectRoot python $prepareModelScript `
+    --lock $modelLockPath `
+    --destination $bundledModelPath `
+    --verify-only
+if ($LASTEXITCODE -ne 0) {
+    throw "The packaged MathCraft formula model failed verification."
 }
 
 if (-not $IsccPath) {

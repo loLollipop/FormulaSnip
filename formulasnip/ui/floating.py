@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QRect,
     QSettings,
     QSignalBlocker,
+    QSize,
     QStandardPaths,
     Qt,
     QThreadPool,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
+    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -473,9 +475,17 @@ class FloatingResultPanel(QWidget):
         title.setObjectName("FloatingResultTitle")
         self.backend_label = QLabel()
         self.backend_label.setObjectName("FloatingMeta")
-        close_button = QPushButton("×")
-        close_button.setObjectName("IconButton")
+        close_button = QPushButton()
+        close_button.setObjectName("FloatingCloseButton")
+        close_button.setIcon(
+            QApplication.style().standardIcon(
+                QStyle.StandardPixmap.SP_TitleBarCloseButton
+            )
+        )
+        close_button.setIconSize(QSize(14, 14))
         close_button.setToolTip("收起结果")
+        close_button.setAccessibleName("关闭识别结果")
+        close_button.setAccessibleDescription("关闭当前识别结果窗口")
         close_button.setFixedSize(32, 32)
         close_button.clicked.connect(self._dismiss_result)
         header.addWidget(title)

@@ -32,7 +32,7 @@ FormulaSnip 是面向 Windows 论文写作场景的公式截图识别工具。�
 | 能力 | 说明 |
 | --- | --- |
 | 本地公式识别 | 使用 MathCraft OCR 的 CPU 推理路径，默认不上传截图，无需独立显卡 |
-| 电子公式校对 | 生成 SVG 预览，可在复制前检查并编辑 LaTeX 结果 |
+| 电子公式校对 | 使用离线 MathJax 生成电子公式预览，可在复制前检查并编辑 LaTeX 结果 |
 | 论文写作输出 | 一键复制 LaTeX 或 MathML，适配 Word 与 MathType 工作流 |
 | 悬浮球与系统托盘 | 截图、恢复悬浮球、打开设置、检查更新和退出均可快速完成 |
 | 个性化外观 | 支持深色与浅色主题、圆环颜色和自定义悬浮球 Logo |
@@ -60,7 +60,7 @@ FormulaSnip 是面向 Windows 论文写作场景的公式截图识别工具。�
 | `FormulaSnip-v*-windows-x64.zip` | 便携使用。解压后运行 `FormulaSnip.exe` |
 
 - 系统要求：Windows 10/11，x64。
-- 首次识别需要联网下载约 112 MiB 的 MathCraft 公式模型，之后本地识别可离线使用。
+- 安装版与便携版已内置 MathCraft 公式模型，安装完成后可以直接离线识别。
 - 当前安装包尚未进行代码签名，Windows SmartScreen 可能显示风险提示，请仅从本仓库下载。
 
 安装版启动后会检查更新，可在应用内下载、校验并安装新版本，也可以选择稍后处理。便携版和源码版会打开 Release 页面，由用户手动更新。
@@ -76,7 +76,7 @@ FormulaSnip 是面向 Windows 论文写作场景的公式截图识别工具。�
 <summary><strong>AI 辅助识别与隐私</strong></summary>
 
 - AI 辅助默认关闭，由用户自行配置 OpenAI 兼容 API 地址、API Key 和模型。
-- 启用后，本地 MathCraft 与远程视觉模型独立并行识别；结果不一致时可以切换对照。
+- 启用后，本地 MathCraft 与远程视觉模型独立并行识别；内容一致时采用 AI 的紧凑排版，真正不一致时可以切换对照。
 - 远程服务只会收到本次框选的公式图片，不会收到本地识别结果。
 - API Key 保存在 Windows 凭据管理器，不写入普通应用设置。
 - 远程调用可能产生费用，图片处理规则和数据保留政策取决于所配置的服务提供商。
@@ -112,6 +112,8 @@ uv run ruff check .
 ```powershell
 .\scripts\build_windows.ps1
 ```
+
+首次发行构建会下载并校验固定版本的 MathCraft 公式模型；后续构建会复用通过完整性校验的构建缓存。
 
 ## 参与项目
 

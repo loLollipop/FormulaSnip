@@ -270,6 +270,15 @@ QDialog#UpdateDialog QPushButton:disabled {{
     color: {colors['muted']}; background: {colors['surface_alt']};
     border-color: {colors['border']};
 }}
+QWidget#FloatingResultPanel QPushButton#FloatingCloseButton {{
+    background: {colors['surface_alt']}; color: {colors['text']};
+    border: 1px solid {colors['border']}; border-radius: 8px;
+    padding: 0;
+}}
+QWidget#FloatingResultPanel QPushButton#FloatingCloseButton:hover,
+QWidget#FloatingResultPanel QPushButton#FloatingCloseButton:focus {{
+    background: {colors['surface_hover']}; border-color: {colors['accent']};
+}}
 QWidget#SettingsPanel QPushButton#NavButton {{
     background: transparent; border: none; color: {settings['muted']};
     border-radius: 9px; padding: 0 12px; text-align: left;

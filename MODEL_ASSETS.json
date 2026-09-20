@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "model_id": "mathcraft-formula-rec",
+  "model_version": "1",
+  "source_repository": "https://github.com/SakuraMathcraft/MathCraft-Models",
+  "source_url": "https://github.com/SakuraMathcraft/MathCraft-Models/releases/download/v1.0.0/mathcraft-formula-rec.zip",
+  "archive_size": 108795631,
+  "archive_sha256": "807dd2d1ac40454424404b31a73d4242c37c76edf176ab544540028da20ec43f",
+  "license": "GPL-3.0-only",
+  "license_file": "LICENSE",
+  "files": [
+    {
+      "path": "config.json",
+      "size": 4554,
+      "sha256": "cc60b5e3fa221c49086147e82583b3bf62a62917bddf38decfccf7ccfdb1e53b"
+    },
+    {
+      "path": "decoder_model.onnx",
+      "size": 30114937,
+      "sha256": "fd0f92d7a012f3dae41e1ac79421aea0ea888b5a66cb3f9a004e424f82f3daed"
+    },
+    {
+      "path": "encoder_model.onnx",
+      "size": 87496990,
+      "sha256": "bd8d5c322792e9ec45793af5569e9748f82a3d728a9e00213dbfc56c1486f37d"
+    },
+    {
+      "path": "generation_config.json",
+      "size": 210,
+      "sha256": "cbea88288d5576a9655ad04e2456768544be22273a1c5ca160e0d16384639b4f"
+    },
+    {
+      "path": "preprocessor_config.json",
+      "size": 450,
+      "sha256": "36a945a7cc645688b9ef64dabae16979cf5f7c1c448569cc306694edc0598b9b"
+    },
+    {
+      "path": "special_tokens_map.json",
+      "size": 964,
+      "sha256": "8c785abebea9ae3257b61681b4e6fd8365ceafde980c21970d001e834cf10835"
+    },
+    {
+      "path": "tokenizer.json",
+      "size": 39161,
+      "sha256": "3e2ab757277d22639bec28c9d7972e352d3d1dba223051fa674002dc5ab64df3"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "size": 1181,
+      "sha256": "7ffff31747c73b1a462b766abfc128e03f669e5b8452fe6e175b1430a078ac8d"
+    }
+  ]
+}

@@ -22,6 +22,8 @@ def test_pyinstaller_collects_mathcraft_runtime_without_legacy_engine() -> None:
     assert '"/rapidocr/models/"' in spec
     assert "rapid_latex_ocr" not in spec
     assert "rapid-latex-ocr" not in spec
+    assert '"MathCraft/models/mathcraft-formula-rec"' in spec
+    assert 'project_root / "MODEL_ASSETS.json"' in spec
 
 
 def test_pyinstaller_collects_webengine_and_not_legacy_preview_renderer() -> None:
@@ -42,13 +44,23 @@ def test_wheel_includes_third_party_notices_and_licenses() -> None:
     assert '"THIRD_PARTY_LICENSES" = "share/formulasnip/THIRD_PARTY_LICENSES"' in project
 
 
-def test_installer_rejects_accidentally_packaged_onnx_weights() -> None:
+def test_installer_requires_verified_bundled_formula_model() -> None:
     installer = (ROOT / "scripts" / "build_installer.ps1").read_text(encoding="utf-8")
 
-    assert 'Filter "*.onnx"' in installer
-    assert "mathcraft_ocr|rapidocr|onnxruntime" in installer
+    assert "prepare_bundled_model.py" in installer
+    assert '"_internal\\MathCraft\\models\\mathcraft-formula-rec"' in installer
+    assert "--verify-only" in installer
     assert '_internal\\rapid_latex_ocr' in installer
     assert "retired RapidLaTeXOCR backend" in installer
+
+
+def test_model_asset_lock_pins_archive_files_and_license() -> None:
+    lock = (ROOT / "MODEL_ASSETS.json").read_text(encoding="utf-8")
+
+    assert '"model_id": "mathcraft-formula-rec"' in lock
+    assert '"archive_sha256": "807dd2d1' in lock
+    assert '"license": "GPL-3.0-only"' in lock
+    assert lock.count('"path":') == 8
 
 
 def test_update_manifest_requires_nonempty_release_notes() -> None:

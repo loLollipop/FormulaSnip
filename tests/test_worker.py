@@ -81,6 +81,42 @@ def test_worker_marks_equivalent_results_and_keeps_ai_default(monkeypatch: Any) 
     assert results[0].comparison == "equivalent"
 
 
+def test_worker_uses_ai_layout_for_single_letter_roman_subscript(
+    monkeypatch: Any,
+) -> None:
+    local_latex = (
+        r"\rho c _ { \mathrm { p } } \frac { \partial T } { \partial t } "
+        r"= \frac 1 r \frac { \partial } { \partial r }"
+    )
+    ai_latex = (
+        r"\rho c_p\frac{\partial T}{\partial t}="
+        r"\frac{1}{r}\frac{\partial}{\partial r}"
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "transcribe_formula",
+        lambda *_args, **_kwargs: RecognitionCandidate(
+            ai_latex, "AI · vision-model", 0.1, source="ai"
+        ),
+    )
+    worker = RecognitionWorker(
+        Manager(RecognitionResult(local_latex, "MathCraft", 0.1)),  # type: ignore[arg-type]
+        Image.new("RGB", (8, 8), "white"),
+        "mathcraft",
+        ai_enabled=True,
+        ai_api_key="unit-test-token",
+    )
+    results: list[RecognitionResult] = []
+    worker.signals.finished.connect(lambda _task, result: results.append(result))
+
+    worker.run()
+
+    assert results[0].latex == ai_latex
+    assert results[0].backend_name == "AI · vision-model"
+    assert results[0].comparison == "equivalent"
+    assert not any("显式选择" in warning for warning in results[0].warnings)
+
+
 def test_worker_preserves_multiline_disagreement_for_source_switch(
     monkeypatch: Any,
 ) -> None:
