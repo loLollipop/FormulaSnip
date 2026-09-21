@@ -10,8 +10,8 @@ from PySide6.QtWidgets import QApplication
 
 from formulasnip.diagnostics import initialize_logging
 from formulasnip.runtime import _configure_windowed_streams, configure_runtime  # noqa: F401
+from formulasnip.single_instance import SingleInstanceGuard
 from formulasnip.ui.branding import application_icon, application_version
-from formulasnip.ui.floating import FloatingFormulaAssistant
 from formulasnip.ui.settings import FloatingPreferences
 from formulasnip.ui.styles import apply_application_theme
 
@@ -50,6 +50,18 @@ def create_application(argv: list[str] | None = None) -> QApplication:
 
 def main() -> int:
     multiprocessing.freeze_support()
+    guard = SingleInstanceGuard()
+    if not guard.acquire():
+        return 0
+    try:
+        return _run_application()
+    finally:
+        guard.close()
+
+
+def _run_application() -> int:
+    from formulasnip.ui.floating import FloatingFormulaAssistant
+
     app = create_application()
     app.setQuitOnLastWindowClosed(False)
     assistant = FloatingFormulaAssistant()

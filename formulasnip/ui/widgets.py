@@ -6,6 +6,7 @@ from typing import Any
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer, QUrl, Signal
 from PySide6.QtWidgets import QLabel, QStackedLayout, QWidget
 
+from formulasnip.core.limits import LATEX_LIMIT_MESSAGE, MAX_LATEX_CHARS
 from formulasnip.core.preview import (
     build_mathjax_html,
     build_mathjax_update_script,
@@ -158,6 +159,8 @@ class FormulaPreviewWidget(QWidget):
         return self._request_id
 
     def set_formula(self, latex: str) -> int:
+        if len(latex) > MAX_LATEX_CHARS:
+            raise ValueError(LATEX_LIMIT_MESSAGE)
         self._request_id += 1
         request_id = self._request_id
         update_script = build_mathjax_update_script(latex, request_id)

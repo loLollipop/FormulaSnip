@@ -3,9 +3,13 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 
+from formulasnip.core.limits import LATEX_LIMIT_MESSAGE, MAX_LATEX_CHARS
 from formulasnip.exceptions import FormulaSnipError
 
 _DISPLAY_WRAPPERS = (("$$", "$$"), ("\\[", "\\]"), ("$", "$"))
+_MATHML_MACRO_DEFINITION = re.compile(
+    r"\\(?:def|newcommand|newenvironment|DeclareMathOperator)(?![A-Za-z])"
+)
 _SINGLE_LETTER_ROMAN_SUBSCRIPT = re.compile(
     r"_\s*\{\s*\\mathrm(?:\s*\{\s*([A-Za-z])\s*\}|\s+([A-Za-z]))\s*\}"
 )
@@ -78,9 +82,13 @@ def normalize_latex(value: str) -> str:
 def latex_to_mathml(value: str) -> str:
     """Convert LaTeX to presentation MathML for clipboard exchange."""
 
+    if len(value) > MAX_LATEX_CHARS:
+        raise FormulaSnipError(LATEX_LIMIT_MESSAGE)
     latex = normalize_latex(value)
     if not latex:
         raise FormulaSnipError("没有可转换的 LaTeX。")
+    if _MATHML_MACRO_DEFINITION.search(latex):
+        raise FormulaSnipError("MathML 复制不支持自定义宏，请展开公式后重试。")
     try:
         from latex2mathml.converter import convert
     except ImportError as exc:  # pragma: no cover - dependency is part of the app install

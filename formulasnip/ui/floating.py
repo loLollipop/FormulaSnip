@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPlainTextEdit,
     QPushButton,
     QStackedWidget,
     QStyle,
@@ -54,20 +53,26 @@ from PySide6.QtWidgets import (
 )
 
 from formulasnip.core.latex import latex_to_mathml
+from formulasnip.core.limits import LATEX_LIMIT_MESSAGE, MAX_LATEX_CHARS
 from formulasnip.credentials import CredentialError, OpenAIApiKeyStore
+from formulasnip.diagnostics import log_exception
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.recognition import BackendManager
 from formulasnip.recognition.quality import assess_latex
 from formulasnip.ui.branding import application_icon, application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
+from formulasnip.ui.latex_editor import LatexEditor
 from formulasnip.ui.settings import (
     DEFAULT_RING_COLOR,
     RING_PRESETS,
     FloatingPreferences,
+    PreferencesSaveError,
     SettingsPanel,
     normalize_hex_color,
     read_logo_image,
+    read_settings_value,
+    write_settings_values,
 )
 from formulasnip.ui.snip_overlay import SnipOverlay
 from formulasnip.ui.styles import apply_application_theme
@@ -551,7 +556,7 @@ class FloatingResultPanel(QWidget):
         self.source_switch.hide()
         outer.addWidget(self.source_switch)
 
-        self.latex_view = QPlainTextEdit()
+        self.latex_view = LatexEditor()
         self.latex_view.setObjectName("FloatingLatex")
         self.latex_view.setMaximumHeight(68)
         self.latex_view.setPlaceholderText("在此修改 LaTeX，预览会自动更新")
@@ -580,6 +585,9 @@ class FloatingResultPanel(QWidget):
         self.copy_latex_button.clicked.connect(self._copy_latex)
         self.copy_mathml_button.clicked.connect(self._copy_mathml)
         self.latex_view.textChanged.connect(self._latex_edited)
+        self.latex_view.limit_exceeded.connect(
+            lambda: self.status_label.setText(LATEX_LIMIT_MESSAGE)
+        )
 
     def show_result(
         self,
@@ -594,6 +602,9 @@ class FloatingResultPanel(QWidget):
         self._update_backend_label(selected_candidate)
         baseline_latex = selected_candidate.latex if selected_candidate else result.latex
         displayed_latex = baseline_latex if draft is None else draft
+        if len(displayed_latex) > MAX_LATEX_CHARS:
+            self.show_error(LATEX_LIMIT_MESSAGE, anchor)
+            return
         edited_draft = displayed_latex != baseline_latex
         blocker = QSignalBlocker(self.latex_view)
         self.latex_view.setPlainText(displayed_latex)
@@ -697,6 +708,9 @@ class FloatingResultPanel(QWidget):
         candidate = self._source_candidates.get(source)
         if candidate is None:
             return
+        if len(candidate.latex) > MAX_LATEX_CHARS:
+            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            return
         source_changed = source != self._active_source
         self._active_source = source
         button = self.local_result_button if source == "local" else self.ai_result_button
@@ -778,6 +792,9 @@ class FloatingResultPanel(QWidget):
         if self._result is None:
             return
         latex = self.latex_view.toPlainText()
+        if len(latex) > MAX_LATEX_CHARS:
+            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            return
         if not latex.strip():
             return
         try:
@@ -800,6 +817,10 @@ class FloatingResultPanel(QWidget):
     def _latex_edited(self) -> None:
         latex = self.latex_view.toPlainText()
         self._preview_request_id = None
+        if len(latex) > MAX_LATEX_CHARS:
+            self._preview_timer.stop()
+            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            return
         self.draft_changed.emit(latex)
         self._update_copy_buttons()
         if latex.strip():
@@ -837,6 +858,11 @@ class FloatingResultPanel(QWidget):
         candidate: RecognitionCandidate | None = None,
     ) -> None:
         self._preview_request_id = None
+        if len(latex) > MAX_LATEX_CHARS:
+            self._preview_timer.stop()
+            self.preview_message.setText(LATEX_LIMIT_MESSAGE)
+            self.preview_stack.setCurrentWidget(self.preview_message)
+            return
         self._preview_request_edited = edited
         self._preview_request_candidate = candidate
         if not latex.strip():
@@ -1040,6 +1066,8 @@ class FloatingFormulaAssistant(QObject):
         self.panel.source_changed.connect(self._result_source_changed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
+        self.settings_panel.session_preferences_changed.connect(self._apply_preferences)
+        self.settings_panel.settings_backend_changed.connect(self._replace_settings_store)
         self.settings_panel.ai_credential_changed.connect(
             self._cancel_active_recognition
         )
@@ -1107,8 +1135,8 @@ class FloatingFormulaAssistant(QObject):
             return
         try:
             self.panel.formula_preview.warmup()
-        except Exception:
-            logging.getLogger(__name__).exception("preview-warmup-failed")
+        except Exception as exc:
+            log_exception("preview-warmup-failed", exc)
 
     def shutdown(self) -> None:
         if self._shutdown:
@@ -1130,7 +1158,8 @@ class FloatingFormulaAssistant(QObject):
             ):
                 self._pending_update_install = (
                     update_download_worker.completed_path,
-                    update_download_worker.release,
+                    update_download_worker.completed_release
+                    or update_download_worker.release,
                 )
         if self._worker is not None:
             self._worker.cancel()
@@ -1192,20 +1221,47 @@ class FloatingFormulaAssistant(QObject):
             self.enter_floating_mode()
 
     def start_update_checks(self) -> None:
-        if self._shutdown:
+        if self._shutdown or not self.preferences.auto_check_updates:
             return
         if self._update_timer.isActive():
             return
         self._update_timer.start()
-        QTimer.singleShot(1500, lambda: self.check_for_updates(force=True))
+        QTimer.singleShot(1500, self.check_for_updates)
 
     def _restart_update_timer(self) -> None:
         if not self._shutdown and self._update_timer.isActive():
             self._update_timer.start()
 
+    @Slot(object)
+    def _replace_settings_store(self, settings: QSettings) -> None:
+        """Adopt a replacement only after the panel persisted through it."""
+
+        if settings.status() == QSettings.Status.NoError:
+            self.settings_store = settings
+
+    def _persist_update_check_time(self, timestamp: int | None) -> bool:
+        """Update the throttle only while the settings store is healthy."""
+
+        values = {} if timestamp is None else {"updates/last_check_utc": timestamp}
+        remove = ("updates/last_check_utc",) if timestamp is None else ()
+        try:
+            settings = write_settings_values(
+                self.settings_store,
+                values,
+                remove=remove,
+            )
+        except PreferencesSaveError:
+            logging.getLogger(__name__).warning("update-throttle-settings-unavailable")
+            return False
+        self.settings_store = settings
+        self.settings_panel.adopt_settings_backend(settings)
+        return True
+
     @Slot()
     def check_for_updates(self, *, manual: bool = False, force: bool = False) -> None:
         if self._shutdown:
+            return
+        if not manual and not self.preferences.auto_check_updates:
             return
         if (
             self._update_download_worker is not None
@@ -1218,7 +1274,10 @@ class FloatingFormulaAssistant(QObject):
                 self.settings_panel.set_update_status("正在检查更新…", checking=True)
             return
         now = int(time.time())
-        last_check = self.settings_store.value("updates/last_check_utc")
+        last_check = read_settings_value(
+            self.settings_store,
+            "updates/last_check_utc",
+        )
         if not should_check_for_updates(
             last_check,
             now_seconds=now,
@@ -1268,8 +1327,7 @@ class FloatingFormulaAssistant(QObject):
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
         self._restart_update_timer()
-        self.settings_store.setValue("updates/last_check_utc", int(time.time()))
-        self.settings_store.sync()
+        self._persist_update_check_time(int(time.time()))
         if manual:
             self.settings_panel.set_update_status(f"发现新版本 v{release.version}")
         previous_dialog = self._update_dialog
@@ -1296,8 +1354,7 @@ class FloatingFormulaAssistant(QObject):
         manual = manual or self._update_check_manual_requested
         self._update_check_manual_requested = False
         self._restart_update_timer()
-        self.settings_store.setValue("updates/last_check_utc", int(time.time()))
-        self.settings_store.sync()
+        self._persist_update_check_time(int(time.time()))
         if manual:
             self.settings_panel.set_update_status("已是最新版本")
 
@@ -1358,7 +1415,7 @@ class FloatingFormulaAssistant(QObject):
             )
         )
         worker.signals.finished.connect(
-            lambda path, selected=release, task=worker: self._update_downloaded(
+            lambda path, selected, task=worker: self._update_downloaded(
                 path, selected, task
             )
         )
@@ -1414,15 +1471,13 @@ class FloatingFormulaAssistant(QObject):
                 start_detached=QProcess.startDetached,
             )
         except Exception as exc:
+            log_exception("update-installer-launch-failed", exc)
             if self._shutdown:
                 self._reset_update_throttle_for_retry()
-                logging.getLogger(__name__).warning(
-                    "update-installer-launch-failed: %s", exc
-                )
             else:
                 self.manager = BackendManager()
             if dialog is not None and not self._shutdown:
-                dialog.show_error(f"安装包校验失败：{exc}")
+                dialog.show_error("无法校验或启动安装包，请重新下载后重试。")
             return False
         if not started:
             if self._shutdown:
@@ -1438,8 +1493,7 @@ class FloatingFormulaAssistant(QObject):
         return True
 
     def _reset_update_throttle_for_retry(self) -> None:
-        self.settings_store.remove("updates/last_check_utc")
-        self.settings_store.sync()
+        self._persist_update_check_time(None)
 
     @Slot(object, object)
     def _update_download_progress(
@@ -1559,6 +1613,10 @@ class FloatingFormulaAssistant(QObject):
     def _apply_preferences(self, preferences: FloatingPreferences) -> None:
         previous = self.preferences
         self.preferences = preferences
+        if not preferences.auto_check_updates:
+            self._update_timer.stop()
+        elif not previous.auto_check_updates:
+            self.start_update_checks()
         if (
             self._worker is not None
             and self._worker.ai_enabled
@@ -1629,8 +1687,10 @@ class FloatingFormulaAssistant(QObject):
         self._pending_error = None
         try:
             image = qimage_to_pil(pixmap.toImage())
-        except ValueError as exc:
-            self._recognition_failed(str(exc))
+        except Exception as exc:
+            log_exception("screenshot-conversion-failed", exc)
+            self._clear_pending_recognition()
+            self._recognition_failed("无法处理截图，请缩小选区后重试。")
             return
         if self._model_warmup_state == "warming":
             self._pending_recognition_image = image

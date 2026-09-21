@@ -14,8 +14,8 @@ FormulaSnip 现在固定使用 MathCraft OCR 0.3.1 的 CPU 公式识别路径。
 
 - 公式 profile 在可复用的 spawn 子进程中运行，避免原生推理故障直接拖垮 GUI；
 - 截图通过共享内存传输；
-- 首次使用需要联网下载约 112 MiB 模型，缓存完成后可以离线运行；
-- 发行包排除 MathCraft、RapidOCR 和 ONNX Runtime 示例目录中的可下载 `.onnx` 权重；
+- Windows 发行包内置锁定的 MathCraft 公式模型，首次使用可以离线运行；源码模式或损坏回退可能下载模型；
+- 发行包保留固定公式模型，排除其他 MathCraft、RapidOCR 和 ONNX Runtime 示例目录中的无用 `.onnx` 权重；
 - `rapidocr` 是 MathCraft 的运行依赖，不是 FormulaSnip 的独立识别引擎，打包时必须保留其代码与必要资源。
 
 ## 质量策略
@@ -31,4 +31,4 @@ FormulaSnip 现在固定使用 MathCraft OCR 0.3.1 的 CPU 公式识别路径。
 - 收集用户主动提供的错误原图和人工确认的正确 LaTeX；
 - 建立 100–300 个许可明确的冻结样本，覆盖分式、根式、积分、求和、矩阵、分段、上下标、希腊字母、低清晰度和长公式；
 - 报告字符串 exact、渲染等价、人工修正率、p50/p95 延迟和峰值内存；
-- 在干净 Windows 环境验证打包后的 MathCraft 子进程、首次模型下载和断网重试。
+- 在干净 Windows 环境验证打包后的 MathCraft 子进程、离线首次识别和模型损坏回退。

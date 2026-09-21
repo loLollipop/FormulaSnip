@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from importlib.util import find_spec
 from pathlib import Path
 from threading import Event
@@ -21,6 +23,7 @@ from formulasnip.recognition.quality import has_fatal_output_issue
 from formulasnip.runtime import configure_runtime
 
 _FORMULA_MODEL_ID = "mathcraft-formula-rec"
+_MODEL_VERIFICATION_CACHE_SCHEMA = 2
 
 
 def _sha256_file(path: Path) -> str:
@@ -38,11 +41,48 @@ def _model_lock_path() -> Path:
     return Path(__file__).resolve().parents[2] / "MODEL_ASSETS.json"
 
 
-def _verify_bundled_model_root(root: Path, lock_path: Path) -> str | None:
+def _model_verification_cache_path() -> Path:
+    local_data = os.environ.get("LOCALAPPDATA")
+    if local_data:
+        return Path(local_data) / "FormulaSnip" / "model-verification.json"
+    return Path.home() / ".formulasnip" / "model-verification.json"
+
+
+def _write_verification_cache(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _model_file_identity(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+    }
+
+
+def _verify_bundled_model_root(
+    root: Path,
+    lock_path: Path,
+    *,
+    cache_path: Path | None = None,
+) -> str | None:
     """Return a diagnostic when the immutable bundled formula model is damaged."""
 
     try:
-        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock_bytes = lock_path.read_bytes()
+        lock = json.loads(lock_bytes)
         if not isinstance(lock, dict):
             return "model lock root is not an object"
         if lock.get("model_id") != _FORMULA_MODEL_ID:
@@ -50,21 +90,39 @@ def _verify_bundled_model_root(root: Path, lock_path: Path) -> str | None:
         files = lock["files"]
         if not isinstance(files, list) or not files:
             return "model lock has no files"
-        model_dir = root / _FORMULA_MODEL_ID
+        model_root = root.resolve()
+        model_dir = model_root / _FORMULA_MODEL_ID
         expected = {str(item["path"]): item for item in files}
-        actual = {
-            path.relative_to(model_dir).as_posix()
-            for path in model_dir.rglob("*")
-            if path.is_file()
-        }
+        actual_paths = tuple(path for path in model_dir.rglob("*") if path.is_file())
+        actual = {path.relative_to(model_dir).as_posix() for path in actual_paths}
         if actual != set(expected):
             return "bundled model file set differs from the release lock"
+        metadata: dict[str, dict[str, int]] = {}
         for relative, item in expected.items():
             file_path = model_dir / relative
-            if file_path.stat().st_size != int(item["size"]):
+            identity = _model_file_identity(file_path)
+            if identity["size"] != int(item["size"]):
                 return f"bundled model size mismatch: {relative}"
+            metadata[relative] = identity
+
+        verification_cache = cache_path or _model_verification_cache_path()
+        cache_binding: dict[str, Any] = {
+            "schema_version": _MODEL_VERIFICATION_CACHE_SCHEMA,
+            "model_id": _FORMULA_MODEL_ID,
+            "model_root": str(model_dir.resolve()),
+            "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+            "files": metadata,
+        }
+        for relative, item in expected.items():
+            file_path = model_dir / relative
             if _sha256_file(file_path).casefold() != str(item["sha256"]).casefold():
                 return f"bundled model hash mismatch: {relative}"
+            if _model_file_identity(file_path) != metadata[relative]:
+                return f"bundled model changed during verification: {relative}"
+        # Diagnostic record only: user-writable metadata never substitutes for
+        # hashing, including when selecting a lightweight update package.
+        with suppress(OSError):
+            _write_verification_cache(verification_cache, cache_binding)
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return f"unable to verify bundled model: {exc}"
     return None

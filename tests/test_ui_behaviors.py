@@ -6,6 +6,7 @@ import os
 import re
 import time
 import weakref
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,822 @@ def _settings(tmp_path: Path) -> QSettings:
     settings = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
     settings.clear()
     return settings
+
+
+def test_latex_editor_rejects_paste_ime_and_programmatic_overflow() -> None:
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QInputMethodEvent
+
+    from formulasnip.core.limits import MAX_LATEX_CHARS
+    from formulasnip.ui.latex_editor import LatexEditor
+
+    _application()
+    editor = LatexEditor()
+    editor.setPlainText("x")
+    enormous = "x" * 5_000_000
+    editor.setPlainText(enormous)
+    mime = QMimeData()
+    mime.setText(enormous)
+    editor.insertFromMimeData(mime)
+    event = QInputMethodEvent()
+    event.setCommitString(enormous)
+    editor.inputMethodEvent(event)
+    editor.insertPlainText(enormous)
+    assert editor.toPlainText() == "x"
+    editor.setPlainText("x" * MAX_LATEX_CHARS)
+    cursor = editor.textCursor()
+    cursor.movePosition(cursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+    QTest.keyClicks(editor, "y")
+    assert len(editor.toPlainText()) == MAX_LATEX_CHARS
+    QTest.keyClick(editor, Qt.Key.Key_Backspace)
+    assert len(editor.toPlainText()) == MAX_LATEX_CHARS - 1
+    editor.selectAll()
+    editor.insertPlainText("z")
+    assert editor.toPlainText() == "z"
+    editor.close()
+
+
+def test_multimegabyte_candidates_never_reach_preview_or_mathml(monkeypatch: Any) -> None:
+    _application()
+    panel = FloatingResultPanel()
+    huge = "x" * 5_000_000
+    monkeypatch.setattr(panel.formula_preview, "set_formula",
+                        lambda *_: pytest.fail("preview called"))
+    monkeypatch.setattr(floating, "latex_to_mathml",
+                        lambda *_: pytest.fail("MathML called"))
+    monkeypatch.setattr(floating, "assess_latex",
+                        lambda *_: pytest.fail("quality called"))
+    panel.show_result(RecognitionResult(huge, "test", 0), QRect(0, 0, 70, 70))
+    assert panel.latex_view.toPlainText() == ""
+    panel._render_preview(huge, edited=True)
+    panel._result = RecognitionResult("x", "test", 0)
+    monkeypatch.setattr(panel.latex_view, "toPlainText", lambda: huge)
+    panel._latex_edited()
+    panel._copy_mathml()
+    assert not panel._preview_timer.isActive()
+    panel.close()
+
+
+@pytest.mark.parametrize("error", [QSettings.Status.AccessError, QSettings.Status.FormatError])
+def test_preferences_save_failure_is_visible_without_persisted_signal(
+    tmp_path: Path, error: Any
+) -> None:
+    _application()
+
+    class BrokenSettings(QSettings):
+        def status(self):
+            return error
+
+    settings = BrokenSettings(str(tmp_path / "broken.ini"), QSettings.Format.IniFormat)
+    panel = SettingsPanel(settings, FloatingPreferences())
+    spy = QSignalSpy(panel.preferences_changed)
+    panel.startup_checkbox.toggle()
+    panel.toggle_theme()
+    assert spy.count() == 0
+    assert "无法保存" in panel.settings_error_label.text()
+    with pytest.raises(settings_ui.PreferencesSaveError):
+        FloatingPreferences().save(settings)
+    panel.close()
+
+
+def test_corrupt_ini_loads_defaults_without_overwriting(tmp_path: Path) -> None:
+    path = tmp_path / "broken.ini"
+    original = b"[broken\nrecognition/ai_correction_enabled=true\n"
+    path.write_bytes(original)
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    assert FloatingPreferences.load(settings) == FloatingPreferences()
+    assert path.read_bytes() == original
+
+
+def test_corrupt_ini_user_changes_never_overwrite_original(tmp_path: Path) -> None:
+    _application()
+    path = tmp_path / "broken.ini"
+    original = b"[broken\nrecognition/ai_correction_enabled=true\n"
+    path.write_bytes(original)
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    preferences = FloatingPreferences.load(settings)
+    panel = SettingsPanel(settings, preferences)
+    panel.startup_checkbox.toggle()
+    panel.toggle_theme()
+    assert path.read_bytes() == original
+    assert "无法保存" in panel.settings_error_label.text()
+    panel.close()
+
+
+def test_update_throttle_never_overwrites_corrupt_settings(tmp_path: Path) -> None:
+    _application()
+    path = tmp_path / "broken.ini"
+    original = b"[broken\nupdates/last_check_utc=123\n"
+    path.write_bytes(original)
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assert settings.status() == QSettings.Status.FormatError
+    original_backend = assistant.settings_store
+    replacements = QSignalSpy(assistant.settings_panel.settings_backend_changed)
+
+    assistant.settings_panel.startup_checkbox.toggle()
+    assistant._update_not_available(manual=True)
+    assistant._reset_update_throttle_for_retry()
+
+    assert path.read_bytes() == original
+    assert settings.status() == QSettings.Status.FormatError
+    assert assistant.settings_store is original_backend
+    assert assistant.settings_panel._settings is original_backend
+    assert replacements.count() == 0
+    assistant.shutdown()
+
+
+def test_runtime_settings_corruption_is_detected_before_any_write(tmp_path: Path) -> None:
+    _application()
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences().save(settings)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    original = b"[broken\nupdates/last_check_utc=123\n"
+    path.write_bytes(original)
+
+    assert not assistant._persist_update_check_time(456)
+    assistant.settings_panel.startup_checkbox.toggle()
+
+    assert path.read_bytes() == original
+    assert "无法保存" in assistant.settings_panel.settings_error_label.text()
+    assert assistant.settings_panel._settings is settings
+    assistant.shutdown()
+
+
+def test_lazy_ini_parse_error_is_never_overwritten(tmp_path: Path) -> None:
+    _application()
+    path = tmp_path / "preferences.ini"
+    original = b"[unused-section]\nINVALID-LINE-WITHOUT-EQUALS\n"
+    path.write_bytes(original)
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+
+    assert FloatingPreferences.load(settings) == FloatingPreferences()
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assert not assistant._persist_update_check_time(123)
+    assistant.settings_panel.startup_checkbox.toggle()
+
+    assert path.read_bytes() == original
+    assert "无法保存" in assistant.settings_panel.settings_error_label.text()
+    assistant.shutdown()
+
+
+@pytest.mark.parametrize(
+    "custom_value",
+    (
+        "value=first\\\nsecond",
+        'value="first\nsecond"',
+        "value=left\u0085middle\u2028right\u2029end",
+    ),
+)
+def test_valid_qt_ini_multiline_and_unicode_values_remain_supported(
+    tmp_path: Path,
+    custom_value: str,
+) -> None:
+    path = tmp_path / "preferences.ini"
+    path.write_text(
+        "[updates]\nautomatic=false\n"
+        "[appearance] ; comment\ntheme=light\n"
+        f"[custom]\n{custom_value}\n",
+        encoding="utf-8",
+    )
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    preferences = FloatingPreferences.load(settings)
+
+    assert settings.status() == QSettings.Status.NoError
+    assert not preferences.auto_check_updates
+    assert preferences.result_theme == "light"
+    preferences.save(settings)
+
+
+def test_qt_serialized_escaped_quote_remains_valid_ini(tmp_path: Path) -> None:
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    settings.setValue("custom/value", 'double " quote')
+    settings.setValue("appearance/theme", "light")
+    settings.setValue("updates/automatic", False)
+    settings.sync()
+
+    preferences = FloatingPreferences.load(settings)
+
+    assert settings.status() == QSettings.Status.NoError
+    assert preferences.result_theme == "light"
+    assert not preferences.auto_check_updates
+    preferences.save(settings)
+
+
+def test_qt_format_error_comment_never_flushes_pending_cache(tmp_path: Path) -> None:
+    application = _application()
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    settings.setValue("appearance/theme", "light")
+    settings.sync()
+    settings.setValue("pending", "value")
+    original = b"[appearance]\ntheme=light\n#not-a-qt-comment\n"
+    path.write_bytes(original)
+
+    assert FloatingPreferences.load(settings) == FloatingPreferences()
+    assert path.read_bytes() == original
+    application.processEvents()
+    assert path.read_bytes() == original
+    del settings
+    gc.collect()
+    application.processEvents()
+    assert path.read_bytes() == original
+
+
+def test_healthy_alias_clears_shared_failed_ai_opt_in(tmp_path: Path) -> None:
+    _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    original = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    original.save(settings)
+    panel = SettingsPanel(settings, original)
+    stale_alias = QSettings(str(path), QSettings.Format.IniFormat)
+
+    backup = tmp_path / "settings-backup"
+    directory.rename(backup)
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    stale_alias.setValue("recognition/ai_correction_enabled", True)
+    stale_alias.sync()
+    assert stale_alias.status() != QSettings.Status.NoError
+
+    directory.unlink()
+    backup.rename(directory)
+    assert settings.status() == QSettings.Status.NoError
+    panel.toggle_theme()
+    stale_alias.sync()
+
+    assert not panel._save_failed
+    assert b"ai_correction_enabled=false" in path.read_bytes()
+    assert not FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    ).ai_correction_enabled
+    panel.close()
+
+
+def test_atomic_commit_has_no_failing_post_commit_sync(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    original = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    settings = original.save(settings)
+    real_replace = settings_ui.os.replace
+    committed = False
+
+    def commit_then_block(source: object, target: object) -> None:
+        nonlocal committed
+        real_replace(source, target)
+        if Path(target) == path:
+            committed = True
+
+    monkeypatch.setattr(settings_ui.os, "replace", commit_then_block)
+    enabled = replace(original, ai_correction_enabled=True)
+
+    saved = enabled.save(settings)
+
+    assert committed
+    assert saved.status() == QSettings.Status.NoError
+    assert FloatingPreferences.load(saved).ai_correction_enabled
+
+
+def test_dirty_access_error_backend_is_refused_without_flushing_cache(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences(ai_correction_enabled=False).save(settings)
+
+    path.unlink()
+    directory.rmdir()
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    settings.setValue("recognition/ai_correction_enabled", True)
+    settings.sync()
+    assert settings.status() == QSettings.Status.AccessError
+
+    directory.unlink()
+    directory.mkdir()
+    safe = b"[recognition]\nai_correction_enabled=false\n"
+    path.write_bytes(safe)
+    with pytest.raises(settings_ui.PreferencesSaveError):
+        settings_ui.write_settings_values(
+            settings,
+            {"updates/last_check_utc": 123},
+        )
+    assert path.read_bytes() == safe
+    _application().processEvents()
+    settings.sync()
+    assert path.read_bytes() == safe
+    assert not FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    ).ai_correction_enabled
+
+
+def test_read_known_format_error_drains_pending_cache(tmp_path: Path) -> None:
+    application = _application()
+    path = tmp_path / "preferences.ini"
+    original = b"[appearance]\ntheme=light\n#not-a-qt-comment\n"
+    path.write_bytes(original)
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    settings.allKeys()
+    assert settings.status() == QSettings.Status.FormatError
+    settings.setValue("pending", "queued-before-read")
+
+    assert settings_ui.read_settings_value(settings, "updates/last_check_utc") is None
+    application.processEvents()
+    assert path.read_bytes() == original
+    del settings
+    gc.collect()
+    application.processEvents()
+    assert path.read_bytes() == original
+
+
+def test_failed_protected_move_never_replaces_original(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences(result_theme="light").save(settings)
+    original = path.read_bytes()
+    real_replace = settings_ui.os.replace
+    failed = False
+
+    def fail_protected_move(
+        source: object,
+        target: object,
+    ) -> None:
+        nonlocal failed
+        if not failed and Path(target).suffix == ".protected":
+            failed = True
+            raise PermissionError("injected protected move failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(settings_ui.os, "replace", fail_protected_move)
+
+    with pytest.raises(settings_ui.PreferencesSaveError):
+        FloatingPreferences(result_theme="dark").save(settings)
+
+    assert failed
+    assert path.read_bytes() == original
+    _application().processEvents()
+    assert not FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    ).ai_correction_enabled
+
+
+def test_access_error_load_and_protection_failure_cannot_enable_ai(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    original = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    original.save(settings)
+
+    backup = tmp_path / "settings-backup"
+    directory.rename(backup)
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    settings.setValue("recognition/ai_correction_enabled", True)
+    settings.sync()
+    assert settings.status() == QSettings.Status.AccessError
+    directory.unlink()
+    backup.rename(directory)
+
+    real_replace = settings_ui.os.replace
+    failed = False
+
+    def fail_protected_move(source: object, target: object) -> None:
+        nonlocal failed
+        if not failed and Path(target).suffix == ".protected":
+            failed = True
+            raise PermissionError("injected protected move failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(settings_ui.os, "replace", fail_protected_move)
+
+    assert FloatingPreferences.load(settings) == FloatingPreferences()
+    application.processEvents()
+    settings.sync()
+    del settings
+    gc.collect()
+    application.processEvents()
+
+    assert failed
+    assert not FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    ).ai_correction_enabled
+
+
+def test_healthy_alias_transaction_failure_cannot_flush_stale_ai_opt_in(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    application = _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    healthy = QSettings(str(path), QSettings.Format.IniFormat)
+    original_preferences = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    healthy = original_preferences.save(healthy)
+    original = path.read_bytes()
+    stale = QSettings(str(path), QSettings.Format.IniFormat)
+
+    backup = tmp_path / "settings-backup"
+    directory.rename(backup)
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    stale.setValue("recognition/ai_correction_enabled", True)
+    stale.sync()
+    assert stale.status() == QSettings.Status.AccessError
+    directory.unlink()
+    backup.rename(directory)
+    assert healthy.status() == QSettings.Status.NoError
+
+    monkeypatch.setattr(
+        settings_ui.tempfile,
+        "mkstemp",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("injected transaction failure")
+        ),
+    )
+
+    with pytest.raises(settings_ui.PreferencesSaveError):
+        FloatingPreferences(result_theme="light").save(healthy)
+
+    application.processEvents()
+    stale.sync()
+    del stale
+    gc.collect()
+    application.processEvents()
+
+    recovery_files = list(directory.glob("preferences.ini.recovery*"))
+    assert any(candidate.read_bytes() == original for candidate in recovery_files)
+    monkeypatch.undo()
+    assert not FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    ).ai_correction_enabled
+
+
+def test_access_failure_then_corrupt_recovery_never_flushes_pending_values(
+    tmp_path: Path,
+) -> None:
+    _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences().save(settings)
+    panel = SettingsPanel(settings, FloatingPreferences())
+
+    path.unlink()
+    directory.rmdir()
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    panel.startup_checkbox.toggle()
+    assert "无法保存" in panel.settings_error_label.text()
+
+    directory.unlink()
+    directory.mkdir()
+    original = b"[unused-section]\nINVALID-LINE-WITHOUT-EQUALS\n"
+    path.write_bytes(original)
+    panel.toggle_theme()
+
+    assert path.read_bytes() == original
+    assert "无法保存" in panel.settings_error_label.text()
+    panel.close()
+
+
+def test_update_throttle_writes_and_clears_healthy_settings(tmp_path: Path) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    assistant = FloatingFormulaAssistant(settings=settings)
+
+    assistant._update_not_available(manual=False)
+    assert int(settings.value("updates/last_check_utc")) > 0
+    assistant._reset_update_throttle_for_retry()
+    assert settings.value("updates/last_check_utc") is None
+    assistant.shutdown()
+
+
+@pytest.mark.parametrize("fmt", ["GIF", "SVG", "PDF"])
+def test_disguised_logo_rejected_before_read(tmp_path: Path, monkeypatch: Any, fmt: str) -> None:
+    _application()
+    path = tmp_path / "伪装.png"
+    if fmt == "GIF":
+        Image.new("RGB", (4, 4)).save(path, format="GIF")
+    else:
+        path.write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'
+                         if fmt == "SVG" else b"%PDF-1.4\n%%EOF")
+    monkeypatch.setattr(settings_ui.QImageReader, "read",
+                        lambda *_: pytest.fail("disallowed decoder invoked"))
+    assert read_logo_image(str(path)) is None
+
+
+def test_invalid_logo_import_preserves_previous_selection(tmp_path: Path, monkeypatch: Any) -> None:
+    _application()
+    valid = tmp_path / "valid.png"
+    invalid = tmp_path / "invalid.png"
+    Image.new("RGB", (4, 4)).save(valid)
+    invalid.write_bytes(b"broken")
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences(logo_path=str(valid)))
+    monkeypatch.setattr(settings_ui.QFileDialog, "getOpenFileName",
+                        lambda *_: (str(invalid), ""))
+    panel.choose_logo()
+    assert panel._logo_path == str(valid.resolve())
+    assert panel.preferences.logo_path == str(valid)
+    panel.restore_default_logo()
+    assert panel.preferences.logo_path == ""
+    panel.close()
+
+
+@pytest.mark.parametrize("error", [OSError, MemoryError, RuntimeError])
+def test_capture_conversion_error_cleans_state_and_redacts(
+    tmp_path: Path, monkeypatch: Any, caplog: Any, error: Any
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    def fail(*_args):
+        raise error("SECRET_MARKER C:/private/image.png")
+    monkeypatch.setattr(floating, "qimage_to_pil", fail)
+    assistant._captured(QPixmap(2, 2))
+    assert assistant._worker is None
+    assert assistant._pending_recognition_image is None
+    assert assistant._last_image is None
+    assert not assistant.orb._busy
+    assert "SECRET_MARKER" not in caplog.text
+    assert "无法处理截图" in (assistant._pending_error or assistant.panel.preview_message.text())
+    assistant.shutdown()
+
+
+def test_preview_warmup_log_redacts_exception(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    def fail():
+        raise RuntimeError("SECRET_MARKER C:/private/user")
+    monkeypatch.setattr(assistant.panel.formula_preview, "warmup", fail)
+    assistant.start_preview_warmup()
+    assert "SECRET_MARKER" not in caplog.text
+    assert "C:/private" not in caplog.text
+    assistant.shutdown()
+
+
+def test_installer_exception_redacts_log_and_dialog(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    release = _update_release()
+    assistant._pending_update_install = (tmp_path / "setup.exe", release)
+    dialog = UpdateDialog("0.2.11", release)
+    assistant._update_dialog = dialog
+    def fail(*_args, **_kwargs):
+        raise OSError("SECRET_MARKER C:/private/user")
+    monkeypatch.setattr(floating, "launch_verified_installer", fail)
+    assert not assistant._try_launch_pending_installer(force=True)
+    assert "update-installer-launch-failed" in caplog.text
+    assert "SECRET_MARKER" not in caplog.text
+    assert "SECRET_MARKER" not in dialog.status_label.text()
+    assistant.shutdown()
+    dialog.close()
+
+
+@pytest.mark.parametrize("suffix,format_name", [(".png", "PNG"), (".jpg", "JPEG"),
+                                                (".jpeg", "JPEG"), (".webp", "WEBP"),
+                                                (".bmp", "BMP")])
+def test_allowed_logo_formats_remain_supported(tmp_path: Path, suffix, format_name) -> None:
+    _application()
+    path = tmp_path / ("公式 logo" + suffix)
+    Image.new("RGB", (4, 4)).save(path, format=format_name)
+    assert read_logo_image(str(path)) is not None
+
+
+def test_real_settings_access_error_does_not_raise_on_load(tmp_path: Path) -> None:
+    parent_file = tmp_path / "not-a-directory"
+    parent_file.write_text("keep", encoding="utf-8")
+    settings = QSettings(str(parent_file / "settings.ini"), QSettings.Format.IniFormat)
+    preferences = FloatingPreferences.load(settings)
+    with pytest.raises(settings_ui.PreferencesSaveError):
+        preferences.save(settings)
+    assert parent_file.read_text(encoding="utf-8") == "keep"
+
+
+def test_failed_ai_enable_stays_disabled_when_settings_storage_recovers(
+    tmp_path: Path,
+) -> None:
+    _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    original = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    original.save(settings)
+    panel = SettingsPanel(
+        settings,
+        original,
+        api_key_store=FakeApiKeyStore("unit-test-token"),
+    )
+
+    path.unlink()
+    directory.rmdir()
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    panel.ai_correction_toggle.setChecked(True)
+    panel._save_ai_configuration()
+
+    assert not panel.preferences.ai_correction_enabled
+    assert "无法保存" in panel.settings_error_label.text()
+
+    directory.unlink()
+    directory.mkdir()
+    settings.sync()
+    panel.close()
+    del panel
+    del settings
+    gc.collect()
+    reloaded = FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    )
+    assert not reloaded.ai_correction_enabled
+
+
+def test_lazy_corrupt_ini_cannot_persist_failed_ai_opt_in(tmp_path: Path) -> None:
+    _application()
+    path = tmp_path / "preferences.ini"
+    settings = QSettings(str(path), QSettings.Format.IniFormat)
+    original_preferences = FloatingPreferences(
+        ai_correction_enabled=False,
+        ai_base_url="https://gateway.example/v1",
+        ai_model="vision-model",
+    )
+    original_preferences.save(settings)
+    panel = SettingsPanel(
+        settings,
+        original_preferences,
+        api_key_store=FakeApiKeyStore("unit-test-token"),
+    )
+    original = path.read_bytes() + b"\n[unused-section]\nINVALID-LINE-WITHOUT-EQUALS\n"
+    path.write_bytes(original)
+
+    panel.ai_correction_toggle.setChecked(True)
+    panel._save_ai_configuration()
+
+    assert not panel.preferences.ai_correction_enabled
+    assert path.read_bytes() == original
+    reloaded = FloatingPreferences.load(
+        QSettings(str(path), QSettings.Format.IniFormat)
+    )
+    assert not reloaded.ai_correction_enabled
+    panel.close()
+
+
+def test_assistant_adopts_recovered_backend_for_update_throttle(tmp_path: Path) -> None:
+    _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    original_backend = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences().save(original_backend)
+    assistant = FloatingFormulaAssistant(settings=original_backend)
+
+    path.unlink()
+    directory.rmdir()
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    assistant.settings_panel.startup_checkbox.toggle()
+    assert assistant.settings_store is original_backend
+
+    directory.unlink()
+    directory.mkdir()
+    assistant.settings_panel.auto_update_toggle.toggle()
+
+    recovered_backend = assistant.settings_panel._settings
+    assert recovered_backend.status() == QSettings.Status.NoError
+    assert recovered_backend is assistant.settings_store
+    assert recovered_backend is not original_backend
+    assert assistant._persist_update_check_time(123)
+    assert int(recovered_backend.value("updates/last_check_utc")) == 123
+    assert assistant._persist_update_check_time(None)
+    assert recovered_backend.value("updates/last_check_utc") is None
+    assistant.shutdown()
+
+
+def test_panel_recovers_shared_throttle_access_error_on_first_change(
+    tmp_path: Path,
+) -> None:
+    _application()
+    directory = tmp_path / "settings"
+    directory.mkdir()
+    path = directory / "preferences.ini"
+    original_backend = QSettings(str(path), QSettings.Format.IniFormat)
+    FloatingPreferences().save(original_backend)
+    assistant = FloatingFormulaAssistant(settings=original_backend)
+    replacements = QSignalSpy(assistant.settings_panel.settings_backend_changed)
+    changes = QSignalSpy(assistant.settings_panel.preferences_changed)
+
+    path.unlink()
+    directory.rmdir()
+    directory.write_text("temporarily blocked", encoding="utf-8")
+    assert not assistant._persist_update_check_time(123)
+    assert not assistant.settings_panel._save_failed
+
+    directory.unlink()
+    directory.mkdir()
+    assistant.settings_panel.startup_checkbox.toggle()
+
+    assert replacements.count() == 1
+    assert changes.count() == 1
+    assert assistant.settings_store is assistant.settings_panel._settings
+    assert assistant.settings_store is not original_backend
+    assert assistant.settings_store.status() == QSettings.Status.NoError
+    assistant.shutdown()
+
+
+def test_ai_configuration_save_error_does_not_claim_success(tmp_path: Path) -> None:
+    _application()
+    class BrokenSettings(QSettings):
+        def status(self):
+            return QSettings.Status.AccessError
+
+    settings = BrokenSettings(str(tmp_path / "failure.ini"), QSettings.Format.IniFormat)
+    panel = SettingsPanel(settings, FloatingPreferences(),
+                          api_key_store=FakeApiKeyStore("unit-test-token"))
+    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_base_url_input.setText("https://gateway.example/v1")
+    panel.ai_model_combo.addItem("vision-model")
+    panel.ai_model_combo.setCurrentIndex(0)
+    changes = QSignalSpy(panel.preferences_changed)
+    panel._save_ai_configuration()
+    assert changes.count() == 0
+    assert "无法保存" in panel.ai_connection_status_label.text()
+    assert not panel.preferences.ai_correction_enabled
+    assert not panel.ai_correction_toggle.isChecked()
+    assert not panel.ai_configuration_widget.isVisible()
+    panel.close()
+
+
+def test_mathml_and_mathjax_reject_large_input_before_conversion(monkeypatch: Any) -> None:
+    from latex2mathml import converter
+
+    from formulasnip.core.latex import latex_to_mathml
+    from formulasnip.core.preview import build_mathjax_html, build_mathjax_update_script
+
+    monkeypatch.setattr(converter, "convert", lambda *_: pytest.fail("conversion reached"))
+    huge = "x" * 5_000_000
+    with pytest.raises(FormulaSnipError):
+        latex_to_mathml(huge)
+    for builder in (build_mathjax_html, build_mathjax_update_script):
+        with pytest.raises(ValueError):
+            builder(huge, 1)
+
+
+def test_auto_update_toggle_stops_and_restarts_checks(tmp_path: Path, monkeypatch: Any) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    FloatingPreferences(auto_check_updates=False).save(settings)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    scheduled, started = [], []
+    monkeypatch.setattr(floating.QTimer, "singleShot", lambda _ms, fn: scheduled.append(fn))
+    monkeypatch.setattr(assistant._thread_pool, "start", started.append)
+    assistant.start_update_checks()
+    assistant.check_for_updates()
+    assert not scheduled and not started
+    assistant.settings_panel.auto_update_toggle.setChecked(True)
+    assert assistant._update_timer.isActive() and len(scheduled) == 1
+    assistant.settings_panel.auto_update_toggle.setChecked(False)
+    scheduled[0]()
+    assert not assistant._update_timer.isActive() and not started
+    assistant.check_for_updates(manual=True)
+    assert len(started) == 1
+    assistant.shutdown()
 
 
 def _update_release(notes: str = "") -> ReleaseInfo:
@@ -1229,7 +2046,9 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
 
     panel.ai_save_config_button.click()
     assert panel.preferences.ai_correction_enabled is True
-    assert settings.value("recognition/ai_correction_enabled") is True
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), False
+    ) is True
     assert settings.value("recognition/ai_base_url") == "https://gateway.example/v1"
     assert settings.value("recognition/ai_model") == "vision-b"
     assert panel.ai_connection_status_label.text() == "配置已保存并生效"
@@ -1246,7 +2065,9 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
     assert panel.ai_correction_toggle.isChecked() is False
     assert panel.ai_configuration_widget.isHidden()
     assert panel.preferences.ai_correction_enabled is False
-    assert settings.value("recognition/ai_correction_enabled") is False
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    ) is False
     assert preference_changes.count() == 2
     panel.hide()
 
@@ -1279,7 +2100,9 @@ def test_invalid_ai_draft_does_not_replace_saved_configuration(
     assert panel.preferences == saved
     assert settings.value("recognition/ai_base_url") == "https://saved.example/v1"
     assert settings.value("recognition/ai_model") == "saved-model"
-    assert settings.value("recognition/ai_correction_enabled") is True
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), False
+    ) is True
     assert panel.ai_connection_status_label.property("error") is True
     panel.hide()
 
@@ -1400,7 +2223,9 @@ def test_unsafe_ai_provider_url_is_not_persisted(tmp_path: Path) -> None:
     ).save(settings)
 
     assert settings.value("recognition/ai_base_url") == ""
-    assert settings.value("recognition/ai_correction_enabled") is False
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    ) is False
 
 
 def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path) -> None:
@@ -1413,7 +2238,9 @@ def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path)
 
     assert loaded.ai_correction_enabled is False
     assert loaded.ai_base_url == ""
-    assert settings.value("recognition/ai_correction_enabled") is False
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    ) is False
 
 
 def test_stale_model_list_does_not_overwrite_new_provider_config(
@@ -1969,7 +2796,7 @@ def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
     panel.hide()
 
 
-def test_startup_update_check_bypasses_background_throttle(
+def test_startup_update_check_respects_background_throttle(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     _application()
@@ -1991,8 +2818,8 @@ def test_startup_update_check_bypasses_background_throttle(
 
     scheduled[0]()
 
-    assert len(started) == 1
-    assert assistant._update_check_worker is started[0]
+    assert started == []
+    assert assistant._update_check_worker is None
     assert assistant.settings_panel.update_status_label.text() == "稳定通道"
     assert assistant.settings_panel.check_update_button.isEnabled()
     assistant.shutdown()
@@ -2473,7 +3300,9 @@ def test_draft_provider_change_disables_ai_before_replacement_key_capture(
         "https://provider-b.example/v1"
     )
     assert assistant.preferences.ai_correction_enabled is False
-    assert settings.value("recognition/ai_correction_enabled") is False
+    assert settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    ) is False
 
     assistant.settings_panel.ai_api_key_input.setText("provider-b-key")
     assistant.settings_panel.ai_save_key_button.click()
@@ -2525,7 +3354,7 @@ def test_capture_conversion_failure_clears_qimage_before_showing_error(
 
     assert assistant._last_image is None
     assert assistant._worker is None
-    assert "转换失败" in assistant.panel.preview_message.text()
+    assert "无法处理截图" in assistant.panel.preview_message.text()
     assistant.panel.close()
     assert assistant._last_image is None
     assistant.orb.close()

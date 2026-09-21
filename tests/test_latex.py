@@ -54,6 +54,23 @@ def test_latex_to_mathml_returns_math_root() -> None:
 
 
 @pytest.mark.parametrize(
+    "latex",
+    [
+        r"\def\A{{\B}{\B}}\def\B{x}\A",
+        r"\def0{{1}{1}}\def1{x}0",
+        r"\def_{{1}{1}}\def1{x}_",
+        r"\defΩ{{1}{1}}\def1{x}Ω",
+        r"\newcommand{\A}{x}\A",
+        r"\newenvironment{A}{x}{y}\begin{A}\end{A}",
+        r"\DeclareMathOperator{\foo}{foo}\foo",
+    ],
+)
+def test_latex_to_mathml_rejects_custom_macro_definitions(latex: str) -> None:
+    with pytest.raises(FormulaSnipError, match="自定义宏"):
+        latex_to_mathml(latex)
+
+
+@pytest.mark.parametrize(
     ("local", "ai"),
     (
         (r"  { x  +  y } ", r"x+y"),

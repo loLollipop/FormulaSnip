@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
 from typing import TypeVar
@@ -456,7 +457,7 @@ class UpdateCheckWorker(QRunnable):
 
 class UpdateDownloadSignals(QObject):
     progress = Signal(object, object)
-    finished = Signal(object)
+    finished = Signal(object, object)
     failed = Signal(str)
 
 
@@ -468,6 +469,7 @@ class UpdateDownloadWorker(QRunnable):
         self.signals = UpdateDownloadSignals()
         self._cancellation = UpdateCancellation()
         self.completed_path: Path | None = None
+        self.completed_release: ReleaseInfo | None = None
 
     def cancel(self) -> None:
         self._cancellation.cancel()
@@ -483,6 +485,7 @@ class UpdateDownloadWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
+        completed_release = self.release
         try:
             path = _run_abandonable(
                 lambda: download_installer(
@@ -497,12 +500,37 @@ class UpdateDownloadWorker(QRunnable):
         except UpdateCancelled:
             return
         except Exception as exc:
-            message = str(exc).strip() or "下载更新失败。"
-            self._publish(lambda: self.signals.failed.emit(message))
-            return
+            fallback_asset = self.release.fallback_asset
+            if fallback_asset is None:
+                message = str(exc).strip() or "下载更新失败。"
+                self._publish(lambda: self.signals.failed.emit(message))
+                return
+            completed_release = replace(
+                self.release,
+                asset=fallback_asset,
+                fallback_asset=None,
+            )
+            try:
+                path = _run_abandonable(
+                    lambda: download_installer(
+                        completed_release.asset,
+                        self.cache_directory,
+                        progress=self._publish_progress,
+                        cancel_event=self._cancellation,
+                    ),
+                    self._cancellation,
+                    thread_name="FormulaSnip-UpdateDownload-Fallback",
+                )
+            except UpdateCancelled:
+                return
+            except Exception as fallback_exc:
+                message = str(fallback_exc).strip() or "下载更新失败。"
+                self._publish(lambda: self.signals.failed.emit(message))
+                return
 
         def publish_finished() -> None:
             self.completed_path = path
-            self.signals.finished.emit(path)
+            self.completed_release = completed_release
+            self.signals.finished.emit(path, completed_release)
 
         self._publish(publish_finished)

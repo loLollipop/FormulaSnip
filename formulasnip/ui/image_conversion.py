@@ -22,10 +22,12 @@ def qimage_to_pil(image: QImage) -> Image.Image:
     buffer = QBuffer()
     if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
         raise ValueError("无法准备图片数据。")
-    if not image.save(buffer, "PNG"):
-        raise ValueError("无法转换公式图片。")
-    data = bytes(buffer.data())
-    buffer.close()
-    pil_image = Image.open(BytesIO(data))
-    pil_image.load()
-    return pil_image.convert("RGB")
+    try:
+        if not image.save(buffer, "PNG"):
+            raise ValueError("无法转换公式图片。")
+        data = bytes(buffer.data())
+    finally:
+        buffer.close()
+    with Image.open(BytesIO(data)) as pil_image:
+        pil_image.load()
+        return pil_image.convert("RGB")

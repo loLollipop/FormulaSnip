@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+import tempfile
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import RLock
 
 from PySide6.QtCore import (
     Property,
@@ -89,6 +94,338 @@ MAX_LOGO_BYTES = 12 * 1024 * 1024
 MAX_LOGO_SIDE = 4096
 MAX_LOGO_PIXELS = 16_000_000
 LOGO_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+SETTINGS_ERROR_MESSAGE = "无法保存设置，请检查可用空间和访问权限后重试。"
+_SETTINGS_IO_LOCK = RLock()
+
+
+class PreferencesSaveError(RuntimeError):
+    """Settings did not reach persistent storage; never report a saved state."""
+
+    def __init__(self, message: str, *, format_error: bool = False) -> None:
+        super().__init__(message)
+        self.format_error = format_error
+
+
+@contextmanager
+def _isolated_ini_reader(content: bytes) -> Iterator[QSettings]:
+    """Parse INI bytes with Qt without touching the live QSettings cache."""
+
+    temporary_path: Path | None = None
+    reader: QSettings | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="formulasnip-settings-read-",
+            suffix=".ini",
+        )
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        temporary_path.write_bytes(content)
+        reader = QSettings(str(temporary_path), QSettings.Format.IniFormat)
+        reader.allKeys()
+        if reader.status() != QSettings.Status.NoError:
+            raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE, format_error=True)
+        yield reader
+    except PreferencesSaveError:
+        raise
+    except OSError as exc:
+        raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE) from exc
+    finally:
+        if reader is not None:
+            del reader
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink()
+
+
+def _quiesce_ini_cache(
+    path: Path,
+    original: bytes,
+    *,
+    originally_existed: bool,
+    canonical_values: Mapping[str, object],
+) -> None:
+    """Drain Qt's shared pending cache while the exact file is protected."""
+
+    backup_path: Path | None = None
+    original_moved = False
+    working_created = False
+    cache_dirtied = False
+    cache_drained = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, backup_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".protected",
+            dir=path.parent,
+        )
+        os.close(descriptor)
+        backup_path = Path(backup_name)
+        current_exists = path.exists()
+        current = path.read_bytes() if current_exists else b""
+        if current_exists != originally_existed or current != original:
+            raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+        if originally_existed:
+            os.replace(path, backup_path)
+            original_moved = True
+        path.write_bytes(b"")
+        working_created = True
+        cache_dirtied = True
+        for _attempt in range(2):
+            cache = QSettings(str(path), QSettings.Format.IniFormat)
+            cache.clear()
+            for key, value in canonical_values.items():
+                cache.setValue(key, value)
+            cache.sync()
+            cache_drained = cache.status() == QSettings.Status.NoError
+            del cache
+            if cache_drained:
+                break
+        if not cache_drained:
+            raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+        path.unlink(missing_ok=True)
+        working_created = False
+        if originally_existed:
+            assert backup_path is not None
+            os.replace(backup_path, path)
+            backup_path = None
+            original_moved = False
+    except PreferencesSaveError:
+        raise
+    except OSError as exc:
+        raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE) from exc
+    finally:
+        if working_created and (not cache_dirtied or cache_drained):
+            with suppress(OSError):
+                path.unlink()
+        if original_moved and (not cache_dirtied or cache_drained):
+            assert backup_path is not None
+            with suppress(OSError):
+                os.replace(backup_path, path)
+        elif not original_moved and backup_path is not None:
+            # Only an unused mkstemp placeholder can exist in this branch.
+            with suppress(OSError):
+                backup_path.unlink()
+
+
+def _protect_ini_from_pending_cache(settings: QSettings) -> None:
+    """Preserve disk bytes across Qt's delayed auto-sync of pending values."""
+
+    if type(settings) is not QSettings or settings.format() != QSettings.Format.IniFormat:
+        return
+    path = Path(settings.fileName())
+    original: bytes | None = None
+    try:
+        if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+            raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+        original = path.read_bytes()
+        canonical_values: dict[str, object] = {
+            "recognition/ai_correction_enabled": False
+        }
+        with suppress(PreferencesSaveError), _isolated_ini_reader(original) as reader:
+            canonical_values = {
+                key: reader.value(key) for key in reader.allKeys()
+            }
+            canonical_values.setdefault(
+                "recognition/ai_correction_enabled",
+                False,
+            )
+        _quiesce_ini_cache(
+            path,
+            original,
+            originally_existed=True,
+            canonical_values=canonical_values,
+        )
+    except (OSError, PreferencesSaveError):
+        if original is not None:
+            for suffix in (".recovery", ".recovery.1", ".recovery.2"):
+                recovery_path = path.with_name(f"{path.name}{suffix}")
+                try:
+                    with recovery_path.open("xb") as stream:
+                        stream.write(original)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    break
+                except FileExistsError:
+                    continue
+                except OSError:
+                    break
+        # If the filesystem cannot host the protected drain, replace any queued
+        # opt-in in Qt's shared cache with the privacy-safe state. A later Qt
+        # auto-sync may normalize the file, but it cannot silently enable upload.
+        settings.setValue("recognition/ai_correction_enabled", False)
+
+
+def _validated_ini_bytes(settings: QSettings) -> tuple[Path, bytes, bool]:
+    """Read an INI file and validate it with an isolated real Qt parser."""
+
+    path = Path(settings.fileName())
+    try:
+        existed = path.exists()
+        if not existed:
+            return path, b"", False
+        if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+            raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE, format_error=True)
+        content = path.read_bytes()
+        content.decode("utf-8-sig")
+    except PreferencesSaveError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE, format_error=True) from exc
+    with _isolated_ini_reader(content):
+        pass
+    return path, content, True
+
+
+def _settings_source_has_format_error(settings: QSettings) -> bool:
+    if settings.status() == QSettings.Status.FormatError:
+        with _SETTINGS_IO_LOCK:
+            _protect_ini_from_pending_cache(settings)
+        return True
+    if type(settings) is QSettings and settings.format() == QSettings.Format.IniFormat:
+        try:
+            _validated_ini_bytes(settings)
+        except PreferencesSaveError as exc:
+            if exc.format_error:
+                with _SETTINGS_IO_LOCK:
+                    _protect_ini_from_pending_cache(settings)
+            return exc.format_error
+    return False
+
+
+def write_settings_values(
+    settings: QSettings,
+    values: Mapping[str, object],
+    *,
+    remove: Iterable[str] = (),
+) -> QSettings:
+    """Persist settings, using an isolated atomic transaction for real INI stores."""
+
+    if type(settings) is QSettings and settings.format() == QSettings.Format.IniFormat:
+        with _SETTINGS_IO_LOCK:
+            if settings.status() != QSettings.Status.NoError:
+                _protect_ini_from_pending_cache(settings)
+                raise PreferencesSaveError(
+                    SETTINGS_ERROR_MESSAGE,
+                    format_error=settings.status() == QSettings.Status.FormatError,
+                )
+            try:
+                path, original, originally_existed = _validated_ini_bytes(settings)
+            except PreferencesSaveError:
+                _protect_ini_from_pending_cache(settings)
+                raise
+            temporary_path: Path | None = None
+            temporary_settings: QSettings | None = None
+            original_values: dict[str, object] = {}
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=f".{path.name}.",
+                    suffix=".tmp",
+                    dir=path.parent,
+                )
+                os.close(descriptor)
+                temporary_path = Path(temporary_name)
+                temporary_path.write_bytes(original)
+                temporary_settings = QSettings(
+                    str(temporary_path), QSettings.Format.IniFormat
+                )
+                temporary_settings.allKeys()
+                if temporary_settings.status() != QSettings.Status.NoError:
+                    raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE, format_error=True)
+                original_values = {
+                    key: temporary_settings.value(key)
+                    for key in temporary_settings.allKeys()
+                }
+                for key in remove:
+                    temporary_settings.remove(key)
+                for key, value in values.items():
+                    temporary_settings.setValue(key, value)
+                temporary_settings.sync()
+                if temporary_settings.status() != QSettings.Status.NoError:
+                    raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+                temporary_settings.allKeys()
+                del temporary_settings
+                temporary_settings = None
+                _validated_ini_bytes(
+                    QSettings(str(temporary_path), QSettings.Format.IniFormat)
+                )
+                current_exists = path.exists()
+                current = path.read_bytes() if current_exists else b""
+                if current_exists != originally_existed or current != original:
+                    raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+                _quiesce_ini_cache(
+                    path,
+                    original,
+                    originally_existed=originally_existed,
+                    canonical_values=original_values,
+                )
+                current_exists = path.exists()
+                current = path.read_bytes() if current_exists else b""
+                if current_exists != originally_existed or current != original:
+                    raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE)
+                os.replace(temporary_path, path)
+                temporary_path = None
+            except PreferencesSaveError:
+                _protect_ini_from_pending_cache(settings)
+                raise
+            except OSError as exc:
+                _protect_ini_from_pending_cache(settings)
+                raise PreferencesSaveError(SETTINGS_ERROR_MESSAGE) from exc
+            finally:
+                if temporary_settings is not None:
+                    del temporary_settings
+                if temporary_path is not None:
+                    with suppress(OSError):
+                        temporary_path.unlink()
+            # Cache reconciliation finished before the only commit. Nothing that
+            # can fail or queue another write runs after the atomic replacement.
+            return QSettings(str(path), QSettings.Format.IniFormat)
+
+    settings.sync()
+    if settings.status() != QSettings.Status.NoError:
+        raise PreferencesSaveError(
+            SETTINGS_ERROR_MESSAGE,
+            format_error=settings.status() == QSettings.Status.FormatError,
+        )
+    for key in remove:
+        settings.remove(key)
+    for key, value in values.items():
+        settings.setValue(key, value)
+    settings.sync()
+    if settings.status() != QSettings.Status.NoError:
+        raise PreferencesSaveError(
+            SETTINGS_ERROR_MESSAGE,
+            format_error=settings.status() == QSettings.Status.FormatError,
+        )
+    return settings
+
+
+def read_settings_value(
+    settings: QSettings,
+    key: str,
+    default: object = None,
+) -> object:
+    """Read one value without flushing a live INI object's pending cache."""
+
+    if type(settings) is QSettings and settings.format() == QSettings.Format.IniFormat:
+        with _SETTINGS_IO_LOCK:
+            if settings.status() != QSettings.Status.NoError:
+                _protect_ini_from_pending_cache(settings)
+                return default
+            try:
+                _path, content, _existed = _validated_ini_bytes(settings)
+                with _isolated_ini_reader(content) as reader:
+                    return reader.value(key, default)
+            except PreferencesSaveError as exc:
+                if exc.format_error:
+                    _protect_ini_from_pending_cache(settings)
+                return default
+    settings.sync()
+    if settings.status() != QSettings.Status.NoError:
+        return default
+    return settings.value(key, default)
+
+
 GITHUB_MARK_PATH = (
     "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59"
     ".4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94"
@@ -187,6 +524,14 @@ def read_logo_image(path: object, target_size: int = 40) -> QImage | None:
     reader = QImageReader(str(candidate))
     reader.setAutoTransform(True)
     reader.setDecideFormatFromContent(True)
+    expected_format = candidate.suffix.lower().lstrip(".")
+    if expected_format == "jpg":
+        expected_format = "jpeg"
+    actual_format = bytes(reader.format()).decode("ascii", errors="replace").lower()
+    if actual_format not in {"png", "jpeg", "webp", "bmp"}:
+        return None
+    if actual_format != expected_format:
+        return None
     size = reader.size()
     if not size.isValid():
         return None
@@ -214,6 +559,7 @@ class FloatingPreferences:
     ai_correction_enabled: bool = False
     ai_base_url: str = ""
     ai_model: str = ""
+    auto_check_updates: bool = True
 
     @property
     def effective_ring_color(self) -> str:
@@ -232,18 +578,54 @@ class FloatingPreferences:
 
     @classmethod
     def load(cls, settings: QSettings) -> FloatingPreferences:
-        legacy_orb = _choice(settings.value("appearance/orb_color"), ORB_COLORS, "blue")
+        if _settings_source_has_format_error(settings):
+            # Do not delete or rewrite a damaged INI/native store at startup.
+            return cls()
+        if type(settings) is QSettings and settings.format() == QSettings.Format.IniFormat:
+            with _SETTINGS_IO_LOCK:
+                if settings.status() == QSettings.Status.AccessError:
+                    _protect_ini_from_pending_cache(settings)
+                    return cls()
+                path = Path(settings.fileName())
+                if not path.exists():
+                    # Preserve the conventional QSettings API for a newly created
+                    # store while there is no existing file that could be damaged.
+                    settings.sync()
+                    if settings.status() != QSettings.Status.NoError:
+                        return cls()
+                try:
+                    _path, content, _existed = _validated_ini_bytes(settings)
+                    with _isolated_ini_reader(content) as reader:
+                        stored_values = {
+                            key: reader.value(key) for key in reader.allKeys()
+                        }
+                except PreferencesSaveError:
+                    return cls()
+
+            def stored_value(key: str, default: object = None) -> object:
+                return stored_values.get(key, default)
+
+        else:
+            settings.sync()
+            settings.allKeys()
+            if settings.status() != QSettings.Status.NoError:
+                return cls()
+
+            def stored_value(key: str, default: object = None) -> object:
+                return settings.value(key, default)
+
+        legacy_orb = _choice(stored_value("appearance/orb_color"), ORB_COLORS, "blue")
         legacy_theme = _choice(
-            settings.value("appearance/result_theme"), RESULT_THEMES, "dark"
+            stored_value("appearance/result_theme"), RESULT_THEMES, "dark"
         )
-        theme = _choice(settings.value("appearance/theme"), RESULT_THEMES, legacy_theme)
-        stored_ring = settings.value("appearance/ring_color")
+        theme = _choice(stored_value("appearance/theme"), RESULT_THEMES, legacy_theme)
+        stored_ring = stored_value("appearance/ring_color")
         ring = (
             normalize_hex_color(stored_ring)
             if isinstance(stored_ring, str)
             else RING_PRESETS[legacy_orb]
         )
-        stored_logo = settings.value("appearance/logo_path")
+        stored_logo = stored_value("appearance/logo_path")
         logo = ""
         if isinstance(stored_logo, str) and read_logo_image(stored_logo) is not None:
             try:
@@ -251,35 +633,43 @@ class FloatingPreferences:
             except OSError:
                 logo = ""
         recognition_mode = "mathcraft"
-        if settings.value("recognition/mode") != recognition_mode:
-            settings.setValue("recognition/mode", recognition_mode)
-            settings.sync()
-        stored_ai_base_url = settings.value("recognition/ai_base_url")
-        stored_ai_model = settings.value("recognition/ai_model")
+        stored_recognition_mode = stored_value("recognition/mode")
+        stored_ai_base_url = stored_value("recognition/ai_base_url")
+        stored_ai_model = stored_value("recognition/ai_model")
         ai_base_url, base_url_valid = _stored_ai_base_url(stored_ai_base_url)
         ai_model, model_valid = _stored_ai_model(stored_ai_model)
         ai_correction_enabled = _boolean(
-            settings.value("recognition/ai_correction_enabled"), False
+            stored_value("recognition/ai_correction_enabled"), False
         )
         if ai_correction_enabled and not (base_url_valid and model_valid):
             ai_correction_enabled = False
-            settings.setValue("recognition/ai_correction_enabled", False)
-            settings.sync()
-        return cls(
+        preferences = cls(
             recognition_mode=recognition_mode,
             orb_color=_preset_name(ring),
             result_theme=theme,
             show_settings_on_startup=_boolean(
-                settings.value("window/show_settings_on_startup"), True
+                stored_value("window/show_settings_on_startup"), True
             ),
             ring_color=ring,
             logo_path=logo,
             ai_correction_enabled=ai_correction_enabled,
             ai_base_url=ai_base_url,
             ai_model=ai_model,
+            auto_check_updates=_boolean(stored_value("updates/automatic"), True),
         )
+        migrations: dict[str, object] = {}
+        if stored_recognition_mode != recognition_mode:
+            migrations["recognition/mode"] = recognition_mode
+        if _boolean(
+            stored_value("recognition/ai_correction_enabled"), False
+        ) and not ai_correction_enabled:
+            migrations["recognition/ai_correction_enabled"] = False
+        if migrations:
+            with suppress(PreferencesSaveError):
+                write_settings_values(settings, migrations)
+        return preferences
 
-    def save(self, settings: QSettings) -> None:
+    def save(self, settings: QSettings) -> QSettings:
         ring = self.effective_ring_color
         ai_base_url = ""
         ai_model = ""
@@ -297,21 +687,34 @@ class FloatingPreferences:
                 ai_base_url = validate_ai_base_url(self.ai_base_url)
             except AICorrectionError:
                 ai_base_url = ""
-        settings.setValue("recognition/mode", "mathcraft")
-        settings.setValue("appearance/ring_color", ring)
-        settings.setValue("appearance/theme", self.result_theme)
-        settings.setValue("appearance/logo_path", self.effective_logo_path)
-        settings.setValue("window/show_settings_on_startup", self.show_settings_on_startup)
-        settings.setValue(
-            "recognition/ai_correction_enabled",
-            self.ai_correction_enabled and ai_config_valid,
-        )
-        settings.setValue("recognition/ai_base_url", ai_base_url)
-        settings.setValue("recognition/ai_model", ai_model)
-        # Keep the V3 keys synchronized for downgrade and migration compatibility.
-        settings.setValue("appearance/orb_color", _preset_name(ring))
-        settings.setValue("appearance/result_theme", self.result_theme)
-        settings.sync()
+        ai_enabled = self.ai_correction_enabled and ai_config_valid
+        values: dict[str, object] = {
+                "recognition/mode": "mathcraft",
+                "appearance/ring_color": ring,
+                "appearance/theme": self.result_theme,
+                "appearance/logo_path": self.effective_logo_path,
+                "window/show_settings_on_startup": self.show_settings_on_startup,
+                "recognition/ai_correction_enabled": ai_enabled,
+                "recognition/ai_base_url": ai_base_url,
+                "recognition/ai_model": ai_model,
+                "updates/automatic": self.auto_check_updates,
+                # Keep the V3 keys synchronized for downgrade compatibility.
+                "appearance/orb_color": _preset_name(ring),
+                "appearance/result_theme": self.result_theme,
+        }
+        if type(settings) is QSettings and settings.format() == QSettings.Format.IniFormat:
+            return write_settings_values(settings, values)
+        # Native stores do not offer a multi-key transaction. Persist a safe
+        # disabled state first, then make the privacy-sensitive opt-in the last
+        # isolated write so any earlier failure cannot enable network upload.
+        values["recognition/ai_correction_enabled"] = False
+        saved_settings = write_settings_values(settings, values)
+        if ai_enabled:
+            saved_settings = write_settings_values(
+                saved_settings,
+                {"recognition/ai_correction_enabled": True},
+            )
+        return saved_settings
 
 
 def _preset_name(color: str) -> str:
@@ -912,6 +1315,8 @@ class ModeCard(QPushButton):
 class SettingsPanel(QWidget):
     start_requested = Signal()
     preferences_changed = Signal(object)
+    session_preferences_changed = Signal(object)
+    settings_backend_changed = Signal(object)
     ai_credential_changed = Signal()
     update_check_requested = Signal()
 
@@ -950,7 +1355,6 @@ class SettingsPanel(QWidget):
         api_key_store: OpenAIApiKeyStore | None = None,
     ) -> None:
         super().__init__()
-        self._settings = settings
         self._api_key_store = api_key_store or OpenAIApiKeyStore()
         try:
             self._ai_key_present = bool(
@@ -965,8 +1369,16 @@ class SettingsPanel(QWidget):
             self._credential_error = str(exc)
         if preferences.ai_correction_enabled and not self._ai_key_present:
             preferences = replace(preferences, ai_correction_enabled=False)
-            preferences.save(settings)
+            with suppress(PreferencesSaveError):
+                settings = preferences.save(settings)
+        self._settings = settings
         self._preferences = preferences
+        self._persisted_preferences = preferences
+        self._settings_format_error = _settings_source_has_format_error(settings)
+        self._save_failed = (
+            self._settings_format_error
+            or settings.status() != QSettings.Status.NoError
+        )
         self._ai_model_worker: CompatibleModelWorker | None = None
         self._ai_active_context: tuple[str, str, str, int] | None = None
         self._ai_credential_generation = 0
@@ -991,6 +1403,10 @@ class SettingsPanel(QWidget):
         self._load_controls(preferences)
         self._building = False
         self._update_ai_draft_status()
+        if self._save_failed:
+            self.settings_error_label.setText(
+                "设置读取或保存失败，当前使用安全配置；请检查设置存储。"
+            )
 
     @property
     def preferences(self) -> FloatingPreferences:
@@ -1010,6 +1426,9 @@ class SettingsPanel(QWidget):
         content_layout.setSpacing(0)
         self.header = self._build_header()
         content_layout.addWidget(self.header)
+        self.settings_error_label = QLabel()
+        self.settings_error_label.setWordWrap(True)
+        content_layout.addWidget(self.settings_error_label)
 
         self.pages = QStackedWidget()
         self.pages.setObjectName("SettingsPages")
@@ -1185,6 +1604,14 @@ class SettingsPanel(QWidget):
         startup_layout.addWidget(self.startup_checkbox)
         general_layout.addWidget(startup_row)
         general_layout.addWidget(_divider())
+
+        automatic_row = QHBoxLayout()
+        automatic_row.addWidget(_row_title("自动检查更新（每 12 小时）"), 1)
+        self.auto_update_toggle = ToggleSwitch()
+        self.auto_update_toggle.setAccessibleName("自动检查更新")
+        self.auto_update_toggle.toggled.connect(self._controls_changed)
+        automatic_row.addWidget(self.auto_update_toggle)
+        general_layout.addLayout(automatic_row)
 
         update_row = QWidget()
         update_row.setObjectName("SettingsRow")
@@ -1601,6 +2028,7 @@ class SettingsPanel(QWidget):
         )
         self._update_ai_action_state()
         self.startup_checkbox.setChecked(preferences.show_settings_on_startup)
+        self.auto_update_toggle.setChecked(preferences.auto_check_updates)
         self.startup_checkbox.set_position(
             1.0 if preferences.show_settings_on_startup else 0.0
         )
@@ -1677,9 +2105,62 @@ class SettingsPanel(QWidget):
             show_settings_on_startup=self.startup_checkbox.isChecked(),
             ring_color=self._ring_color,
             logo_path=self._logo_path,
+            auto_check_updates=self.auto_update_toggle.isChecked(),
         )
-        self._preferences.save(self._settings)
+        self._save_preferences()
+
+    def _save_preferences(self) -> bool:
+        previous_settings = self._settings
+        try:
+            self._settings = self._preferences.save(self._settings)
+        except PreferencesSaveError as exc:
+            self._save_failed = True
+            self._settings_format_error = (
+                self._settings_format_error
+                or exc.format_error
+                or _settings_source_has_format_error(self._settings)
+            )
+            self.settings_error_label.setText(SETTINGS_ERROR_MESSAGE)
+            self._set_ai_connection_status(SETTINGS_ERROR_MESSAGE, error=True)
+            # Keep disabling AI effective during storage failure, without
+            # claiming these changes were persisted.
+            session_preferences = replace(self._preferences, ai_correction_enabled=False)
+            self._preferences = session_preferences
+            ai_blocker = QSignalBlocker(self.ai_correction_toggle)
+            self.ai_correction_toggle.setChecked(False)
+            del ai_blocker
+            self.ai_configuration_widget.hide()
+            self.ai_correction_toggle.setAccessibleDescription("已关闭")
+            if (
+                not self._settings_format_error
+                and not (
+                    type(self._settings) is QSettings
+                    and self._settings.format() == QSettings.Format.IniFormat
+                )
+            ):
+                # QSettings retains values queued before a failed sync. Replace
+                # the sensitive opt-in in that shared cache before permissions
+                # can recover and a later sync/destructor flushes it to disk.
+                self._settings.setValue("recognition/ai_correction_enabled", False)
+                self._settings.sync()
+            self.session_preferences_changed.emit(session_preferences)
+            return False
+        self._save_failed = False
+        self._settings_format_error = False
+        self.settings_error_label.clear()
+        self._persisted_preferences = self._preferences
+        if self._settings is not previous_settings:
+            self.settings_backend_changed.emit(self._settings)
         self.preferences_changed.emit(self._preferences)
+        return True
+
+    def adopt_settings_backend(self, settings: QSettings) -> None:
+        """Share a healthy backend produced by another atomic settings write."""
+
+        if self._settings_format_error or settings.status() != QSettings.Status.NoError:
+            return
+        self._settings = settings
+        self._save_failed = False
 
     @Slot(bool)
     def _ai_toggle_changed(self, checked: bool) -> None:
@@ -1693,8 +2174,8 @@ class SettingsPanel(QWidget):
                 self._preferences = replace(
                     self._preferences, ai_correction_enabled=False
                 )
-                self._preferences.save(self._settings)
-                self.preferences_changed.emit(self._preferences)
+                if not self._save_preferences():
+                    return
             self._set_ai_connection_status("AI 辅助已关闭")
         else:
             self._update_ai_draft_status()
@@ -1733,8 +2214,7 @@ class SettingsPanel(QWidget):
         if draft_base_url == active_base_url:
             return False
         self._preferences = replace(self._preferences, ai_correction_enabled=False)
-        self._preferences.save(self._settings)
-        self.preferences_changed.emit(self._preferences)
+        self._save_preferences()
         return True
 
     @Slot()
@@ -1759,6 +2239,9 @@ class SettingsPanel(QWidget):
 
     def _update_ai_draft_status(self) -> None:
         if self._building or not self.ai_correction_toggle.isChecked():
+            return
+        if self._save_failed:
+            self._set_ai_connection_status(SETTINGS_ERROR_MESSAGE, error=True)
             return
         raw_base_url = self.ai_base_url_input.text().strip()
         raw_model = self.ai_model_combo.currentText().strip()
@@ -1879,8 +2362,9 @@ class SettingsPanel(QWidget):
             ai_base_url=ai_base_url,
             ai_model=ai_model,
         )
-        self._preferences.save(self._settings)
-        self.preferences_changed.emit(self._preferences)
+        if not self._save_preferences():
+            self._update_ai_action_state()
+            return
         self._set_ai_connection_status("配置已保存并生效")
         self._update_ai_action_state()
 
@@ -2116,12 +2600,12 @@ class SettingsPanel(QWidget):
             ai_correction_enabled=self._preferences.ai_correction_enabled,
             ai_base_url=self._preferences.ai_base_url,
             ai_model=self._preferences.ai_model,
+            auto_check_updates=self._preferences.auto_check_updates,
         )
         apply_application_theme(next_theme)
         self._update_theme_button()
         if not self._building:
-            self._preferences.save(self._settings)
-            self.preferences_changed.emit(self._preferences)
+            self._save_preferences()
 
     def _update_theme_button(self) -> None:
         if self._preferences.result_theme == "dark":
@@ -2200,8 +2684,8 @@ class SettingsPanel(QWidget):
             return
         image = read_logo_image(path)
         if image is None:
-            self._logo_path = ""
-            self.logo_status_label.setText("已恢复默认 Logo")
+            self.logo_status_label.setText("图片无效或格式不匹配，已保留原 Logo。")
+            return
         else:
             self._logo_path = str(Path(path).resolve())
             self.logo_status_label.setText(Path(path).name)

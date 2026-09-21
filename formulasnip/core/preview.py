@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from formulasnip.core.latex import normalize_latex
+from formulasnip.core.limits import LATEX_LIMIT_MESSAGE, MAX_LATEX_CHARS
 
 MATHJAX_SCRIPT_NAME = "tex-svg-full.js"
 _ENVIRONMENT_TOKEN_RE = re.compile(r"\\(begin|end)\s*\{([^{}]+)\}")
@@ -19,6 +20,8 @@ def is_formula_previewable(latex: str) -> bool:
     browser-owned MathJax instance remains the authority on rendering support.
     """
 
+    if len(latex) > MAX_LATEX_CHARS:
+        return False
     normalized = normalize_latex(latex)
     if not normalized or "\x00" in normalized:
         return False
@@ -47,6 +50,8 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
     MathJax runtime only needs to be loaded once per application session.
     """
 
+    if len(latex) > MAX_LATEX_CHARS:
+        raise ValueError(LATEX_LIMIT_MESSAGE)
     normalized = normalize_latex(latex)
     if not normalized:
         raise ValueError("公式预览内容为空")
@@ -211,6 +216,8 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
 def build_mathjax_update_script(latex: str, request_id: int) -> str:
     """Build a safe JavaScript call that updates the persistent preview page."""
 
+    if len(latex) > MAX_LATEX_CHARS:
+        raise ValueError(LATEX_LIMIT_MESSAGE)
     normalized = normalize_latex(latex)
     if not normalized:
         raise ValueError("公式预览内容为空")

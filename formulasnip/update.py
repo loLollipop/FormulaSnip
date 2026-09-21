@@ -10,7 +10,8 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, Lock
+from threading import BoundedSemaphore, Event, Lock, Thread
+from time import monotonic
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
@@ -25,6 +26,10 @@ from formulasnip import __version__
 LATEST_RELEASE_API = "https://api.github.com/repos/loLollipop/FormulaSnip/releases/latest"
 LATEST_RELEASE_MANIFEST = (
     "https://github.com/loLollipop/FormulaSnip/releases/latest/download/"
+    "FormulaSnip-update-v2.json"
+)
+LEGACY_RELEASE_MANIFEST = (
+    "https://github.com/loLollipop/FormulaSnip/releases/latest/download/"
     "FormulaSnip-update.json"
 )
 RELEASES_URL = "https://github.com/loLollipop/FormulaSnip/releases"
@@ -32,6 +37,9 @@ CHECK_INTERVAL_SECONDS = 12 * 60 * 60
 REQUEST_TIMEOUT = (5.0, 30.0)
 MAX_RELEASE_NOTES_LENGTH = 4_000
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_RELEASE_API_BYTES = 256 * 1024
+UPDATE_CHECK_TIMEOUT_SECONDS = 45.0
+_CHECK_TRANSPORT_SLOTS = BoundedSemaphore(2)
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024 * 1024
 MAX_MANIFEST_REDIRECTS = 2
 MAX_DOWNLOAD_REDIRECTS = 2
@@ -50,15 +58,14 @@ _TAG_PATTERN = re.compile(r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _VERSION_PATTERN = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _INSTALLER_PATTERN = re.compile(
     r"^FormulaSnip-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"
-    r"-windows-x64-setup\.exe$"
+    r"-windows-x64-(?:setup|update)\.exe$"
 )
 _DIGEST_PATTERN = re.compile(r"^sha256:([0-9a-fA-F]{64})$")
 _MANIFEST_DIGEST_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
-_TAGGED_MANIFEST_PATH_PATTERN = re.compile(
-    r"^/loLollipop/FormulaSnip/releases/download/"
-    r"(v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))/"
-    r"FormulaSnip-update\.json$"
-)
+_MANIFEST_NAMES = {
+    1: "FormulaSnip-update.json",
+    2: "FormulaSnip-update-v2.json",
+}
 _REDIRECT_PATH_PATTERN = re.compile(
     r"^/github-production-release-asset/\d+/[^/]+$"
 )
@@ -254,14 +261,18 @@ def _request_client(
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     remove_abort: Callable[[], None] | None = None
+    remove_close: Callable[[], None] | None = None
     add_abort = getattr(cancel_event, "add_abort_callback", None)
     if callable(add_abort):
         remove_abort = add_abort(tracker.abort)
+        remove_close = add_abort(session.close)
     try:
         yield session
     finally:
         if remove_abort is not None:
             remove_abort()
+        if remove_close is not None:
+            remove_close()
         session.close()
         tracker.close()
 
@@ -285,10 +296,15 @@ class ReleaseInfo:
     tag: str
     notes: str
     asset: UpdateAsset
+    fallback_asset: UpdateAsset | None = None
 
     @property
     def page_url(self) -> str:
         return f"{RELEASES_URL}/tag/{self.tag}"
+
+    @property
+    def is_lightweight_update(self) -> bool:
+        return self.asset.name.endswith("-windows-x64-update.exe")
 
 
 def parse_version(value: str, *, tag: bool = False) -> tuple[int, int, int]:
@@ -308,9 +324,10 @@ def is_newer_version(candidate: str, current: str = __version__) -> bool:
     return parse_version(candidate) > parse_version(current)
 
 
-def installer_name(version: str) -> str:
+def installer_name(version: str, *, lightweight: bool = False) -> str:
     parse_version(version)
-    return f"FormulaSnip-v{version}-windows-x64-setup.exe"
+    package_kind = "update" if lightweight else "setup"
+    return f"FormulaSnip-v{version}-windows-x64-{package_kind}.exe"
 
 
 def _asset_tag(asset: UpdateAsset) -> str:
@@ -402,7 +419,65 @@ def parse_release(payload: object, current_version: str = __version__) -> Releas
     )
 
 
-def _validate_manifest_url(url: str, *, stage: str) -> str | None:
+def installed_model_bundle_identity(
+    *,
+    lock_path: Path | None = None,
+    bundled_root: Path | None = None,
+) -> str | None:
+    """Return the installed model-lock digest after full model SHA-256 verification."""
+
+    if lock_path is None or bundled_root is None:
+        frozen_root = getattr(sys, "_MEIPASS", None)
+        if not frozen_root:
+            return None
+        frozen_path = Path(frozen_root)
+        lock_path = lock_path or frozen_path / "MODEL_ASSETS.json"
+        bundled_root = bundled_root or frozen_path / "MathCraft" / "models"
+    try:
+        from formulasnip.recognition.mathcraft_backend import (
+            _verify_bundled_model_root,
+        )
+
+        lock_bytes = lock_path.read_bytes()
+        if _verify_bundled_model_root(bundled_root, lock_path) is not None:
+            return None
+        if lock_path.read_bytes() != lock_bytes:
+            return None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return hashlib.sha256(lock_bytes).hexdigest()
+
+
+def _parse_manifest_asset(
+    payload: object,
+    *,
+    version: str,
+    tag: str,
+    lightweight: bool,
+) -> UpdateAsset:
+    if not isinstance(payload, Mapping) or set(payload) != {"name", "size", "sha256"}:
+        raise UpdateError("The update manifest asset has an invalid schema.")
+    expected_name = installer_name(version, lightweight=lightweight)
+    name = payload.get("name")
+    size = payload.get("size")
+    sha256 = payload.get("sha256")
+    if name != expected_name:
+        raise UpdateError("The update manifest installer filename is invalid.")
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_INSTALLER_BYTES:
+        raise UpdateError("The update manifest installer size is invalid.")
+    if not isinstance(sha256, str) or _MANIFEST_DIGEST_PATTERN.fullmatch(sha256) is None:
+        raise UpdateError("The update manifest installer SHA-256 is invalid.")
+    url = f"{RELEASES_URL}/download/{tag}/{expected_name}"
+    validate_asset_url(url, tag=tag, name=expected_name)
+    return UpdateAsset(expected_name, url, size, sha256.lower())
+
+
+def _validate_manifest_url(
+    url: str,
+    *,
+    stage: str,
+    manifest_name: str,
+) -> str | None:
     try:
         parsed = urlsplit(url)
         port = parsed.port
@@ -414,14 +489,22 @@ def _validate_manifest_url(url: str, *, stage: str) -> str | None:
         raise UpdateError("The update manifest URL contains an unexpected fragment.")
 
     if stage == "latest":
-        expected = urlsplit(LATEST_RELEASE_MANIFEST)
+        expected = urlsplit(
+            f"https://github.com/loLollipop/FormulaSnip/releases/latest/download/"
+            f"{manifest_name}"
+        )
         if parsed.hostname != "github.com" or parsed.path != expected.path or parsed.query:
             raise UpdateError("The update manifest latest URL is invalid.")
         return None
     if stage == "tagged":
         if parsed.hostname != "github.com" or parsed.query:
             raise UpdateError("The update manifest did not resolve to a tagged release.")
-        match = _TAGGED_MANIFEST_PATH_PATTERN.fullmatch(parsed.path)
+        match = re.fullmatch(
+            r"/loLollipop/FormulaSnip/releases/download/"
+            r"(v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))/"
+            + re.escape(manifest_name),
+            parsed.path,
+        )
         if match is None:
             raise UpdateError("The update manifest did not resolve to a tagged release.")
         return match.group(1)
@@ -438,6 +521,8 @@ def _validate_manifest_url(url: str, *, stage: str) -> str | None:
 def _read_manifest_response(
     response: Any,
     cancel_event: CancellationSignal | None = None,
+    *,
+    max_bytes: int = MAX_MANIFEST_BYTES,
 ) -> object:
     _raise_if_cancelled(cancel_event)
     content_length = response.headers.get("Content-Length")
@@ -446,7 +531,7 @@ def _read_manifest_response(
             declared_size = int(content_length)
         except (TypeError, ValueError) as exc:
             raise UpdateError("The update manifest has an invalid Content-Length.") from exc
-        if declared_size < 0 or declared_size > MAX_MANIFEST_BYTES:
+        if declared_size < 0 or declared_size > max_bytes:
             raise UpdateError("The update manifest is too large.")
 
     content = bytearray()
@@ -454,10 +539,19 @@ def _read_manifest_response(
         _raise_if_cancelled(cancel_event)
         if not chunk:
             continue
-        if len(content) + len(chunk) > MAX_MANIFEST_BYTES:
+        if len(content) + len(chunk) > max_bytes:
             raise UpdateError("The update manifest is too large.")
         content.extend(chunk)
     _raise_if_cancelled(cancel_event)
+    # requests yields decompressed bytes, while Content-Length describes the
+    # encoded representation. Both sizes are capped, but only compare identity.
+    encoding = str(response.headers.get("Content-Encoding", "identity")).strip().lower()
+    if (
+        content_length is not None
+        and encoding in {"", "identity"}
+        and len(content) != declared_size
+    ):
+        raise UpdateError("The update response length does not match Content-Length.")
     try:
         return json.loads(bytes(content))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -469,17 +563,27 @@ def parse_manifest(
     *,
     resolved_tag: str,
     current_version: str = __version__,
+    installed_model_identity: str | None = None,
 ) -> ReleaseInfo | None:
-    if not isinstance(payload, Mapping) or set(payload) != {
-        "schema_version",
-        "version",
-        "tag",
-        "notes",
-        "asset",
-    }:
+    if not isinstance(payload, Mapping):
         raise UpdateError("The update manifest has an invalid schema.")
-    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != 1:
+    schema_version = payload.get("schema_version")
+    schema_keys = {
+        1: {"schema_version", "version", "tag", "notes", "asset"},
+        2: {
+            "schema_version",
+            "version",
+            "tag",
+            "notes",
+            "asset",
+            "update_asset",
+            "model_bundle_sha256",
+        },
+    }
+    if type(schema_version) is not int or schema_version not in schema_keys:
         raise UpdateError("The update manifest schema version is unsupported.")
+    if set(payload) != schema_keys[schema_version]:
+        raise UpdateError("The update manifest has an invalid schema.")
 
     version = payload.get("version")
     tag = payload.get("tag")
@@ -493,29 +597,41 @@ def parse_manifest(
     if not isinstance(notes, str):
         raise UpdateError("The update manifest release notes are invalid.")
 
-    asset = payload.get("asset")
-    if not isinstance(asset, Mapping) or set(asset) != {"name", "size", "sha256"}:
-        raise UpdateError("The update manifest asset has an invalid schema.")
-    expected_name = installer_name(version)
-    name = asset.get("name")
-    size = asset.get("size")
-    sha256 = asset.get("sha256")
-    if name != expected_name:
-        raise UpdateError("The update manifest installer filename is invalid.")
-    if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_INSTALLER_BYTES:
-        raise UpdateError("The update manifest installer size is invalid.")
-    if not isinstance(sha256, str) or _MANIFEST_DIGEST_PATTERN.fullmatch(sha256) is None:
-        raise UpdateError("The update manifest installer SHA-256 is invalid.")
+    full_asset = _parse_manifest_asset(
+        payload.get("asset"), version=version, tag=tag, lightweight=False
+    )
+    selected_asset = full_asset
+    fallback_asset: UpdateAsset | None = None
+    if schema_version == 2:
+        model_identity = payload.get("model_bundle_sha256")
+        if (
+            not isinstance(model_identity, str)
+            or _MANIFEST_DIGEST_PATTERN.fullmatch(model_identity) is None
+        ):
+            raise UpdateError("The update manifest model bundle identity is invalid.")
+        update_asset = _parse_manifest_asset(
+            payload.get("update_asset"), version=version, tag=tag, lightweight=True
+        )
+        current_identity = (
+            installed_model_identity
+            if installed_model_identity is not None
+            else installed_model_bundle_identity()
+        )
+        if (
+            current_identity is not None
+            and current_identity.casefold() == model_identity.casefold()
+        ):
+            selected_asset = update_asset
+            fallback_asset = full_asset
     if version_tuple <= parse_version(current_version):
         return None
 
-    url = f"{RELEASES_URL}/download/{tag}/{expected_name}"
-    validate_asset_url(url, tag=tag, name=expected_name)
     return ReleaseInfo(
         version=version,
         tag=tag,
         notes=notes[:MAX_RELEASE_NOTES_LENGTH],
-        asset=UpdateAsset(expected_name, url, size, sha256.lower()),
+        asset=selected_asset,
+        fallback_asset=fallback_asset,
     )
 
 
@@ -524,8 +640,16 @@ def _fetch_release_manifest(
     *,
     client: HttpClient,
     cancel_event: CancellationSignal | None = None,
+    manifest_url: str = LATEST_RELEASE_MANIFEST,
+    schema_version: int = 2,
 ) -> ReleaseInfo | None:
-    current_url = LATEST_RELEASE_MANIFEST
+    manifest_name = _MANIFEST_NAMES.get(schema_version)
+    if manifest_name is None or manifest_url != (
+        "https://github.com/loLollipop/FormulaSnip/releases/latest/download/"
+        + manifest_name
+    ):
+        raise UpdateError("The update manifest source is invalid.")
+    current_url = manifest_url
     resolved_tag: str | None = None
     stages = ("latest", "tagged", "asset")
     for redirect_count in range(MAX_MANIFEST_REDIRECTS + 1):
@@ -533,7 +657,9 @@ def _fetch_release_manifest(
         response: Any = None
         try:
             stage = stages[redirect_count]
-            _validate_manifest_url(current_url, stage=stage)
+            _validate_manifest_url(
+                current_url, stage=stage, manifest_name=manifest_name
+            )
             response = client.get(
                 current_url,
                 headers={"Accept": "application/json", "User-Agent": "FormulaSnip-Updater"},
@@ -543,7 +669,9 @@ def _fetch_release_manifest(
             )
             _raise_if_cancelled(cancel_event)
             response_url = str(getattr(response, "url", current_url) or current_url)
-            response_tag = _validate_manifest_url(response_url, stage=stage)
+            response_tag = _validate_manifest_url(
+                response_url, stage=stage, manifest_name=manifest_name
+            )
             if response_tag is not None:
                 resolved_tag = response_tag
             status_code = int(getattr(response, "status_code", 0))
@@ -559,7 +687,11 @@ def _fetch_release_manifest(
                     raise UpdateError(
                         "The update manifest redirect URL is invalid."
                     ) from exc
-                next_tag = _validate_manifest_url(next_url, stage=stages[redirect_count + 1])
+                next_tag = _validate_manifest_url(
+                    next_url,
+                    stage=stages[redirect_count + 1],
+                    manifest_name=manifest_name,
+                )
                 if next_tag is not None:
                     resolved_tag = next_tag
                 response.close()
@@ -570,6 +702,8 @@ def _fetch_release_manifest(
             if stage != "asset" or resolved_tag is None:
                 raise UpdateError("The update manifest did not follow the expected redirects.")
             payload = _read_manifest_response(response, cancel_event)
+            if not isinstance(payload, Mapping) or payload.get("schema_version") != schema_version:
+                raise UpdateError("The update manifest schema does not match its filename.")
             _raise_if_cancelled(cancel_event)
             return parse_manifest(
                 payload,
@@ -607,7 +741,9 @@ def _fetch_release_api(
             raise UpdateError("GitHub returned an unexpected redirect for the release API.")
         response.raise_for_status()
         _raise_if_cancelled(cancel_event)
-        payload = response.json()
+        payload = _read_manifest_response(
+            response, cancel_event, max_bytes=MAX_RELEASE_API_BYTES
+        )
         _raise_if_cancelled(cancel_event)
     except (requests.RequestException, ValueError) as exc:
         _raise_if_cancelled(cancel_event)
@@ -624,30 +760,92 @@ def fetch_latest_release(
     client: HttpClient = requests,
     cancel_event: CancellationSignal | None = None,
 ) -> ReleaseInfo | None:
+    """Bound the entire check, including DNS and slow response bodies.
+
+    DNS itself cannot be interrupted by requests. Slots remain occupied until
+    the real transport finishes, preventing repeated timeouts spawning leaks.
+    """
+    _raise_if_cancelled(cancel_event)
+    if not _CHECK_TRANSPORT_SLOTS.acquire(blocking=False):
+        raise UpdateError("更新连接仍在结束，请稍后重试。")
+    cancellation = UpdateCancellation()
+    finished = Event()
+    state: dict[str, Any] = {}
+
+    def transfer() -> None:
+        try:
+            state["release"] = _fetch_latest_release(
+                current_version, client=client, cancel_event=cancellation
+            )
+        except Exception as exc:
+            state["error"] = exc
+        finally:
+            _CHECK_TRANSPORT_SLOTS.release()
+            finished.set()
+
+    worker = Thread(target=transfer, name="FormulaSnip update check", daemon=True)
+    deadline = monotonic() + UPDATE_CHECK_TIMEOUT_SECONDS
+    try:
+        worker.start()
+    except Exception:
+        _CHECK_TRANSPORT_SLOTS.release()
+        raise
+    try:
+        while not finished.is_set():
+            _raise_if_cancelled(cancel_event)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise UpdateError("检查更新超时，请稍后重试。")
+            finished.wait(min(0.02, remaining))
+        _raise_if_cancelled(cancel_event)
+        if monotonic() > deadline:
+            raise UpdateError("检查更新超时，请稍后重试。")
+    except UpdateError:
+        cancellation.cancel()
+        worker.join(timeout=0.15)
+        raise
+    if "error" in state:
+        raise state["error"]
+    return state["release"]
+
+
+def _fetch_latest_release(
+    current_version: str,
+    *,
+    client: HttpClient,
+    cancel_event: CancellationSignal,
+) -> ReleaseInfo | None:
     _raise_if_cancelled(cancel_event)
     with _request_client(client, cancel_event) as request_client:
+        for manifest_url, schema_version in (
+            (LATEST_RELEASE_MANIFEST, 2),
+            (LEGACY_RELEASE_MANIFEST, 1),
+        ):
+            try:
+                return _fetch_release_manifest(
+                    current_version,
+                    client=request_client,
+                    cancel_event=cancel_event,
+                    manifest_url=manifest_url,
+                    schema_version=schema_version,
+                )
+            except UpdateCancelled:
+                raise
+            except UpdateError:
+                _raise_if_cancelled(cancel_event)
         try:
-            return _fetch_release_manifest(
+            return _fetch_release_api(
                 current_version,
                 client=request_client,
                 cancel_event=cancel_event,
             )
         except UpdateCancelled:
             raise
-        except UpdateError:
+        except UpdateError as api_error:
             _raise_if_cancelled(cancel_event)
-            try:
-                return _fetch_release_api(
-                    current_version,
-                    client=request_client,
-                    cancel_event=cancel_event,
-                )
-            except UpdateCancelled:
-                raise
-            except UpdateError as api_error:
-                raise UpdateError(
-                    "无法检查更新：静态更新清单和 GitHub API 均不可用，请稍后重试。"
-                ) from api_error
+            raise UpdateError(
+                "无法检查更新：静态更新清单和 GitHub API 均不可用，请稍后重试。"
+            ) from api_error
 
 
 def should_check_for_updates(
@@ -683,23 +881,176 @@ def _sha256_file(
     return digest.hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _InstallerVerification:
+    asset_sha256: str
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    device: int
+    inode: int
+
+
+_VERIFIED_INSTALLERS: dict[Path, _InstallerVerification] = {}
+_VERIFIED_INSTALLER_HANDLES: dict[Path, int] = {}
+_VERIFIED_INSTALLERS_LOCK = Lock()
+
+
+def _installer_cache_key(path: Path) -> Path:
+    return path.absolute()
+
+
+def _installer_verification(
+    stat: os.stat_result,
+    asset: UpdateAsset,
+) -> _InstallerVerification:
+    return _InstallerVerification(
+        asset_sha256=asset.sha256,
+        size=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
+        device=stat.st_dev,
+        inode=stat.st_ino,
+    )
+
+
+def _open_installer_read_lock(path: Path) -> int | None:
+    """Deny writes/deletes until CreateProcess has opened the verified file."""
+
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel.CreateFileW(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001,  # FILE_SHARE_READ: deny write and delete sharing
+        None,
+        3,  # OPEN_EXISTING
+        0x00000080,  # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if not handle or int(handle) == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, "Unable to lock the cached installer for verification")
+    return int(handle)
+
+
+def _close_installer_read_lock(handle: int | None) -> None:
+    if handle is None or sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle(wintypes.HANDLE(handle))
+
+
+def _forget_verified_installer(path: Path) -> None:
+    handle: int | None
+    with _VERIFIED_INSTALLERS_LOCK:
+        key = _installer_cache_key(path)
+        _VERIFIED_INSTALLERS.pop(key, None)
+        handle = _VERIFIED_INSTALLER_HANDLES.pop(key, None)
+    _close_installer_read_lock(handle)
+
+
+def _has_current_installer_verification(path: Path, asset: UpdateAsset) -> bool:
+    if path.name != asset.name:
+        _forget_verified_installer(path)
+        return False
+    try:
+        path.resolve(strict=True)
+        stat = path.stat()
+    except OSError:
+        _forget_verified_installer(path)
+        return False
+    if stat.st_size != asset.size:
+        _forget_verified_installer(path)
+        return False
+    current = _installer_verification(stat, asset)
+    with _VERIFIED_INSTALLERS_LOCK:
+        key = _installer_cache_key(path)
+        remembered = _VERIFIED_INSTALLERS.get(key)
+        handle_present = (
+            sys.platform != "win32"
+            or key in _VERIFIED_INSTALLER_HANDLES
+        )
+        if remembered != current or not handle_present:
+            _VERIFIED_INSTALLERS.pop(key, None)
+            stale_handle = _VERIFIED_INSTALLER_HANDLES.pop(key, None)
+            _close_installer_read_lock(stale_handle)
+            return False
+    return True
+
+
 def verify_installer(
     path: Path,
     asset: UpdateAsset,
     *,
     cancel_event: CancellationSignal | None = None,
+    retain_lock: bool = False,
 ) -> None:
     _raise_if_cancelled(cancel_event)
-    if path.name != asset.name or not path.is_file():
+    _forget_verified_installer(path)
+    if path.name != asset.name:
         raise UpdateError("The cached installer path is invalid.")
+    read_lock: int | None = None
     try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise UpdateError("The cached installer cannot be inspected.") from exc
-    if size != asset.size:
-        raise UpdateError("The installer size does not match the GitHub release metadata.")
-    if _sha256_file(path, cancel_event) != asset.sha256:
-        raise UpdateError("The installer SHA-256 digest does not match GitHub metadata.")
+        try:
+            read_lock = _open_installer_read_lock(path)
+            resolved = path.resolve(strict=True)
+            before = path.stat()
+        except OSError as exc:
+            raise UpdateError("The cached installer cannot be inspected.") from exc
+        if not path.is_file():
+            raise UpdateError("The cached installer path is invalid.")
+        if before.st_size != asset.size:
+            raise UpdateError(
+                "The installer size does not match the GitHub release metadata."
+            )
+        try:
+            digest = _sha256_file(path, cancel_event)
+            after_resolved = path.resolve(strict=True)
+            after = path.stat()
+        except UpdateCancelled:
+            _forget_verified_installer(path)
+            raise
+        except OSError as exc:
+            _forget_verified_installer(path)
+            raise UpdateError("The cached installer changed during verification.") from exc
+        verification = _installer_verification(before, asset)
+        if after_resolved != resolved or _installer_verification(after, asset) != verification:
+            _forget_verified_installer(path)
+            raise UpdateError("The cached installer changed during verification.")
+        if digest != asset.sha256:
+            raise UpdateError("The installer SHA-256 digest does not match GitHub metadata.")
+        if retain_lock:
+            with _VERIFIED_INSTALLERS_LOCK:
+                key = _installer_cache_key(path)
+                _VERIFIED_INSTALLERS[key] = verification
+                if read_lock is not None:
+                    _VERIFIED_INSTALLER_HANDLES[key] = read_lock
+            read_lock = None
+    finally:
+        # The handle becomes cache-owned only after a complete successful
+        # verification. Every cancellation and unexpected failure must release
+        # a still-local deny-write handle.
+        _close_installer_read_lock(read_lock)
 
 
 def _registered_install_directory() -> Path | None:
@@ -739,8 +1090,17 @@ def launch_verified_installer(
     start_detached: Callable[[str, list[str]], object],
 ) -> bool:
     """Revalidate a cached Setup and launch it with fixed, local arguments."""
-    verify_installer(path, asset)
-    result = start_detached(str(path), list(INSTALLER_ARGUMENTS))
+    # Download workers perform the final full SHA-256 pass after publishing the
+    # file. On the GUI thread, only accept that result while stable filesystem
+    # identity and timestamps still match; otherwise fall back to a full check.
+    if not _has_current_installer_verification(path, asset):
+        verify_installer(path, asset, retain_lock=True)
+    try:
+        result = start_detached(str(path), list(INSTALLER_ARGUMENTS))
+    finally:
+        # CreateProcess/startDetached has opened the executable before it
+        # returns; only then release the deny-write/delete handle.
+        _forget_verified_installer(path)
     if isinstance(result, tuple):
         return bool(result[0])
     return bool(result)
@@ -840,7 +1200,12 @@ def _download_installer(
     )
     if destination.is_file():
         try:
-            verify_installer(destination, asset, cancel_event=cancel_event)
+            verify_installer(
+                destination,
+                asset,
+                cancel_event=cancel_event,
+                retain_lock=True,
+            )
             _raise_if_cancelled(cancel_event)
             if progress is not None:
                 progress(asset.size, asset.size)
@@ -849,6 +1214,7 @@ def _download_installer(
         except UpdateCancelled:
             raise
         except UpdateError:
+            _forget_verified_installer(destination)
             destination.unlink(missing_ok=True)
     response: Any = None
     downloaded = 0
@@ -893,7 +1259,13 @@ def _download_installer(
             raise UpdateError("The installer SHA-256 digest does not match GitHub metadata.")
         _raise_if_cancelled(cancel_event)
         os.replace(partial, destination)
-        verify_installer(destination, asset, cancel_event=cancel_event)
+        _forget_verified_installer(destination)
+        verify_installer(
+            destination,
+            asset,
+            cancel_event=cancel_event,
+            retain_lock=True,
+        )
         _prune_retired_installers(cache_directory, asset.name)
         return destination
     except requests.RequestException as exc:
@@ -928,6 +1300,7 @@ def _prune_retired_installers(cache_directory: Path, current_name: str) -> None:
         if parse_version(candidate_match.group(1)) >= current_version:
             continue
         try:
+            _forget_verified_installer(entry)
             entry.unlink()
         except OSError:
             continue

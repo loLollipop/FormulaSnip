@@ -139,6 +139,37 @@ class FakeClient:
         return self.get_response
 
 
+def test_blocked_transport_threads_are_bounded_until_real_exit(monkeypatch: Any) -> None:
+    release = Event()
+    calls = []
+    slots = threading.BoundedSemaphore(2)
+    monkeypatch.setattr(openai_correction, "_TRANSPORT_SLOTS", slots)
+    monkeypatch.setattr(openai_correction, "AI_TOTAL_TIMEOUT_SECONDS", 0.025)
+    monkeypatch.setattr(openai_correction, "AI_REQUEST_CLEANUP_SECONDS", 0.005)
+
+    class BlockedClient:
+        def get(self, *_args, **_kwargs):
+            calls.append(threading.current_thread())
+            release.wait(5)
+            return FakeResponse(200, {"data": []})
+
+    try:
+        for _ in range(6):
+            with pytest.raises(AICorrectionError):
+                list_compatible_models("unit-test-token", "https://example.invalid/v1",
+                                       client=BlockedClient())
+        assert len(calls) == 2
+        assert all(thread.is_alive() for thread in calls)
+    finally:
+        release.set()
+        for thread in calls:
+            thread.join(1)
+    assert slots.acquire(blocking=False)
+    assert slots.acquire(blocking=False)
+    slots.release()
+    slots.release()
+
+
 def _local_result(latex: str = "x+y") -> RecognitionResult:
     return RecognitionResult(latex, "MathCraft", 0.25)
 

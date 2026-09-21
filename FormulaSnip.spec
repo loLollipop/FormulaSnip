@@ -26,9 +26,10 @@ if not bundled_formula_model.is_dir():
     )
 
 datas = [
-    (str(project_root / "formulasnip" / "assets"), "formulasnip/assets"),
     (str(project_root / "LICENSE"), "."),
     (str(project_root / "README.md"), "."),
+    (str(project_root / "SECURITY.md"), "."),
+    (str(project_root / "PRIVACY.md"), "."),
     (str(project_root / "THIRD_PARTY_NOTICES.md"), "."),
     (str(project_root / "THIRD_PARTY_LICENSES"), "THIRD_PARTY_LICENSES"),
     (str(project_root / "pyproject.toml"), "."),
@@ -36,6 +37,12 @@ datas = [
     (str(project_root / "MODEL_ASSETS.json"), "."),
     (str(bundled_formula_model), "MathCraft/models/mathcraft-formula-rec"),
 ]
+asset_root = project_root / "formulasnip" / "assets"
+datas.extend(
+    (str(path), str(Path("formulasnip/assets") / path.relative_to(asset_root).parent))
+    for path in asset_root.rglob("*")
+    if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+)
 binaries = []
 hiddenimports = [
     "PySide6.QtWebEngineCore",
@@ -54,7 +61,6 @@ hiddenimports = [
 # runtime. The dictionary removes duplicates from overlapping dependency trees.
 metadata = {}
 for distribution_name in (
-    "formulasnip",
     "PySide6_Addons",
     "PySide6_Essentials",
     "shiboken6",
@@ -76,6 +82,20 @@ for distribution_name in (
     for source, destination in copy_metadata(distribution_name, recursive=True):
         metadata[destination] = source
 datas.extend((source, destination) for destination, source in metadata.items())
+
+# The installer uses this one sanitized file to prove that the portable build
+# matches the source version. Do not copy the editable dist-info directory:
+# it also contains direct_url.json and uv build metadata with local paths.
+project_metadata = copy_metadata("formulasnip", recursive=False)
+if len(project_metadata) != 1:
+    raise SystemExit("Expected one FormulaSnip metadata directory.")
+project_metadata_source, project_metadata_destination = project_metadata[0]
+datas.append(
+    (
+        str(Path(project_metadata_source) / "METADATA"),
+        str(project_metadata_destination),
+    )
+)
 
 
 def is_downloadable_model_file(source: str) -> bool:
@@ -151,6 +171,32 @@ analysis.binaries = type(analysis.binaries)(
     for item in analysis.binaries
     if Path(item[0]).name.lower() not in _external_icu_names
 )
+
+
+def is_release_resource(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    parts = normalized.split("/")
+    return not (
+        "__pycache__" in parts
+        or normalized.endswith((".pyc", "/direct_url.json", ".debug.pak"))
+        # Safetensors 0.8.0 ships an optional upstream build SBOM whose
+        # path+file:///D:/a/... bom-ref leaks its CI workspace. It is not a
+        # runtime resource; keep this exclusion exact so new SBOMs are reviewed.
+        or (
+            "/safetensors-0.8.0.dist-info/sboms/" in f"/{normalized}"
+            and normalized.endswith((".json", ".xml"))
+        )
+        or parts[-1] == "v8_context_snapshot.debug.bin"
+        or ("qmltooling" in parts and normalized.endswith(".dll"))
+        or ("qtwebengine" in normalized and "devtools" in normalized
+            and "debug" in normalized)
+    )
+
+
+analysis.datas = type(analysis.datas)(item for item in analysis.datas
+                                    if is_release_resource(item[0]))
+analysis.binaries = type(analysis.binaries)(item for item in analysis.binaries
+                                          if is_release_resource(item[0]))
 pyz = PYZ(analysis.pure)
 
 exe = EXE(

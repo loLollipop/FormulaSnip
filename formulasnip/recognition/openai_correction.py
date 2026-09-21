@@ -9,7 +9,7 @@ import socket
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from io import BytesIO
-from threading import Event, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic, perf_counter
 from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -31,6 +31,7 @@ AI_TIMEOUT = (5.0, 10.0)
 AI_TOTAL_TIMEOUT_SECONDS = 30.0
 AI_CANCEL_POLL_SECONDS = 0.02
 AI_REQUEST_CLEANUP_SECONDS = 0.15
+_TRANSPORT_SLOTS = BoundedSemaphore(2)
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGE_PIXELS = 4_000_000
@@ -597,6 +598,7 @@ def _request_json_response(
                         owned_session.close()
                 finally:
                     tracker.close()
+                    _TRANSPORT_SLOTS.release()
                     finished.set()
 
     worker = Thread(
@@ -604,7 +606,19 @@ def _request_json_response(
         name="FormulaSnip OpenAI request",
         daemon=True,
     )
-    worker.start()
+    if not _TRANSPORT_SLOTS.acquire(blocking=False):
+        if owned_session is not None:
+            owned_session.close()
+        tracker.close()
+        raise AICorrectionError("AI 连接仍在结束，请稍后重试。")
+    try:
+        worker.start()
+    except Exception:
+        _TRANSPORT_SLOTS.release()
+        if owned_session is not None:
+            owned_session.close()
+        tracker.close()
+        raise
     try:
         while True:
             _raise_if_cancelled(cancel_event)

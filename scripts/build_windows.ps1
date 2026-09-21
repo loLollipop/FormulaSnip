@@ -108,7 +108,7 @@ try {
         throw "The frozen offline MathCraft model smoke test failed with exit code $($modelSmokeProcess.ExitCode)."
     }
 
-    foreach ($documentName in @("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "MODEL_ASSETS.json")) {
+    foreach ($documentName in @("LICENSE", "README.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md", "MODEL_ASSETS.json")) {
         Copy-Item `
             -LiteralPath (Join-Path $projectRoot $documentName) `
             -Destination (Join-Path $applicationDirectory $documentName) `
@@ -120,6 +120,8 @@ try {
         -Recurse `
         -Force
 
+    uv run --locked python scripts\verify_release_bundle.py $applicationDirectory
+    if ($LASTEXITCODE -ne 0) { throw "Release bundle hygiene verification failed." }
     if (Test-Path -LiteralPath $archivePath) {
         Remove-Item -LiteralPath $archivePath -Force
     }

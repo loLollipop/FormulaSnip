@@ -11,6 +11,22 @@ from formulasnip.recognition.quality import (
 )
 
 
+@pytest.mark.parametrize("size", [4097, 5_000_000])
+def test_oversized_quality_input_never_enters_scans(monkeypatch, size) -> None:
+    from formulasnip.recognition import quality
+
+    monkeypatch.setattr(quality, "_mask_literal_contexts",
+                        lambda _value: pytest.fail("expensive scan reached"))
+    report = assess_latex("x" * size)
+    assert report.issues == ("输出异常过长",)
+    assert report.score == 0
+
+
+@pytest.mark.parametrize("size", [900, 4096])
+def test_quality_boundary_remains_accepted(size) -> None:
+    assert assess_latex("x" * size).score >= 0
+
+
 def test_quality_detects_malformed_patterns_deterministically() -> None:
     report = assess_latex("frac{x}{y--z")
     assert report.issues == (

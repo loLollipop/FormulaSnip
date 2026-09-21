@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageStat
 
+from formulasnip.core.limits import MAX_QUALITY_SCAN_CHARS
+
 _BARE_COMMAND = re.compile(r"(?<!\\)\b(frac|sqrt)\s*\{")
 _REPEATED_OPERATOR = re.compile(r"(?<!-)--(?![-=>])|(?<!\+)\+\+(?!\+)")
 _REPEATED_RELATION = re.compile(r"==")
@@ -40,6 +42,8 @@ class QualityReport:
 def assess_latex(latex: str) -> QualityReport:
     """Return deterministic syntax heuristics, not model confidence."""
 
+    if len(latex) > MAX_QUALITY_SCAN_CHARS:
+        return QualityReport(("输出异常过长",), 0)
     issues: list[str] = []
     penalties: list[int] = []
     structural_latex = _mask_literal_contexts(latex)

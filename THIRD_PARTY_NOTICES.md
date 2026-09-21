@@ -23,7 +23,10 @@ Additional license texts that are absent from upstream wheels are preserved in
 
 - PySide6 Essentials, PySide6 Addons, and Shiboken6 are distributed by Qt under a choice of
   LGPL-3.0-only, GPL-2.0-only, or GPL-3.0-only. FormulaSnip uses the
-  GPL-3.0-only option. Source: https://code.qt.io/cgit/pyside/pyside-setup.git/
+  GPL-3.0-only option as the project's intended distribution choice. Qt,
+  PySide6, QtWebEngine and Chromium obligations remain **Needs Manual License Review**,
+  including credits, corresponding source and bundled subcomponents.
+  Source: https://code.qt.io/cgit/pyside/pyside-setup.git/
 - MathJax 3.2.2 is Apache-2.0 licensed. FormulaSnip vendors the self-contained
   `tex-svg-full.js` component for fully offline formula preview; its license is
   included at `THIRD_PARTY_LICENSES/mathjax-3.2.2-LICENSE.txt`. Source:
@@ -50,3 +53,33 @@ Additional license texts that are absent from upstream wheels are preserved in
   digest, file sizes, and per-file SHA-256 values. The applicable GPL-3.0-only
   license text is the root `LICENSE`. Source:
   https://github.com/SakuraMathcraft/MathCraft-Models
+
+The model's upstream GPL declaration is not a completed legal review of weight
+redistribution or the preferred form for modification: **Needs Manual License Review**.
+
+## Exact-version license additions
+
+`THIRD_PARTY_LICENSES/manifest.json` records exact source URLs, artifact/text
+SHA-256 values and review status. ANTLR runtime 4.9.3 BSD-3-Clause text is copied
+from ANTLR's `4.9.3` tag (the complete upstream file also includes JS MIT notices).
+RapidOCR 3.5.0 and tokenizers 0.21.4 Apache-2.0 texts are copied from their exact
+`v3.5.0` and `v0.21.4` tags. These files are included through the existing license
+directory packaging rule; final binary inclusion still needs verification.
+
+Flatbuffers 25.12.19 remains **Needs Manual License Review**: its exact PyPI wheel
+contains no LICENSE/NOTICE, PyPI offers no sdist, and the corresponding attempted
+upstream tag URL did not resolve. The inspected wheel URL and SHA-256 are recorded;
+no license from an unverified version has been substituted. This manifest is a
+supplemental inventory, not a complete SBOM or legal clearance.
+
+## Transformers advisory handling
+
+MathCraft OCR 0.3.1 pins Transformers exactly to 4.55.4. The release audit identified
+12 advisory records for that version. FormulaSnip's current CPU ONNX path disables
+Torch/TF/Flax, loads locked local tokenizer/processor files, and does not call
+Trainer, AutoModel, checkpoint deserialization or `save_pretrained()`. Screenshot
+input has not been shown to reach the reported checkpoint/config/path attack
+paths. This is a scoped reachability assessment, not a claim that Transformers
+is vulnerability-free. A per-advisory review, upstream-compatible upgrade and
+frozen recognition regression checks remain manual release gates. Do not bypass
+MathCraft's version constraint with an untested upgrade.

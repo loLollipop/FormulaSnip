@@ -59,8 +59,10 @@ if (-not $IsWindows -and $env:OS -ne "Windows_NT") {
 if (-not (Test-Path -LiteralPath (Join-Path $applicationDirectory "FormulaSnip.exe") -PathType Leaf)) {
     throw "Build the portable application first: scripts\build_windows.ps1 -SkipInstaller"
 }
+uv run --locked --project $projectRoot python (Join-Path $PSScriptRoot "verify_release_bundle.py") $applicationDirectory
+if ($LASTEXITCODE -ne 0) { throw "Release bundle hygiene verification failed." }
 
-foreach ($documentName in @("LICENSE", "README.md", "THIRD_PARTY_NOTICES.md")) {
+foreach ($documentName in @("LICENSE", "README.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md")) {
     Copy-Item `
         -LiteralPath (Join-Path $projectRoot $documentName) `
         -Destination (Join-Path $applicationDirectory $documentName) `
@@ -118,8 +120,62 @@ if ($null -ne $retiredRapidEntries) {
 }
 
 $modelLockPath = Join-Path $projectRoot "MODEL_ASSETS.json"
+$packagedModelLockPath = Join-Path $applicationDirectory "_internal\MODEL_ASSETS.json"
 $bundledModelPath = Join-Path $applicationDirectory "_internal\MathCraft\models\mathcraft-formula-rec"
 $prepareModelScript = Join-Path $projectRoot "scripts\prepare_bundled_model.py"
+$modelLockHash = (Get-FileHash -LiteralPath $modelLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (-not (Test-Path -LiteralPath $packagedModelLockPath -PathType Leaf)) {
+    throw "The packaged MODEL_ASSETS.json is missing. Rebuild the portable application first."
+}
+$packagedModelLockHash = (
+    Get-FileHash -LiteralPath $packagedModelLockPath -Algorithm SHA256
+).Hash.ToLowerInvariant()
+if ($packagedModelLockHash -ne $modelLockHash) {
+    throw "The packaged MODEL_ASSETS.json does not match the project lock. Rebuild the portable application first."
+}
+$modelLock = Get-Content -LiteralPath $modelLockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$modelBundleEntries = @($modelLock.files)
+if ($modelBundleEntries.Count -eq 0) {
+    throw "The model lock does not contain files for the update installer."
+}
+$encodedModelEntries = [System.Collections.Generic.List[string]]::new()
+$seenModelPaths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal
+)
+foreach ($modelBundleEntry in $modelBundleEntries) {
+    $modelBundleFile = [string]$modelBundleEntry.path
+    $modelBundleSize = $modelBundleEntry.size
+    $modelBundleSha256 = [string]$modelBundleEntry.sha256
+    if (
+        [string]::IsNullOrWhiteSpace($modelBundleFile) -or
+        [System.IO.Path]::IsPathRooted($modelBundleFile) -or
+        $modelBundleFile -notmatch '^[A-Za-z0-9._/-]+$' -or
+        $modelBundleFile.Contains("\\") -or
+        (($modelBundleFile -split '/') -contains "..") -or
+        (($modelBundleFile -split '/') -contains ".") -or
+        -not $seenModelPaths.Add($modelBundleFile)
+    ) {
+        throw "The model lock contains an unsafe or duplicate file path for the update installer."
+    }
+    if (
+        $modelBundleSize -isnot [int] -and
+        $modelBundleSize -isnot [long]
+    ) {
+        throw "The model lock contains an invalid file size for the update installer."
+    }
+    $modelBundleSize = [long]$modelBundleSize
+    if ($modelBundleSize -le 0) {
+        throw "The model lock contains an invalid file size for the update installer."
+    }
+    if ($modelBundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "The model lock contains an invalid SHA-256 for the update installer."
+    }
+    $encodedModelPath = $modelBundleFile.Replace('/', '\')
+    $encodedModelEntries.Add(
+        "$encodedModelPath;$modelBundleSize;$modelBundleSha256"
+    )
+}
+$modelBundleManifest = $encodedModelEntries -join "|"
 uv run --project $projectRoot python $prepareModelScript `
     --lock $modelLockPath `
     --destination $bundledModelPath `
@@ -152,7 +208,17 @@ Push-Location $projectRoot
 try {
     & $IsccPath "/Qp" "/DAppVersion=$appVersion" $installerScript
     if ($LASTEXITCODE -ne 0) {
-        throw "Inno Setup compilation failed."
+        throw "Full Inno Setup compilation failed."
+    }
+    & $IsccPath `
+        "/Qp" `
+        "/DAppVersion=$appVersion" `
+        "/DUpdatePackage=1" `
+        "/DModelLockSha256=$modelLockHash" `
+        "/DModelBundleEntries=$modelBundleManifest" `
+        $installerScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Lightweight Inno Setup compilation failed."
     }
 }
 finally {
@@ -160,16 +226,24 @@ finally {
 }
 
 $installerPath = Join-Path $projectRoot "dist\FormulaSnip-v$appVersion-windows-x64-setup.exe"
+$updateInstallerPath = Join-Path $projectRoot "dist\FormulaSnip-v$appVersion-windows-x64-update.exe"
 if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "The expected installer was not generated: $installerPath"
 }
+if (-not (Test-Path -LiteralPath $updateInstallerPath -PathType Leaf)) {
+    throw "The expected lightweight installer was not generated: $updateInstallerPath"
+}
 
 $installer = Get-Item -LiteralPath $installerPath
+$updateInstaller = Get-Item -LiteralPath $updateInstallerPath
 Write-Output "Installer: $($installer.FullName) ($([Math]::Round($installer.Length / 1MB, 1)) MiB)"
+Write-Output "Update installer: $($updateInstaller.FullName) ($([Math]::Round($updateInstaller.Length / 1MB, 1)) MiB)"
 
-$manifestPath = Join-Path $projectRoot "dist\FormulaSnip-update.json"
+$legacyManifestPath = Join-Path $projectRoot "dist\FormulaSnip-update.json"
+$manifestV2Path = Join-Path $projectRoot "dist\FormulaSnip-update-v2.json"
 $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$manifest = [ordered]@{
+$updateInstallerHash = (Get-FileHash -LiteralPath $updateInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$legacyManifest = [ordered]@{
     schema_version = 1
     version = $appVersion
     tag = "v$appVersion"
@@ -180,8 +254,24 @@ $manifest = [ordered]@{
         sha256 = $installerHash
     }
 }
-$manifestJson = $manifest | ConvertTo-Json -Depth 3
+$manifestV2 = [ordered]@{
+    schema_version = 2
+    version = $appVersion
+    tag = "v$appVersion"
+    notes = $releaseNotes
+    model_bundle_sha256 = $modelLockHash
+    asset = $legacyManifest.asset
+    update_asset = [ordered]@{
+        name = $updateInstaller.Name
+        size = $updateInstaller.Length
+        sha256 = $updateInstallerHash
+    }
+}
+$legacyManifestJson = $legacyManifest | ConvertTo-Json -Depth 3
+$manifestV2Json = $manifestV2 | ConvertTo-Json -Depth 3
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
-Write-Output "Update manifest: $manifestPath"
+[System.IO.File]::WriteAllText($legacyManifestPath, $legacyManifestJson, $utf8NoBom)
+[System.IO.File]::WriteAllText($manifestV2Path, $manifestV2Json, $utf8NoBom)
+Write-Output "Legacy update manifest: $legacyManifestPath"
+Write-Output "Update manifest v2: $manifestV2Path"
 Write-Output "Release notes: $ReleaseNotesPath"
