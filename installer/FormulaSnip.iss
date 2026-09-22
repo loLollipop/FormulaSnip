@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.11"
+  #define AppVersion "0.2.12"
 #endif
 #ifdef UpdatePackage
   #ifndef ModelLockSha256

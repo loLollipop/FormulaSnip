@@ -13,7 +13,6 @@ from PySide6.QtCore import (
     QRect,
     QSettings,
     QSignalBlocker,
-    QSize,
     QStandardPaths,
     Qt,
     QThreadPool,
@@ -31,6 +30,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QHideEvent,
     QImage,
+    QKeyEvent,
     QMouseEvent,
     QMoveEvent,
     QPainter,
@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QStackedWidget,
-    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -88,6 +87,7 @@ from formulasnip.update import (
     ReleaseInfo,
     is_installed_build,
     launch_verified_installer,
+    release_verified_installer,
     should_check_for_updates,
 )
 
@@ -100,6 +100,7 @@ ORB_PALETTES = {
 
 class FloatingOrb(QWidget):
     capture_requested = Signal()
+    cancel_requested = Signal()
     settings_requested = Signal()
     quit_requested = Signal()
     close_requested = Signal()
@@ -128,6 +129,7 @@ class FloatingOrb(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(68, 68)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAccessibleName("FormulaSnip 悬浮球")
         self.setAccessibleDescription("左键截取公式 · 拖动调整位置 · 右键打开菜单")
@@ -167,13 +169,21 @@ class FloatingOrb(QWidget):
         self.set_logo_path(logo_path)
 
         self._menu = QMenu(self)
+        self._cancel_action = self._menu.addAction("取消当前识别")
+        self._cancel_action.setVisible(False)
+        self._cancel_action.triggered.connect(self.cancel_requested.emit)
+        self._menu.addSeparator()
         settings_action = self._menu.addAction("打开设置")
         quit_action = self._menu.addAction("退出软件")
         settings_action.triggered.connect(self.settings_requested.emit)
         quit_action.triggered.connect(self.quit_requested.emit)
 
     def menu_action_texts(self) -> list[str]:
-        return [action.text() for action in self._menu.actions()]
+        return [
+            action.text()
+            for action in self._menu.actions()
+            if not action.isSeparator() and action.isVisible()
+        ]
 
     def show_at_default_position(self) -> None:
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
@@ -224,6 +234,7 @@ class FloatingOrb(QWidget):
         self._busy = busy
         self._busy_message = message
         self._refresh_interaction_state()
+        self._cancel_action.setVisible(busy)
         self._sync_busy_indicator()
         self.update()
 
@@ -338,6 +349,13 @@ class FloatingOrb(QWidget):
             painter.setBrush(QColor("#34d399" if self._has_result else "#f59e0b"))
             painter.drawEllipse(self.width() - 18, 7, 11, 11)
 
+        if self.hasFocus():
+            focus_pen = QPen(QColor("#c7d2fe"), 2)
+            focus_pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(focus_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(self.rect().adjusted(1, 1, -2, -2))
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
             self._show_context_menu_below()
@@ -394,7 +412,23 @@ class FloatingOrb(QWidget):
         )
 
     def _show_context_menu_below(self) -> None:
+        self._cancel_action.setVisible(self._busy)
         self._menu.popup(self._context_menu_position_below())
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            if not self._busy:
+                self.capture_requested.emit()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Menu or (
+            event.key() == Qt.Key.Key_F10
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            self._show_context_menu_below()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _context_menu_position_below(self) -> QPoint:
         menu_size = self._menu.sizeHint()
@@ -472,26 +506,20 @@ class FloatingResultPanel(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 13, 14, 14)
-        outer.setSpacing(9)
+        outer.setContentsMargins(18, 16, 18, 18)
+        outer.setSpacing(10)
 
         header = QHBoxLayout()
         title = QLabel("公式识别结果")
         title.setObjectName("FloatingResultTitle")
         self.backend_label = QLabel()
         self.backend_label.setObjectName("FloatingMeta")
-        close_button = QPushButton()
+        close_button = QPushButton("×")
         close_button.setObjectName("FloatingCloseButton")
-        close_button.setIcon(
-            QApplication.style().standardIcon(
-                QStyle.StandardPixmap.SP_TitleBarCloseButton
-            )
-        )
-        close_button.setIconSize(QSize(14, 14))
-        close_button.setToolTip("收起结果")
-        close_button.setAccessibleName("关闭识别结果")
-        close_button.setAccessibleDescription("关闭当前识别结果窗口")
-        close_button.setFixedSize(32, 32)
+        close_button.setToolTip("放弃本次结果")
+        close_button.setAccessibleName("放弃本次结果")
+        close_button.setAccessibleDescription("放弃本次识别结果并关闭校对窗口")
+        close_button.setFixedSize(36, 36)
         close_button.clicked.connect(self._dismiss_result)
         header.addWidget(title)
         header.addWidget(self.backend_label)
@@ -499,9 +527,13 @@ class FloatingResultPanel(QWidget):
         header.addWidget(close_button)
         outer.addLayout(header)
 
+        preview_section_label = QLabel("公式预览")
+        preview_section_label.setObjectName("FloatingSectionLabel")
+        outer.addWidget(preview_section_label)
+
         self.preview_stack = QStackedWidget()
         self.preview_stack.setObjectName("FloatingPreviewStack")
-        self.preview_stack.setFixedHeight(168)
+        self.preview_stack.setFixedHeight(180)
         self.preview_message = QLabel("等待识别")
         self.preview_message.setObjectName("FloatingPreviewMessage")
         self.preview_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -556,6 +588,10 @@ class FloatingResultPanel(QWidget):
         self.source_switch.hide()
         outer.addWidget(self.source_switch)
 
+        latex_section_label = QLabel("LaTeX（可编辑）")
+        latex_section_label.setObjectName("FloatingSectionLabel")
+        outer.addWidget(latex_section_label)
+
         self.latex_view = LatexEditor()
         self.latex_view.setObjectName("FloatingLatex")
         self.latex_view.setMaximumHeight(68)
@@ -569,25 +605,43 @@ class FloatingResultPanel(QWidget):
         self.copy_latex_button.setObjectName("FloatingPrimary")
         self.copy_mathml_button = QPushButton("复制 MathML")
         for button in (self.copy_latex_button, self.copy_mathml_button):
-            button.setMinimumHeight(40)
+            button.setMinimumHeight(44)
             copy_row.addWidget(button)
+        self.copy_latex_button.setAccessibleName("复制 LaTeX")
+        self.copy_latex_button.setAccessibleDescription("复制当前校对后的 LaTeX 公式")
+        self.copy_mathml_button.setAccessibleName("复制 MathML")
+        self.copy_mathml_button.setAccessibleDescription(
+            "将当前 LaTeX 转换为 MathML 并复制"
+        )
         outer.addLayout(copy_row)
 
         self.recapture_button = QPushButton("重新截图")
-        self.recapture_button.setMinimumHeight(40)
+        self.recapture_button.setMinimumHeight(44)
+        self.recapture_button.setAccessibleName("重新截图")
+        self.recapture_button.setAccessibleDescription("放弃当前结果并重新框选公式")
         self.recapture_button.clicked.connect(self.recapture_requested.emit)
         outer.addWidget(self.recapture_button)
 
         self.status_label = QLabel()
         self.status_label.setObjectName("FloatingStatus")
+        self.status_label.setWordWrap(True)
+        self.status_label.setProperty("state", "info")
+        self.status_label.hide()
         outer.addWidget(self.status_label)
 
         self.copy_latex_button.clicked.connect(self._copy_latex)
         self.copy_mathml_button.clicked.connect(self._copy_mathml)
         self.latex_view.textChanged.connect(self._latex_edited)
         self.latex_view.limit_exceeded.connect(
-            lambda: self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            lambda: self._set_status(LATEX_LIMIT_MESSAGE, "error")
         )
+
+    def _set_status(self, message: str = "", state: str = "info") -> None:
+        normalized = state if state in {"info", "success", "error"} else "info"
+        self.status_label.setProperty("state", normalized)
+        self.status_label.setText(message)
+        self.status_label.setVisible(bool(message.strip()))
+        _refresh_style(self.status_label)
 
     def show_result(
         self,
@@ -616,6 +670,7 @@ class FloatingResultPanel(QWidget):
             candidate=None if edited_draft else selected_candidate,
         )
         self._show_near(anchor)
+        self.latex_view.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_error(self, message: str, anchor: QRect) -> None:
         self._clear_source_switch()
@@ -623,7 +678,9 @@ class FloatingResultPanel(QWidget):
         self.backend_label.setText("识别失败")
         self.preview_message.setText(message)
         self.preview_stack.setCurrentWidget(self.preview_message)
-        self.quality_label.setText("请检查模型安装后重新截图。")
+        self.quality_label.setText(
+            "请重新截图；若问题持续，请在设置中检查识别引擎。"
+        )
         self.quality_label.setProperty("warning", True)
         _refresh_style(self.quality_label)
         self._preview_timer.stop()
@@ -633,8 +690,9 @@ class FloatingResultPanel(QWidget):
         del blocker
         self.copy_latex_button.setDisabled(True)
         self.copy_mathml_button.setDisabled(True)
-        self.status_label.clear()
+        self._set_status()
         self._show_near(anchor)
+        self.recapture_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _configure_source_switch(
         self,
@@ -709,7 +767,7 @@ class FloatingResultPanel(QWidget):
         if candidate is None:
             return
         if len(candidate.latex) > MAX_LATEX_CHARS:
-            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            self._set_status(LATEX_LIMIT_MESSAGE, "error")
             return
         source_changed = source != self._active_source
         self._active_source = source
@@ -751,11 +809,11 @@ class FloatingResultPanel(QWidget):
     def _show_near(self, anchor: QRect) -> None:
         screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
         if screen is None:
-            self.resize(500, self.sizeHint().height())
+            self.resize(560, self.sizeHint().height())
             self.show()
             return
         area = screen.availableGeometry()
-        panel_width = min(500, max(280, area.width() - 24))
+        panel_width = min(560, max(300, area.width() - 24))
         self.setFixedWidth(panel_width)
         self.adjustSize()
         x = anchor.left() - self.width() - 12
@@ -778,9 +836,9 @@ class FloatingResultPanel(QWidget):
         try:
             QApplication.clipboard().setText(latex)
         except Exception as exc:
-            self.status_label.setText(f"复制失败：{exc}")
+            self._set_status(f"复制失败：{exc}", "error")
             return
-        self.status_label.setText("LaTeX 已复制")
+        self._set_status("LaTeX 已复制", "success")
         self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
@@ -793,7 +851,7 @@ class FloatingResultPanel(QWidget):
             return
         latex = self.latex_view.toPlainText()
         if len(latex) > MAX_LATEX_CHARS:
-            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            self._set_status(LATEX_LIMIT_MESSAGE, "error")
             return
         if not latex.strip():
             return
@@ -804,9 +862,9 @@ class FloatingResultPanel(QWidget):
             mime_data.setData("application/mathml+xml", mathml.encode("utf-8"))
             QApplication.clipboard().setMimeData(mime_data)
         except (FormulaSnipError, RuntimeError) as exc:
-            self.status_label.setText(str(exc))
+            self._set_status(str(exc), "error")
             return
-        self.status_label.setText("MathML 已复制，可粘贴到 Word/MathType")
+        self._set_status("MathML 已复制，可粘贴到 Word/MathType", "success")
         self._clear_source_switch()
         self._result = None
         self._preview_timer.stop()
@@ -819,7 +877,7 @@ class FloatingResultPanel(QWidget):
         self._preview_request_id = None
         if len(latex) > MAX_LATEX_CHARS:
             self._preview_timer.stop()
-            self.status_label.setText(LATEX_LIMIT_MESSAGE)
+            self._set_status(LATEX_LIMIT_MESSAGE, "error")
             return
         self.draft_changed.emit(latex)
         self._update_copy_buttons()
@@ -829,7 +887,7 @@ class FloatingResultPanel(QWidget):
                 edited=True,
                 candidate=None,
             )
-        self.status_label.setText("正在更新预览…" if latex.strip() else "")
+        self._set_status("正在更新预览…" if latex.strip() else "", "info")
         self._preview_timer.start()
 
     @Slot()
@@ -871,7 +929,7 @@ class FloatingResultPanel(QWidget):
             if edited:
                 self.quality_label.setText("LaTeX 为空，请继续修改。")
                 self.quality_label.setProperty("warning", True)
-                self.status_label.clear()
+                self._set_status("", "error")
                 _refresh_style(self.quality_label)
             return
         try:
@@ -886,13 +944,13 @@ class FloatingResultPanel(QWidget):
                 warnings.extend(self._persistent_result_warnings())
                 self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
                 self.quality_label.setProperty("warning", True)
-                self.status_label.setText("预览生成失败，可继续修改")
+                self._set_status("预览生成失败，可继续修改", "error")
                 _refresh_style(self.quality_label)
             return
         self._preview_request_id = request_id
         self.preview_stack.setCurrentWidget(self.preview_frame)
         self._show_pending_preview_quality(latex, edited=edited, candidate=candidate)
-        self.status_label.setText("正在生成预览…")
+        self._set_status("正在生成预览…", "info")
 
     def _show_pending_preview_quality(
         self,
@@ -936,13 +994,13 @@ class FloatingResultPanel(QWidget):
             else:
                 self.quality_label.setText("电子公式预览已更新，请核对后复制")
                 self.quality_label.setProperty("warning", False)
-            self.status_label.setText("预览已更新")
+            self._set_status()
         else:
             self._show_candidate_quality(
                 self._preview_request_candidate,
                 preview_pending=False,
             )
-            self.status_label.setText("电子公式已生成")
+            self._set_status()
         _refresh_style(self.quality_label)
 
     @Slot(int, str)
@@ -959,7 +1017,7 @@ class FloatingResultPanel(QWidget):
         warnings.extend(self._persistent_result_warnings())
         self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
         self.quality_label.setProperty("warning", True)
-        self.status_label.setText("预览生成失败，可继续修改")
+        self._set_status("预览生成失败，可继续修改", "error")
         _refresh_style(self.quality_label)
 
     def _persistent_result_warnings(self) -> tuple[str, ...]:
@@ -992,6 +1050,13 @@ class FloatingResultPanel(QWidget):
             self._preview_timer.stop()
             self.result_consumed.emit()
         event.accept()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self._dismiss_result()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
         self._preview_timer.stop()
@@ -1026,6 +1091,7 @@ class FloatingFormulaAssistant(QObject):
         self.preferences = self.settings_panel.preferences
         self._overlay: SnipOverlay | None = None
         self._worker: RecognitionWorker | None = None
+        self._recognition_cancel_requested = False
         self._capture_pending = False
         self._last_image: QImage | None = None
         self._last_result: RecognitionResult | None = None
@@ -1057,6 +1123,7 @@ class FloatingFormulaAssistant(QObject):
         self._tray_trigger_timer.timeout.connect(self._run_delayed_tray_trigger)
 
         self.orb.capture_requested.connect(self.start_capture)
+        self.orb.cancel_requested.connect(self._cancel_current_recognition)
         self.orb.settings_requested.connect(self.open_settings)
         self.orb.quit_requested.connect(QApplication.quit)
         self.orb.close_requested.connect(self._orb_close_requested)
@@ -1337,6 +1404,9 @@ class FloatingFormulaAssistant(QObject):
         dialog.update_requested.connect(
             lambda task=dialog: self._begin_update(release, task)
         )
+        cancel_signal = getattr(dialog, "cancel_requested", None)
+        if cancel_signal is not None:
+            cancel_signal.connect(lambda task=dialog: self._cancel_update(task))
         self._update_dialog = dialog
         dialog.show()
         dialog.raise_()
@@ -1425,6 +1495,26 @@ class FloatingFormulaAssistant(QObject):
         self._update_download_worker = worker
         self._thread_pool.start(worker)
 
+    @Slot()
+    def _cancel_update(self, source_dialog: UpdateDialog | None = None) -> None:
+        if source_dialog is not None and source_dialog is not self._update_dialog:
+            return
+        worker = self._update_download_worker
+        self._update_download_worker = None
+        pending = self._pending_update_install
+        self._pending_update_install = None
+        if pending is not None:
+            release_verified_installer(pending[0])
+        if worker is not None:
+            worker.cancel()
+            if worker.completed_path is not None:
+                release_verified_installer(worker.completed_path)
+                worker.completed_path = None
+                worker.completed_release = None
+        if self._update_dialog is not None:
+            self._update_dialog.show_cancelled()
+        self.settings_panel.set_update_status("更新已取消")
+
     @Slot(object)
     def _update_downloaded(
         self,
@@ -1433,9 +1523,11 @@ class FloatingFormulaAssistant(QObject):
         worker: UpdateDownloadWorker | None = None,
     ) -> None:
         if worker is not None and worker is not self._update_download_worker:
+            release_verified_installer(Path(path))
             return
         self._update_download_worker = None
         if self._shutdown:
+            release_verified_installer(Path(path))
             return
         self._pending_update_install = (Path(path), release)
         self._try_launch_pending_installer()
@@ -1462,15 +1554,54 @@ class FloatingFormulaAssistant(QObject):
             return False
         path, release = pending
         self._pending_update_install = None
+        logger = logging.getLogger(__name__)
+        asset_name = release.asset.name
+        package_kind = "lightweight" if release.is_lightweight_update else "full"
         try:
-            self.manager.close()
-            logging.getLogger(__name__).info("update-installer-launch")
-            started = launch_verified_installer(
-                path,
-                release.asset,
-                start_detached=QProcess.startDetached,
+            manager_close_started_at = time.perf_counter()
+            try:
+                self.manager.close()
+            except Exception:
+                logger.warning(
+                    "update-backend-close-finished elapsed_ms=%.1f result=error",
+                    (time.perf_counter() - manager_close_started_at) * 1000,
+                )
+                raise
+            logger.info(
+                "update-backend-close-finished elapsed_ms=%.1f result=closed",
+                (time.perf_counter() - manager_close_started_at) * 1000,
+            )
+            logger.info(
+                "update-installer-launch-start asset=%s kind=%s",
+                asset_name,
+                package_kind,
+            )
+            launch_started_at = time.perf_counter()
+            try:
+                started = launch_verified_installer(
+                    path,
+                    release.asset,
+                    start_detached=QProcess.startDetached,
+                )
+            except Exception:
+                logger.warning(
+                    "update-installer-launch-finished asset=%s kind=%s "
+                    "elapsed_ms=%.1f result=error",
+                    asset_name,
+                    package_kind,
+                    (time.perf_counter() - launch_started_at) * 1000,
+                )
+                raise
+            logger.info(
+                "update-installer-launch-finished asset=%s kind=%s "
+                "elapsed_ms=%.1f result=%s",
+                asset_name,
+                package_kind,
+                (time.perf_counter() - launch_started_at) * 1000,
+                "started" if started else "failed",
             )
         except Exception as exc:
+            release_verified_installer(path)
             log_exception("update-installer-launch-failed", exc)
             if self._shutdown:
                 self._reset_update_throttle_for_retry()
@@ -1482,7 +1613,7 @@ class FloatingFormulaAssistant(QObject):
         if not started:
             if self._shutdown:
                 self._reset_update_throttle_for_retry()
-                logging.getLogger(__name__).warning("update-installer-start-failed")
+                logger.warning("update-installer-start-failed")
             else:
                 self.manager = BackendManager()
             if dialog is not None and not self._shutdown:
@@ -1559,6 +1690,7 @@ class FloatingFormulaAssistant(QObject):
     def _can_start_capture(self) -> bool:
         return (
             not self._shutdown
+            and not self._recognition_cancel_requested
             and self._pending_update_install is None
             and self._worker is None
             and self._pending_recognition_image is None
@@ -1638,6 +1770,28 @@ class FloatingFormulaAssistant(QObject):
             self._worker.cancel_ai()
 
     @Slot()
+    def _cancel_current_recognition(self) -> None:
+        if self._recognition_cancel_requested:
+            return
+        worker = self._worker
+        if worker is not None:
+            self._recognition_cancel_requested = True
+            self.orb.set_busy(True, "正在取消识别…")
+            worker.cancel()
+            return
+        if self._pending_recognition_image is not None:
+            self._recognition_cancel_requested = True
+            self._clear_pending_recognition()
+            self._finish_recognition_cancellation()
+
+    def _finish_recognition_cancellation(self) -> None:
+        self._recognition_cancel_requested = False
+        self._pending_error = None
+        self.orb.set_busy(False)
+        self.orb.set_result_available(self._last_result is not None)
+        self._try_launch_pending_installer()
+
+    @Slot()
     def start_capture(self) -> None:
         if not self._can_start_capture():
             return
@@ -1699,6 +1853,7 @@ class FloatingFormulaAssistant(QObject):
         self._start_recognition(image)
 
     def _start_recognition(self, image: PILImage) -> None:
+        self._recognition_cancel_requested = False
         ai_api_key: str | None = None
         if self.preferences.ai_correction_enabled:
             try:
@@ -1778,6 +1933,10 @@ class FloatingFormulaAssistant(QObject):
             return
         delivery = worker.result_for_delivery(result)
         worker.release_resources()
+        if self._recognition_cancel_requested:
+            self._worker = None
+            self._finish_recognition_cancellation()
+            return
         if delivery is None:
             self._recognition_failed("识别任务已取消。")
         else:
@@ -1804,6 +1963,10 @@ class FloatingFormulaAssistant(QObject):
             worker.release_resources()
             return
         worker.release_resources()
+        if self._recognition_cancel_requested:
+            self._worker = None
+            self._finish_recognition_cancellation()
+            return
         self._recognition_failed(message)
 
     @Slot()

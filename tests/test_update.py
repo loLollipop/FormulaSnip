@@ -36,6 +36,7 @@ from formulasnip.update import (
     parse_manifest,
     parse_release,
     parse_version,
+    release_verified_installer,
     should_check_for_updates,
     validate_asset_url,
     verify_installer,
@@ -724,6 +725,40 @@ def test_cancelled_cached_installer_verification_preserves_complete_file(
     assert destination.read_bytes() == content
 
 
+def test_cancelled_after_cached_verification_releases_retained_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import formulasnip.update as update_module
+
+    content = b"complete cached installer"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    destination = tmp_path / name
+    destination.write_bytes(content)
+    asset = UpdateAsset(
+        name,
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+    cancellation = UpdateCancellation()
+    original_verify = update_module.verify_installer
+
+    def cancel_after_verification(*args: object, **kwargs: object) -> None:
+        original_verify(*args, **kwargs)
+        cancellation.cancel()
+
+    monkeypatch.setattr(update_module, "verify_installer", cancel_after_verification)
+
+    with pytest.raises(UpdateCancelled):
+        download_installer(asset, tmp_path, cancel_event=cancellation)
+
+    key = update_module._installer_cache_key(destination)
+    assert destination.read_bytes() == content
+    assert key not in update_module._VERIFIED_INSTALLERS
+    assert key not in update_module._VERIFIED_INSTALLER_HANDLES
+
+
 def test_successful_cached_installer_prunes_only_older_formula_installers(
     tmp_path: Path,
 ) -> None:
@@ -918,6 +953,65 @@ def test_update_download_worker_abandons_blocked_dns_after_cancel(
     assert worker.completed_path is None
 
 
+def test_cancelled_download_retry_waits_for_single_background_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from formulasnip.ui import update_dialog
+
+    first_started = Event()
+    release_first = Event()
+    first_finished = Event()
+    calls: list[Path] = []
+    released_paths: list[Path] = []
+    asset = UpdateAsset(
+        "FormulaSnip-v0.3.0-windows-x64-setup.exe",
+        "https://example.invalid/setup.exe",
+        1,
+        "0" * 64,
+    )
+    release = ReleaseInfo("0.3.0", "v0.3.0", "changes", asset)
+
+    def blocked_download(
+        _asset: UpdateAsset,
+        cache_directory: Path,
+        **_kwargs: Any,
+    ) -> Path:
+        calls.append(cache_directory)
+        first_started.set()
+        assert release_first.wait(2.0)
+        first_finished.set()
+        return cache_directory / asset.name
+
+    monkeypatch.setattr(update_dialog, "download_installer", blocked_download)
+    monkeypatch.setattr(
+        update_dialog,
+        "release_verified_installer",
+        lambda path: released_paths.append(Path(path)),
+    )
+    first = update_dialog.UpdateDownloadWorker(release, tmp_path / "first")
+    second = update_dialog.UpdateDownloadWorker(release, tmp_path / "second")
+    first_thread = Thread(target=first.run, daemon=True)
+    second_thread = Thread(target=second.run, daemon=True)
+    first_thread.start()
+    assert first_started.wait(1.0)
+    first.cancel()
+    first_thread.join(0.5)
+    assert not first_thread.is_alive()
+
+    second_thread.start()
+    assert not first_finished.wait(0.1)
+    assert calls == [tmp_path / "first"]
+    second.cancel()
+    second_thread.join(0.5)
+    assert not second_thread.is_alive()
+    assert calls == [tmp_path / "first"]
+
+    release_first.set()
+    assert first_finished.wait(1.0)
+    assert released_paths == [tmp_path / "first" / asset.name]
+
+
 def test_update_download_worker_falls_back_to_full_and_reports_actual_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,6 +1186,27 @@ def test_installer_launch_reuses_background_final_verification(
         asset,
         start_detached=lambda _program, _arguments: True,
     )
+
+
+def test_release_verified_installer_is_public_and_idempotent(tmp_path: Path) -> None:
+    content = b"setup"
+    path = tmp_path / "FormulaSnip-v0.3.0-windows-x64-update.exe"
+    path.write_bytes(content)
+    asset = UpdateAsset(
+        path.name,
+        "https://example.invalid",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+    verify_installer(path, asset, retain_lock=True)
+    key = update_module._installer_cache_key(path)
+    assert key in update_module._VERIFIED_INSTALLERS
+
+    release_verified_installer(path)
+    release_verified_installer(path)
+
+    assert key not in update_module._VERIFIED_INSTALLERS
+    assert key not in update_module._VERIFIED_INSTALLER_HANDLES
 
 
 def test_retained_installer_verification_denies_same_size_overwrite_until_launch(

@@ -969,6 +969,16 @@ def _forget_verified_installer(path: Path) -> None:
     _close_installer_read_lock(handle)
 
 
+def release_verified_installer(path: Path) -> None:
+    """Release any retained verification and deny-write lock for ``path``.
+
+    The operation is safe to repeat, including for paths that were never
+    retained or whose lock has already been consumed by installer launch.
+    """
+
+    _forget_verified_installer(Path(path))
+
+
 def _has_current_installer_verification(path: Path, asset: UpdateAsset) -> bool:
     if path.name != asset.name:
         _forget_verified_installer(path)
@@ -1212,6 +1222,11 @@ def _download_installer(
             _prune_retired_installers(cache_directory, asset.name)
             return destination
         except UpdateCancelled:
+            # Verification may have completed and transferred its Windows
+            # deny-write handle to the cache just before cancellation won the
+            # race. The cancelled caller will never launch this installer, so
+            # release that ownership while keeping the valid file for retry.
+            _forget_verified_installer(destination)
             raise
         except UpdateError:
             _forget_verified_installer(destination)

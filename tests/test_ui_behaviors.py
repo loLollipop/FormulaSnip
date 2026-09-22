@@ -949,9 +949,45 @@ def test_update_dialog_presents_download_waiting_and_error_states() -> None:
     assert dialog.status_panel.property("state") == "error"
     assert dialog.update_button.text() == "重试更新"
     assert dialog.update_button.isEnabled()
+    assert dialog.later_button.text() == "关闭"
     assert dialog.later_button.isEnabled()
     dialog.close()
     application.processEvents()
+
+
+@pytest.mark.parametrize("state", ("downloading", "waiting"))
+@pytest.mark.parametrize("action", ("button", "escape", "close"))
+def test_update_dialog_busy_cancellation_is_idempotent(
+    state: str,
+    action: str,
+) -> None:
+    application = _application()
+    dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
+    cancelled = QSignalSpy(dialog.cancel_requested)
+    reminded = QSignalSpy(dialog.remind_later_requested)
+    if state == "downloading":
+        dialog.show_downloading()
+        assert dialog.later_button.text() == "取消下载"
+    else:
+        dialog.show_waiting_for_recognition()
+        assert dialog.later_button.text() == "取消安装"
+    dialog.show()
+    application.processEvents()
+
+    if action == "button":
+        dialog.later_button.click()
+    elif action == "escape":
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+    else:
+        dialog.close()
+    application.processEvents()
+    dialog.reject()
+    dialog.close()
+
+    assert cancelled.count() == 1
+    assert reminded.count() == 0
+    assert dialog.later_button.text() == "正在取消…"
+    assert not dialog.later_button.isEnabled()
 
 
 def test_update_dialog_keeps_footer_visible_at_constrained_height() -> None:
@@ -1098,6 +1134,79 @@ def test_overlay_is_white_uses_arrow_cursor_and_preserves_cancel_semantics() -> 
     assert not captured_cancellations
 
 
+def test_overlay_right_click_and_source_pixel_small_selection_feedback() -> None:
+    application = _application()
+    screen = application.primaryScreen()
+    assert screen is not None
+    screenshot = QPixmap(200, 200)
+    screenshot.fill(Qt.GlobalColor.white)
+    too_small = SnipOverlay(screen, screenshot)
+    too_small.resize(100, 100)
+    too_small.show()
+    application.processEvents()
+
+    too_small._start = QPoint(5, 5)
+    too_small._end = QPoint(9, 9)
+    too_small_release = type(
+        "TooSmallRelease",
+        (),
+        {
+            "button": staticmethod(lambda: Qt.MouseButton.LeftButton),
+            "position": staticmethod(lambda: QPointF(9, 9)),
+        },
+    )()
+    too_small.mouseReleaseEvent(too_small_release)  # type: ignore[arg-type]
+    source = too_small._map_to_source(too_small._selection_rect())
+    assert (source.width(), source.height()) == (10, 10)
+    assert "选区过小" in too_small._selection_error
+
+    click = SnipOverlay(screen, screenshot)
+    click.resize(100, 100)
+    click.show()
+    click._start = QPoint(5, 5)
+    click.mouseReleaseEvent(
+        type(
+            "ClickRelease",
+            (),
+            {
+                "button": staticmethod(lambda: Qt.MouseButton.LeftButton),
+                "position": staticmethod(lambda: QPointF(5, 5)),
+            },
+        )()
+    )  # type: ignore[arg-type]
+    assert click._selection_rect().size().toTuple() == (1, 1)
+    assert "选区过小" in click._selection_error
+    application.processEvents()
+    assert not click.grab().isNull()
+
+    accepted = SnipOverlay(screen, screenshot)
+    accepted.resize(100, 100)
+    captures = QSignalSpy(accepted.captured)
+    accepted._start = QPoint(5, 5)
+    accepted._end = QPoint(10, 10)
+    accepted.mouseReleaseEvent(
+        type(
+            "AcceptedRelease",
+            (),
+            {
+                "button": staticmethod(lambda: Qt.MouseButton.LeftButton),
+                "position": staticmethod(lambda: QPointF(10, 10)),
+            },
+        )()
+    )  # type: ignore[arg-type]
+    assert captures.count() == 1
+    captured = captures.at(0)[0]
+    assert (captured.width(), captured.height()) == (12, 12)
+
+    cancellable = SnipOverlay(screen, screenshot)
+    cancelled = QSignalSpy(cancellable.cancelled)
+    cancellable.show()
+    QTest.mouseClick(cancellable, Qt.MouseButton.RightButton)
+    assert cancelled.count() == 1
+    too_small.close()
+    click.close()
+
+
 def test_floating_orb_click_menu_and_busy_state() -> None:
     application = _application()
     orb = FloatingOrb()
@@ -1157,6 +1266,24 @@ def test_floating_orb_click_menu_and_busy_state() -> None:
     orb.close()
 
 
+def test_floating_orb_keyboard_and_busy_cancel_action() -> None:
+    _application()
+    orb = FloatingOrb()
+    captures = QSignalSpy(orb.capture_requested)
+    cancellations = QSignalSpy(orb.cancel_requested)
+    assert orb.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    QTest.keyClick(orb, Qt.Key.Key_Return)
+    QTest.keyClick(orb, Qt.Key.Key_Space)
+    assert captures.count() == 2
+    orb.set_busy(True)
+    assert orb.menu_action_texts()[0] == "取消当前识别"
+    orb._cancel_action.trigger()
+    assert cancellations.count() == 1
+    QTest.keyClick(orb, Qt.Key.Key_Return)
+    assert captures.count() == 2
+    orb.close()
+
+
 def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     application = _application()
     panel = FloatingResultPanel()
@@ -1166,9 +1293,8 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
 
     close_button = panel.findChild(QPushButton, "FloatingCloseButton")
     assert close_button is not None
-    assert close_button.text() == ""
-    assert not close_button.icon().isNull()
-    assert close_button.accessibleName() == "关闭识别结果"
+    assert close_button.text() == "×"
+    assert close_button.accessibleName() == "放弃本次结果"
 
     margins = panel.preview_frame.layout().contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
@@ -1177,7 +1303,7 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
         12,
         12,
     )
-    assert panel.preview_stack.height() == 168
+    assert panel.preview_stack.height() == 180
 
     panel.show_result(result, QRect(20, 20, 68, 68))
     assert panel.formula_preview.current_backend == "mathjax"
@@ -1439,9 +1565,9 @@ def test_result_panel_only_reports_success_for_current_render_request(
     assert panel.preview_stack.currentWidget() is panel.preview_frame
 
     panel.formula_preview.rendered.emit(current_request, "mathjax")
-    assert panel.status_label.text() == "预览已更新"
+    assert panel.status_label.text() == ""
     panel.formula_preview.failed.emit(first_request, "late stale failure")
-    assert panel.status_label.text() == "预览已更新"
+    assert panel.status_label.text() == ""
     panel.close()
     application.processEvents()
 
@@ -1556,12 +1682,46 @@ def test_result_error_clears_status_from_previous_result() -> None:
     panel.latex_view.setPlainText("edited")
     panel._refresh_edited_preview()
     panel._preview_rendered(panel.formula_preview.request_id, "mathjax")
-    assert panel.status_label.text() == "预览已更新"
+    assert panel.status_label.text() == ""
 
     panel.show_error("识别失败", anchor)
 
     assert panel.status_label.text() == ""
+    assert panel.status_label.isHidden()
     panel.close()
+
+
+def test_result_panel_error_state_generic_help_and_escape_consumes() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    consumed = QSignalSpy(panel.result_consumed)
+    panel.show_error("识别失败", QRect(20, 20, 68, 68))
+    application.processEvents()
+    panel._set_status("预览失败", "error")
+    assert panel.status_label.wordWrap()
+    assert panel.status_label.property("state") == "error"
+    assert "设置中检查识别引擎" in panel.quality_label.text()
+    assert application.focusWidget() is panel.recapture_button
+    QTest.keyClick(panel.recapture_button, Qt.Key.Key_Escape)
+    assert panel.isHidden()
+    assert consumed.count() == 1
+
+
+def test_result_panel_escape_bubbles_from_focused_latex_editor() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    consumed = QSignalSpy(panel.result_consumed)
+    panel.show_result(
+        RecognitionResult("x", "MathCraft", 0.1),
+        QRect(20, 20, 68, 68),
+    )
+    application.processEvents()
+
+    assert application.focusWidget() is panel.latex_view
+    QTest.keyClick(panel.latex_view, Qt.Key.Key_Escape)
+
+    assert panel.isHidden()
+    assert consumed.count() == 1
 
 
 @pytest.mark.parametrize("comparison", ("equivalent", "not_compared"))
@@ -1683,7 +1843,7 @@ def test_result_panel_rerenders_and_copies_edited_latex(monkeypatch: Any) -> Non
     assert panel.preview_stack.currentWidget() is panel.preview_frame
     assert panel.status_label.text() == "正在生成预览…"
     panel._preview_rendered(panel.formula_preview.request_id, "mathjax")
-    assert panel.status_label.text() == "预览已更新"
+    assert panel.status_label.text() == ""
     panel.copy_latex_button.click()
     assert QApplication.clipboard().text() == "edited"
     QApplication.clipboard().clear()
@@ -1877,7 +2037,7 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
         "使用方法",
     ]
     assert panel.sidebar.width() == 220
-    assert panel.header.height() == 64
+    assert panel.header.height() == 78
     assert panel.brand_logo.size().width() == 30
     assert all(button.height() == 44 for button, _title in panel._nav_entries)
     assert all(not button.icon().isNull() for button, _title in panel._nav_entries)
@@ -1914,6 +2074,27 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     )
     assert all(button.accessibleName() for button in panel.color_buttons.values())
     assert panel.findChild(settings_ui.QWidget, "SettingsCTA") is None
+    panel.hide()
+
+
+def test_settings_header_subtitles_and_error_banner(tmp_path: Path) -> None:
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    assert panel.settings_error_label.objectName() == "SettingsErrorBanner"
+    assert panel.settings_error_label.isHidden()
+    expected = (
+        "启动、更新与引擎状态",
+        "本地识别与可选 AI 增强",
+        "调整圆环与中心 Logo",
+        "4 步完成截图、校对与复制",
+    )
+    for index, subtitle in enumerate(expected):
+        panel._select_page(index)
+        assert panel.page_subtitle.text() == subtitle
+        assert panel.page_subtitle.isVisibleTo(panel)
+    panel._set_settings_error("无法保存")
+    assert not panel.settings_error_label.isHidden()
+    panel._set_settings_error("")
+    assert panel.settings_error_label.isHidden()
     panel.hide()
 
 
@@ -2959,10 +3140,120 @@ def test_starting_download_cancels_overlapping_update_check(
     assistant.shutdown()
 
 
-def test_update_waits_for_active_recognition_before_starting_installer(
-    tmp_path: Path, monkeypatch: Any
+def test_cancelled_update_ignores_late_worker_signals_and_releases_results(
+    tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     _application()
+
+    class Worker:
+        def __init__(self, completed_path: Path) -> None:
+            self.completed_path: Path | None = completed_path
+            self.completed_release: ReleaseInfo | None = release
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    class Dialog:
+        def __init__(self) -> None:
+            self.cancelled_count = 0
+            self.progress: list[tuple[int, int]] = []
+            self.errors: list[str] = []
+
+        def show_cancelled(self) -> None:
+            self.cancelled_count += 1
+
+        def set_download_progress(self, received: int, total: int) -> None:
+            self.progress.append((received, total))
+
+        def show_error(self, message: str) -> None:
+            self.errors.append(message)
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    asset = UpdateAsset(installer.name, "https://example.invalid", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    worker = Worker(installer)
+    dialog = Dialog()
+    released: list[Path] = []
+    monkeypatch.setattr(
+        floating,
+        "release_verified_installer",
+        lambda path: released.append(Path(path)),
+    )
+    assistant._update_download_worker = worker  # type: ignore[assignment]
+    assistant._update_dialog = dialog  # type: ignore[assignment]
+
+    assistant._cancel_update(dialog)  # type: ignore[arg-type]
+    assistant._update_download_progress(1, 2, worker)  # type: ignore[arg-type]
+    assistant._update_downloaded(installer, release, worker)  # type: ignore[arg-type]
+    assistant._update_download_failed("late failure", worker)  # type: ignore[arg-type]
+
+    assert worker.cancelled is True
+    assert worker.completed_path is None
+    assert assistant._update_download_worker is None
+    assert assistant._pending_update_install is None
+    assert dialog.cancelled_count == 1
+    assert dialog.progress == []
+    assert dialog.errors == []
+    assert released == [installer, installer]
+    assistant.shutdown()
+
+
+@pytest.mark.parametrize("terminal", ("recognition", "shutdown"))
+def test_cancelled_waiting_install_never_launches(
+    terminal: str,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+
+    class RecognitionWorker:
+        def cancel(self) -> None:
+            pass
+
+    class Dialog:
+        def show_cancelled(self) -> None:
+            pass
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    asset = UpdateAsset(installer.name, "https://example.invalid", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+    launched: list[Path] = []
+    released: list[Path] = []
+    monkeypatch.setattr(
+        floating,
+        "launch_verified_installer",
+        lambda path, *_args, **_kwargs: launched.append(Path(path)) or True,
+    )
+    monkeypatch.setattr(
+        floating,
+        "release_verified_installer",
+        lambda path: released.append(Path(path)),
+    )
+    assistant._worker = RecognitionWorker()  # type: ignore[assignment]
+    assistant._pending_update_install = (installer, release)
+    assistant._update_dialog = Dialog()  # type: ignore[assignment]
+
+    assistant._cancel_update()
+    if terminal == "recognition":
+        assistant._recognition_finished(RecognitionResult("x", "test", 0.1))
+    else:
+        assistant.shutdown()
+
+    assert launched == []
+    assert released == [installer]
+    if terminal == "recognition":
+        assistant.shutdown()
+
+
+def test_update_waits_for_active_recognition_before_starting_installer(
+    tmp_path: Path, monkeypatch: Any, caplog: Any
+) -> None:
+    _application()
+    caplog.set_level("INFO", logger=floating.__name__)
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
     installer = tmp_path / "FormulaSnip-v0.3.0-windows-x64-setup.exe"
     installer.write_bytes(b"setup")
@@ -3001,6 +3292,12 @@ def test_update_waits_for_active_recognition_before_starting_installer(
     assistant._warmup_worker = None
     assert assistant._try_launch_pending_installer()
     assert events == ["close", "installer", "quit"]
+    assert "update-backend-close-finished" in caplog.text
+    assert "result=closed" in caplog.text
+    assert f"asset={installer.name}" in caplog.text
+    assert "kind=full" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert "result=started" in caplog.text
 
 
 def test_shutdown_launches_pending_installer_exactly_once(
@@ -3180,6 +3477,35 @@ def test_capture_during_model_warmup_is_queued_then_started_once(
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
+
+
+def test_cancelled_capture_waiting_for_warmup_is_released_and_not_started(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._model_warmup_state = "warming"
+    assistant._warmup_worker = object()  # type: ignore[assignment]
+    starts: list[Any] = []
+    monkeypatch.setattr(assistant, "_start_recognition", starts.append)
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+    assistant._captured(pixmap)
+    pending = assistant._pending_recognition_image
+    assert pending is not None
+
+    assistant._cancel_current_recognition()
+    assistant._model_warmup_finished()
+
+    assert starts == []
+    assert assistant._pending_recognition_image is None
+    assert assistant._recognition_cancel_requested is False
+    assert assistant.orb._busy is False
+    assert assistant._can_start_capture()
+    with pytest.raises(ValueError):
+        pending.getpixel((0, 0))
+    assistant.shutdown()
 
 
 def test_shutdown_releases_capture_waiting_for_model(
@@ -3540,6 +3866,66 @@ def test_cancelled_queued_ai_result_is_replaced_with_local_result(
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
+
+
+@pytest.mark.parametrize("terminal", ("finished", "failed"))
+def test_cancelled_running_recognition_converges_without_presenting_output(
+    terminal: str,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+
+    class Worker:
+        ai_enabled = False
+
+        def __init__(self) -> None:
+            self.cancelled = False
+            self.release_count = 0
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def result_for_delivery(
+            self, result: RecognitionResult
+        ) -> RecognitionResult:
+            return result
+
+        def release_resources(self) -> None:
+            self.release_count += 1
+
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    worker = Worker()
+    assistant._worker = worker  # type: ignore[assignment]
+    assistant.orb.set_busy(True)
+    monkeypatch.setattr(
+        assistant.panel,
+        "show_result",
+        lambda *_args: pytest.fail("cancelled result must stay hidden"),
+    )
+    monkeypatch.setattr(
+        assistant.panel,
+        "show_error",
+        lambda *_args: pytest.fail("cancelled failure must stay hidden"),
+    )
+
+    assistant._cancel_current_recognition()
+    if terminal == "finished":
+        assistant._worker_recognition_finished(
+            worker,  # type: ignore[arg-type]
+            RecognitionResult("late", "test", 0.1),
+        )
+    else:
+        assistant._worker_recognition_failed(worker, "late")  # type: ignore[arg-type]
+
+    assert worker.cancelled is True
+    assert worker.release_count == 1
+    assert assistant._worker is None
+    assert assistant._recognition_cancel_requested is False
+    assert assistant.orb._busy is False
+    assert assistant._pending_error is None
+    assert assistant._can_start_capture()
+    assistant.shutdown()
 
 
 def test_stale_worker_signals_do_not_change_current_worker_state(tmp_path: Path) -> None:

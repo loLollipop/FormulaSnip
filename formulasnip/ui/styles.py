@@ -25,6 +25,8 @@ def application_stylesheet(theme: str) -> str:
         "code": "#f4f6f9" if light else "#11151c",
         "success": "#1c7a56" if light else "#5fd3a3",
         "warning": "#9a5800" if light else "#fbbf24",
+        "error": "#b42318" if light else "#fda29b",
+        "error_soft": "#fff1f0" if light else "#321b20",
     }
     settings = {
         "window": "#F7F8FA" if light else "#101318",
@@ -39,6 +41,8 @@ def application_stylesheet(theme: str) -> str:
         "accent_text": "#FFFFFF" if light else "#101318",
         "hover": "#F1F4F8" if light else "#202630",
         "input": "#FFFFFF" if light else "#14181F",
+        "warning": "#9A5800" if light else "#FBBF24",
+        "warning_soft": "#FFF7E6" if light else "#33270F",
     }
     return f"""
 QWidget {{
@@ -90,16 +94,25 @@ QTextBrowser#UpdateNotes {{
 QTextBrowser#UpdateNotes QScrollBar:vertical {{
     background: transparent; width: 8px; margin: 4px 2px 4px 0;
 }}
-QTextBrowser#UpdateNotes QScrollBar::handle:vertical {{
+QScrollArea#UpdateContentScroll QScrollBar:vertical {{
+    background: transparent; width: 8px; margin: 4px 2px 4px 0;
+}}
+QTextBrowser#UpdateNotes QScrollBar::handle:vertical,
+QScrollArea#UpdateContentScroll QScrollBar::handle:vertical {{
     background: {colors['border_strong']}; min-height: 28px; border-radius: 4px;
 }}
-QTextBrowser#UpdateNotes QScrollBar::handle:vertical:hover {{
+QTextBrowser#UpdateNotes QScrollBar::handle:vertical:hover,
+QScrollArea#UpdateContentScroll QScrollBar::handle:vertical:hover {{
     background: {colors['muted']};
 }}
 QTextBrowser#UpdateNotes QScrollBar::add-line:vertical,
-QTextBrowser#UpdateNotes QScrollBar::sub-line:vertical {{ height: 0; }}
+QTextBrowser#UpdateNotes QScrollBar::sub-line:vertical,
+QScrollArea#UpdateContentScroll QScrollBar::add-line:vertical,
+QScrollArea#UpdateContentScroll QScrollBar::sub-line:vertical {{ height: 0; }}
 QTextBrowser#UpdateNotes QScrollBar::add-page:vertical,
-QTextBrowser#UpdateNotes QScrollBar::sub-page:vertical {{ background: transparent; }}
+QTextBrowser#UpdateNotes QScrollBar::sub-page:vertical,
+QScrollArea#UpdateContentScroll QScrollBar::add-page:vertical,
+QScrollArea#UpdateContentScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
 QLabel#UpdateMetaChip {{
     color: {colors['muted']}; background: {colors['surface_alt']};
     border: 1px solid {colors['border']}; border-radius: 7px;
@@ -153,6 +166,11 @@ QLabel#LogoSafetyText {{ color: {settings['muted']}; }}
 QLabel#BrandEdition {{ font-size: 11px; }}
 QLabel#PageTitle {{ font-size: 21px; font-weight: 600; }}
 QLabel#PageSubtitle {{ font-size: 12px; }}
+QLabel#SettingsErrorBanner {{
+    color: {settings['warning']}; background: {settings['warning_soft']};
+    border: 1px solid {settings['warning']}; border-radius: 8px;
+    margin: 10px 28px 0 28px; padding: 9px 12px;
+}}
 QLabel#CardTitle, QLabel#SettingsFieldLabel, QLabel#RowTitle {{
     font-size: 14px; font-weight: 600;
 }}
@@ -271,9 +289,9 @@ QDialog#UpdateDialog QPushButton:disabled {{
     border-color: {colors['border']};
 }}
 QWidget#FloatingResultPanel QPushButton#FloatingCloseButton {{
-    background: {colors['surface_alt']}; color: {colors['text']};
+    background: transparent; color: {colors['muted']};
     border: 1px solid {colors['border']}; border-radius: 8px;
-    padding: 0;
+    padding: 0; font-size: 22px; font-weight: 400;
 }}
 QWidget#FloatingResultPanel QPushButton#FloatingCloseButton:hover,
 QWidget#FloatingResultPanel QPushButton#FloatingCloseButton:focus {{
@@ -442,10 +460,14 @@ QWidget#SettingsPanel QScrollArea {{ background: transparent; border: none; }}
 QWidget#SettingsPanel QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QWidget#FloatingResultPanel {{
     background: {colors['surface']}; color: {colors['text']};
-    border: 1px solid {colors['border']}; border-radius: 10px;
+    border: 1px solid {colors['border_strong']}; border-radius: 12px;
 }}
-QLabel#FloatingResultTitle {{ color: {colors['text']}; font-size: 16px; font-weight: 700; }}
-QLabel#FloatingMeta {{ color: {colors['accent']}; font-size: 12px; }}
+QLabel#FloatingResultTitle {{ color: {colors['text']}; font-size: 17px; font-weight: 700; }}
+QLabel#FloatingMeta {{ color: {colors['muted']}; font-size: 12px; padding-left: 6px; }}
+QLabel#FloatingSectionLabel {{
+    color: {colors['muted']}; font-size: 11px; font-weight: 650;
+    padding-top: 2px;
+}}
 QStackedWidget#FloatingPreviewStack, QWidget#FloatingPreviewFrame,
 QLabel#FloatingPreviewMessage {{
     background: #ffffff; color: #334155; border: 1px solid #d8e0eb;
@@ -480,7 +502,12 @@ QPlainTextEdit#FloatingLatex {{
     border: 1px solid {colors['border']}; border-radius: 8px;
     padding: 7px; font-family: Consolas, monospace; font-size: 12px;
 }}
-QLabel#FloatingStatus {{ color: {colors['success']}; min-height: 18px; }}
+QLabel#FloatingStatus {{ color: {colors['muted']}; min-height: 18px; font-size: 12px; }}
+QLabel#FloatingStatus[state="success"] {{ color: {colors['success']}; }}
+QLabel#FloatingStatus[state="error"] {{
+    color: {colors['error']}; background: {colors['error_soft']};
+    border: 1px solid {colors['error']}; border-radius: 7px; padding: 6px 8px;
+}}
 QMenu {{
     background: {colors['surface']}; color: {colors['text']};
     border: 1px solid {colors['border']}; padding: 6px;

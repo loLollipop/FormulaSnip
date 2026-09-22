@@ -5,10 +5,11 @@ import re
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from threading import Event, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import TypeVar
 
-from PySide6.QtCore import QObject, QRunnable, QSize, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -30,9 +31,11 @@ from formulasnip.update import (
     UpdateCancelled,
     download_installer,
     fetch_latest_release,
+    release_verified_installer,
 )
 
 _CANCELLATION_POLL_SECONDS = 0.02
+_DOWNLOAD_OPERATION_SLOT = BoundedSemaphore(1)
 _ResultT = TypeVar("_ResultT")
 _HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _BULLET_PATTERN = re.compile(r"^\s*[-*+]\s+(.+)$")
@@ -45,27 +48,68 @@ def _run_abandonable(
     cancellation: UpdateCancellation,
     *,
     thread_name: str,
+    operation_slot: BoundedSemaphore | None = None,
+    abandon_result: Callable[[_ResultT], None] | None = None,
 ) -> _ResultT:
     """Run blocking network work without pinning its QThreadPool thread on cancel."""
     if cancellation.is_set():
         raise UpdateCancelled("Update operation cancelled.")
+    if operation_slot is not None:
+        while not operation_slot.acquire(timeout=_CANCELLATION_POLL_SECONDS):
+            if cancellation.is_set():
+                raise UpdateCancelled("Update operation cancelled.")
+        if cancellation.is_set():
+            operation_slot.release()
+            raise UpdateCancelled("Update operation cancelled.")
     completed = Event()
     results: list[_ResultT] = []
     failures: list[Exception] = []
+    state_lock = Lock()
+    abandoned = False
+
+    def discard(result: _ResultT) -> None:
+        if abandon_result is not None:
+            abandon_result(result)
 
     def invoke() -> None:
         try:
-            results.append(operation())
+            result = operation()
+            with state_lock:
+                should_discard = abandoned or cancellation.is_set()
+                if not should_discard:
+                    results.append(result)
+            if should_discard:
+                discard(result)
         except Exception as exc:
             failures.append(exc)
         finally:
+            if operation_slot is not None:
+                operation_slot.release()
             completed.set()
 
-    Thread(target=invoke, name=thread_name, daemon=True).start()
+    worker = Thread(target=invoke, name=thread_name, daemon=True)
+    try:
+        worker.start()
+    except Exception:
+        if operation_slot is not None:
+            operation_slot.release()
+        raise
     while not completed.wait(_CANCELLATION_POLL_SECONDS):
         if cancellation.is_set():
+            with state_lock:
+                abandoned = True
+                discarded = tuple(results)
+                results.clear()
+            for result in discarded:
+                discard(result)
             raise UpdateCancelled("Update operation cancelled.")
     if cancellation.is_set():
+        with state_lock:
+            abandoned = True
+            discarded = tuple(results)
+            results.clear()
+        for result in discarded:
+            discard(result)
         raise UpdateCancelled("Update operation cancelled.")
     if failures:
         raise failures[0]
@@ -180,10 +224,14 @@ def _repolish(widget: QWidget) -> None:
 class UpdateDialog(QDialog):
     update_requested = Signal()
     remind_later_requested = Signal()
+    cancel_requested = Signal()
 
     def __init__(self, current_version: str, release: ReleaseInfo) -> None:
         super().__init__()
         self.release = release
+        self._busy_state = "idle"
+        self._cancel_emitted = False
+        self._remind_emitted = False
         self.setObjectName("UpdateDialog")
         self.setWindowTitle("FormulaSnip 更新")
         self.setWindowIcon(application_icon())
@@ -222,14 +270,14 @@ class UpdateDialog(QDialog):
         header_layout.addLayout(heading_layout, 1)
         layout.addWidget(header)
 
-        content_scroll = QScrollArea()
-        content_scroll.setObjectName("UpdateContentScroll")
-        content_scroll.setWidgetResizable(True)
-        content_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content_scroll.setHorizontalScrollBarPolicy(
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setObjectName("UpdateContentScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        content_scroll.setMinimumHeight(0)
+        self.content_scroll.setMinimumHeight(0)
 
         content = QWidget()
         content.setObjectName("UpdateContent")
@@ -326,8 +374,8 @@ class UpdateDialog(QDialog):
         status_layout.addWidget(self.progress_bar)
         self.status_panel.hide()
         content_layout.addWidget(self.status_panel)
-        content_scroll.setWidget(content)
-        layout.addWidget(content_scroll, 1)
+        self.content_scroll.setWidget(content)
+        layout.addWidget(self.content_scroll, 1)
 
         footer = QFrame()
         footer.setObjectName("UpdateFooter")
@@ -349,15 +397,37 @@ class UpdateDialog(QDialog):
 
     @Slot()
     def _remind_later(self) -> None:
+        if self._busy_state in {"downloading", "waiting", "cancelling"}:
+            self._request_cancel()
+            return
         self.hide()
+        self._emit_remind_later()
+
+    def _emit_remind_later(self) -> None:
+        if self._remind_emitted:
+            return
+        self._remind_emitted = True
         self.remind_later_requested.emit()
 
+    def _request_cancel(self) -> None:
+        if self._cancel_emitted:
+            return
+        self._cancel_emitted = True
+        self._busy_state = "cancelling"
+        self.later_button.setText("正在取消…")
+        self.later_button.setEnabled(False)
+        self._show_status("info", "正在取消更新…", progress=False)
+        self.cancel_requested.emit()
+
     def show_downloading(self) -> None:
+        self._busy_state = "downloading"
+        self._cancel_emitted = False
         self.progress_bar.setValue(0)
         self._show_status("progress", "正在下载更新", progress=True, detail="0%")
         self.update_button.setText("正在更新…")
         self.update_button.setEnabled(False)
-        self.later_button.setEnabled(False)
+        self.later_button.setText("取消下载")
+        self.later_button.setEnabled(True)
 
     def set_download_progress(self, received: int, total: int) -> None:
         value = int(received * 100 / total) if total > 0 else 0
@@ -369,6 +439,8 @@ class UpdateDialog(QDialog):
         )
 
     def show_waiting_for_recognition(self) -> None:
+        self._busy_state = "waiting"
+        self._cancel_emitted = False
         self.progress_bar.setValue(100)
         self._show_status(
             "waiting",
@@ -377,21 +449,48 @@ class UpdateDialog(QDialog):
         )
         self.update_button.setText("等待安装")
         self.update_button.setEnabled(False)
-        self.later_button.setEnabled(False)
+        self.later_button.setText("取消安装")
+        self.later_button.setEnabled(True)
 
     def show_error(self, message: str) -> None:
+        self._busy_state = "idle"
         self._show_status("error", message, progress=False)
         self.update_button.setText("重试更新")
         self.update_button.setEnabled(True)
+        self.later_button.setText("关闭")
+        self.later_button.setEnabled(True)
+
+    def show_cancelled(self) -> None:
+        self._busy_state = "idle"
+        self._show_status("info", "更新已取消", progress=False)
+        self.update_button.setText("重新下载")
+        self.update_button.setEnabled(True)
+        self.later_button.setText("关闭")
         self.later_button.setEnabled(True)
 
     def show_source_build_message(self) -> None:
+        self._busy_state = "idle"
         self._show_status(
             "info",
             "当前为源码或便携版本，已为你打开 GitHub 发布页",
             progress=False,
         )
         self.update_button.setText("再次打开发布页")
+
+    def reject(self) -> None:
+        if self._busy_state in {"downloading", "waiting", "cancelling"}:
+            self._request_cancel()
+            self.hide()
+            return
+        self._emit_remind_later()
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._busy_state in {"downloading", "waiting", "cancelling"}:
+            self._request_cancel()
+        else:
+            self._emit_remind_later()
+        event.accept()
 
     def _show_status(
         self,
@@ -408,6 +507,10 @@ class UpdateDialog(QDialog):
         self.progress_bar.setVisible(progress)
         self.status_panel.show()
         _repolish(self.status_panel)
+        QTimer.singleShot(
+            0,
+            lambda: self.content_scroll.ensureWidgetVisible(self.status_panel, 0, 14),
+        )
 
 
 class UpdateCheckSignals(QObject):
@@ -496,6 +599,8 @@ class UpdateDownloadWorker(QRunnable):
                 ),
                 self._cancellation,
                 thread_name="FormulaSnip-UpdateDownload",
+                operation_slot=_DOWNLOAD_OPERATION_SLOT,
+                abandon_result=release_verified_installer,
             )
         except UpdateCancelled:
             return
@@ -520,6 +625,8 @@ class UpdateDownloadWorker(QRunnable):
                     ),
                     self._cancellation,
                     thread_name="FormulaSnip-UpdateDownload-Fallback",
+                    operation_slot=_DOWNLOAD_OPERATION_SLOT,
+                    abandon_result=release_verified_installer,
                 )
             except UpdateCancelled:
                 return
@@ -533,4 +640,5 @@ class UpdateDownloadWorker(QRunnable):
             self.completed_release = completed_release
             self.signals.finished.emit(path, completed_release)
 
-        self._publish(publish_finished)
+        if not self._publish(publish_finished):
+            release_verified_installer(path)

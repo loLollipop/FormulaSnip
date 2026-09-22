@@ -28,6 +28,7 @@ class SnipOverlay(QWidget):
         self._start: QPoint | None = None
         self._end: QPoint | None = None
         self._finished = False
+        self._selection_error = ""
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -52,22 +53,34 @@ class SnipOverlay(QWidget):
         painter.fillRect(self.rect(), overlay_color)
 
         selection = self._selection_rect()
-        if selection.isValid() and selection.width() > 1 and selection.height() > 1:
+        if selection.isValid():
             source = self._map_to_source(selection)
             painter.drawPixmap(selection, self._screenshot, source)
-            painter.setPen(QPen(QColor("#60a5fa"), 2))
+            accent = QColor("#4f46e5")
+            painter.setPen(QPen(accent, 2))
             painter.drawRect(selection)
-            label_rect = QRect(selection.left(), max(8, selection.top() - 32), 260, 26)
+            self._draw_corner_marks(painter, selection, accent)
+            label_text = (
+                self._selection_error
+                or f"{source.width()} × {source.height()}  松开鼠标完成"
+            )
+            label_rect = self._selection_label_rect(selection, label_text)
             painter.fillRect(label_rect, QColor(255, 255, 255, 235))
-            painter.setPen(QColor("#334155"))
+            painter.setPen(QColor("#b91c1c" if self._selection_error else "#334155"))
             painter.drawText(
                 label_rect.adjusted(8, 0, -8, 0),
                 Qt.AlignmentFlag.AlignVCenter,
-                f"{selection.width()} × {selection.height()}  松开鼠标完成",
+                label_text,
             )
 
+        self._draw_bottom_hint(painter)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            self._cancel()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
+            self._selection_error = ""
             self._start = event.position().toPoint()
             self._end = self._start
             self.update()
@@ -82,21 +95,19 @@ class SnipOverlay(QWidget):
             return
         self._end = event.position().toPoint()
         selection = self._selection_rect().intersected(self.rect())
-        if selection.width() < MIN_SELECTION_SIZE or selection.height() < MIN_SELECTION_SIZE:
-            self._start = None
-            self._end = None
+        source = self._map_to_source(selection)
+        if source.width() < MIN_SELECTION_SIZE or source.height() < MIN_SELECTION_SIZE:
+            self._selection_error = "选区过小，请拖大后重试"
             self.update()
             return
-        crop = self._screenshot.copy(self._map_to_source(selection))
+        crop = self._screenshot.copy(source)
         self._finished = True
         self.captured.emit(crop)
         self.close()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
-            self._finished = True
-            self.cancelled.emit()
-            self.close()
+            self._cancel()
             return
         super().keyPressEvent(event)
 
@@ -120,3 +131,51 @@ class SnipOverlay(QWidget):
             max(1, round(rect.width() * scale_x)),
             max(1, round(rect.height() * scale_y)),
         )
+
+    def _cancel(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.cancelled.emit()
+        self.close()
+
+    def _selection_label_rect(self, selection: QRect, text: str) -> QRect:
+        width = min(max(190, self.fontMetrics().horizontalAdvance(text) + 18), self.width() - 16)
+        height = 28
+        x = min(max(8, selection.left()), max(8, self.width() - width - 8))
+        preferred_y = selection.top() - height - 6
+        y = preferred_y if preferred_y >= 8 else selection.bottom() + 7
+        y = min(max(8, y), max(8, self.height() - height - 8))
+        return QRect(x, y, width, height)
+
+    @staticmethod
+    def _draw_corner_marks(painter: QPainter, selection: QRect, color: QColor) -> None:
+        painter.save()
+        pen = QPen(color, 4)
+        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+        painter.setPen(pen)
+        length = min(14, max(6, min(selection.width(), selection.height()) // 3))
+        left, right = selection.left(), selection.right()
+        top, bottom = selection.top(), selection.bottom()
+        for start, horizontal_end, vertical_end in (
+            (QPoint(left, top), QPoint(left + length, top), QPoint(left, top + length)),
+            (QPoint(right, top), QPoint(right - length, top), QPoint(right, top + length)),
+            (QPoint(left, bottom), QPoint(left + length, bottom), QPoint(left, bottom - length)),
+            (QPoint(right, bottom), QPoint(right - length, bottom), QPoint(right, bottom - length)),
+        ):
+            painter.drawLine(start, horizontal_end)
+            painter.drawLine(start, vertical_end)
+        painter.restore()
+
+    def _draw_bottom_hint(self, painter: QPainter) -> None:
+        text = "拖动框选公式 · Esc / 右键取消"
+        width = min(self.fontMetrics().horizontalAdvance(text) + 26, self.width() - 16)
+        rect = QRect(
+            max(8, (self.width() - width) // 2),
+            max(8, self.height() - 42),
+            width,
+            30,
+        )
+        painter.fillRect(rect, QColor(15, 23, 42, 218))
+        painter.setPen(QColor("#f8fafc"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)

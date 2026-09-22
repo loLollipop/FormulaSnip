@@ -193,10 +193,27 @@ def is_release_resource(path: str) -> bool:
     )
 
 
-analysis.datas = type(analysis.datas)(item for item in analysis.datas
-                                    if is_release_resource(item[0]))
-analysis.binaries = type(analysis.binaries)(item for item in analysis.binaries
-                                          if is_release_resource(item[0]))
+def is_unused_qt_qml_file(target: str) -> bool:
+    """Identify QML plug-ins collected transitively by the QtQml hook."""
+
+    normalized = target.replace("\\", "/").lower().lstrip("./")
+    return normalized.startswith("pyside6/qml/")
+
+
+# The UI uses Qt Widgets and QtWebEngine HTML rather than QML, while PyInstaller's
+# QtQml hook otherwise copies every installed QML plug-in into the application.
+analysis.datas = type(analysis.datas)(
+    item
+    for item in analysis.datas
+    if is_release_resource(item[0])
+    and not is_unused_qt_qml_file(item[0])
+)
+analysis.binaries = type(analysis.binaries)(
+    item
+    for item in analysis.binaries
+    if is_release_resource(item[0])
+    and not is_unused_qt_qml_file(item[0])
+)
 pyz = PYZ(analysis.pure)
 
 exe = EXE(

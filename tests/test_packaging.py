@@ -86,6 +86,16 @@ def test_pyinstaller_collects_mathcraft_runtime_without_legacy_engine() -> None:
     assert 'Path(project_metadata_source) / "METADATA"' in spec
 
 
+def test_pyinstaller_excludes_transitively_collected_qml_plugins() -> None:
+    spec = (ROOT / "FormulaSnip.spec").read_text(encoding="utf-8")
+
+    assert 'normalized.startswith("pyside6/qml/")' in spec
+    assert "not is_unused_qt_qml_file(item[0])" in spec
+    assert "The UI uses Qt Widgets and QtWebEngine HTML rather than QML" in spec
+    assert "analysis.datas = type(analysis.datas)" in spec
+    assert "analysis.binaries = type(analysis.binaries)" in spec
+
+
 def test_pyinstaller_collects_webengine_and_not_legacy_preview_renderer() -> None:
     spec = (ROOT / "FormulaSnip.spec").read_text(encoding="utf-8")
 

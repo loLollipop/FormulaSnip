@@ -1404,7 +1404,7 @@ class SettingsPanel(QWidget):
         self._building = False
         self._update_ai_draft_status()
         if self._save_failed:
-            self.settings_error_label.setText(
+            self._set_settings_error(
                 "设置读取或保存失败，当前使用安全配置；请检查设置存储。"
             )
 
@@ -1427,7 +1427,9 @@ class SettingsPanel(QWidget):
         self.header = self._build_header()
         content_layout.addWidget(self.header)
         self.settings_error_label = QLabel()
+        self.settings_error_label.setObjectName("SettingsErrorBanner")
         self.settings_error_label.setWordWrap(True)
+        self.settings_error_label.setVisible(False)
         content_layout.addWidget(self.settings_error_label)
 
         self.pages = QStackedWidget()
@@ -1516,15 +1518,19 @@ class SettingsPanel(QWidget):
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("SettingsHeader")
-        header.setFixedHeight(64)
+        header.setFixedHeight(78)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(28, 0, 28, 0)
+        layout.setContentsMargins(28, 10, 28, 10)
         layout.setSpacing(10)
         self.page_title = QLabel()
         self.page_title.setObjectName("PageTitle")
         self.page_subtitle = QLabel(header)
         self.page_subtitle.setObjectName("PageSubtitle")
-        self.page_subtitle.hide()
+        title_layout = QVBoxLayout()
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(2)
+        title_layout.addWidget(self.page_title)
+        title_layout.addWidget(self.page_subtitle)
         self.theme_toggle_button = QPushButton()
         self.theme_toggle_button.setObjectName("ThemeToggleButton")
         self.theme_toggle_button.setFixedSize(34, 34)
@@ -1536,7 +1542,7 @@ class SettingsPanel(QWidget):
         self.start_button.setFixedHeight(34)
         self.start_button.setMinimumWidth(104)
         self.start_button.clicked.connect(self.start_requested.emit)
-        layout.addWidget(self.page_title)
+        layout.addLayout(title_layout)
         layout.addStretch(1)
         layout.addWidget(self.theme_toggle_button)
         layout.addWidget(self.start_button)
@@ -1657,7 +1663,7 @@ class SettingsPanel(QWidget):
             copy.setSpacing(0)
             copy.addWidget(_row_title(name))
             if available:
-                detail = "CPU 推理 · 首次使用下载约 112 MiB 模型"
+                detail = "本地模型 · CPU 推理 · 无需 API"
             else:
                 detail = "安装缺失 · 请重新运行 uv sync"
             row.setToolTip(detail)
@@ -1728,7 +1734,7 @@ class SettingsPanel(QWidget):
                 "MathCraft OCR",
                 "CPU" if mathcraft_available else "安装缺失",
                 "单引擎本地公式识别",
-                "首次使用下载约 112 MiB 模型" if mathcraft_available else "未安装",
+                "本地模型 · 无需 API" if mathcraft_available else "未安装",
             ),
         )
         self.mode_card_group = QButtonGroup(self)
@@ -2060,7 +2066,13 @@ class SettingsPanel(QWidget):
                 )
             )
         self.page_title.setText(title)
-        self.page_subtitle.clear()
+        subtitles = (
+            "启动、更新与引擎状态",
+            "本地识别与可选 AI 增强",
+            "调整圆环与中心 Logo",
+            "4 步完成截图、校对与复制",
+        )
+        self.page_subtitle.setText(subtitles[bounded])
 
     @Slot()
     def _open_github_repository(self) -> None:
@@ -2120,7 +2132,7 @@ class SettingsPanel(QWidget):
                 or exc.format_error
                 or _settings_source_has_format_error(self._settings)
             )
-            self.settings_error_label.setText(SETTINGS_ERROR_MESSAGE)
+            self._set_settings_error(SETTINGS_ERROR_MESSAGE)
             self._set_ai_connection_status(SETTINGS_ERROR_MESSAGE, error=True)
             # Keep disabling AI effective during storage failure, without
             # claiming these changes were persisted.
@@ -2147,12 +2159,16 @@ class SettingsPanel(QWidget):
             return False
         self._save_failed = False
         self._settings_format_error = False
-        self.settings_error_label.clear()
+        self._set_settings_error("")
         self._persisted_preferences = self._preferences
         if self._settings is not previous_settings:
             self.settings_backend_changed.emit(self._settings)
         self.preferences_changed.emit(self._preferences)
         return True
+
+    def _set_settings_error(self, message: str) -> None:
+        self.settings_error_label.setText(message)
+        self.settings_error_label.setVisible(bool(message.strip()))
 
     def adopt_settings_backend(self, settings: QSettings) -> None:
         """Share a healthy backend produced by another atomic settings write."""
