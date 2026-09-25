@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from formulasnip.ui.branding import TUTORIAL_FORMULA_LATEX
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from formulasnip.ui.branding import TUTORIAL_FORMULA_LATEX  # noqa: E402
+
 ASSET_DIR = PROJECT_ROOT / "formulasnip" / "assets"
 ICON_SIZE = 512
 
@@ -30,12 +34,12 @@ def generate_icon() -> None:
     draw.rounded_rectangle(
         (margin, margin, ICON_SIZE - margin, ICON_SIZE - margin),
         radius=112,
-        fill="#315FDD",
+        fill="#6655E8",
     )
     draw.rounded_rectangle(
         (margin + 12, margin + 12, ICON_SIZE - margin - 12, ICON_SIZE - margin - 12),
         radius=101,
-        outline="#5D83F3",
+        outline="#9B8CFF",
         width=9,
     )
     font = _brand_font(198)
@@ -64,7 +68,7 @@ def generate_formula() -> None:
         ASSET_DIR / "tutorial_gaussian_integral.png",
         dpi=300,
         format="png",
-        color="#172033",
+        color="#171923",
     )
 
 

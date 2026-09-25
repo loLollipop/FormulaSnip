@@ -594,13 +594,17 @@ def test_download_streams_verifies_and_atomically_renames(tmp_path: Path) -> Non
     name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
     url = f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}"
     asset = UpdateAsset(name, url, len(content), sha256)
-    response = _Response(
+    class ChunkedResponse(_Response):
+        def iter_content(self, chunk_size: int) -> list[bytes]:
+            del chunk_size
+            return [content[:7], content[7:]]
+
+    response = ChunkedResponse(
         content=content,
         url=(
             "https://release-assets.githubusercontent.com/"
             "github-production-release-asset/1/test-asset"
         ),
-        content_length=len(content),
     )
     redirect = _Response(
         url=url,
@@ -618,12 +622,30 @@ def test_download_streams_verifies_and_atomically_renames(tmp_path: Path) -> Non
     )
 
     assert path.read_bytes() == content
-    assert progress[-1] == (len(content), len(content))
+    assert progress == [(7, len(content)), (len(content), len(content))]
     assert not list(tmp_path.glob("*.part"))
     assert len(client.calls) == 2
     assert all(call[1]["stream"] is True for call in client.calls)
     assert all(call[1]["allow_redirects"] is False for call in client.calls)
     assert client.calls[0][1]["timeout"] == REQUEST_TIMEOUT
+
+
+def test_download_network_failure_keeps_a_retryable_user_message(
+    tmp_path: Path,
+) -> None:
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    url = f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}"
+    asset = UpdateAsset(name, url, 5, "0" * 64)
+    response = _Response(
+        url=url,
+        raise_error=requests.ConnectionError("offline"),
+    )
+
+    with pytest.raises(UpdateError, match="检查网络后重试"):
+        download_installer(asset, tmp_path, client=_Client(response))
+
+    assert response.closed
+    assert not list(tmp_path.glob("*.part"))
 
 
 def test_download_rejects_untrusted_redirect_before_following_it(tmp_path: Path) -> None:
@@ -722,6 +744,78 @@ def test_cancelled_cached_installer_verification_preserves_complete_file(
             cancel_event=UpdateCancellation(),
         )
 
+    assert destination.read_bytes() == content
+
+
+def test_cached_installer_reports_verification_without_fake_download_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = b"complete cached installer"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    destination = tmp_path / name
+    destination.write_bytes(content)
+    asset = UpdateAsset(
+        name,
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+    progress: list[tuple[int, int]] = []
+    phases: list[str] = []
+
+    def verify_after_progress(*_args: object, **_kwargs: object) -> None:
+        assert phases == ["verifying-cache"]
+        assert progress == []
+
+    monkeypatch.setattr(update_module, "verify_installer", verify_after_progress)
+
+    assert download_installer(
+        asset,
+        tmp_path,
+        progress=lambda received, total: progress.append((received, total)),
+        phase=phases.append,
+    ) == destination
+    assert phases == ["verifying-cache"]
+    assert progress == []
+
+
+def test_invalid_cached_installer_resets_then_reports_network_bytes(
+    tmp_path: Path,
+) -> None:
+    content = b"trusted replacement"
+    name = "FormulaSnip-v0.3.0-windows-x64-setup.exe"
+    destination = tmp_path / name
+    destination.write_bytes(b"corrupt cached file")
+    asset = UpdateAsset(
+        name,
+        f"https://github.com/loLollipop/FormulaSnip/releases/download/v0.3.0/{name}",
+        len(content),
+        hashlib.sha256(content).hexdigest(),
+    )
+
+    class ChunkedResponse(_Response):
+        def iter_content(self, chunk_size: int) -> list[bytes]:
+            del chunk_size
+            return [content[:7], content[7:]]
+
+    response = ChunkedResponse(content=content, url=asset.url)
+    progress: list[tuple[int, int]] = []
+    phases: list[str] = []
+
+    assert download_installer(
+        asset,
+        tmp_path,
+        client=_Client(response),
+        progress=lambda received, total: progress.append((received, total)),
+        phase=phases.append,
+    ) == destination
+    assert phases == ["verifying-cache", "downloading", "verifying"]
+    assert progress == [
+        (0, len(content)),
+        (7, len(content)),
+        (len(content), len(content)),
+    ]
     assert destination.read_bytes() == content
 
 
@@ -898,9 +992,10 @@ def test_update_download_worker_abandons_blocked_dns_after_cancel(
         cache_directory: Path,
         *,
         progress: Any,
+        phase: Any,
         cancel_event: UpdateCancellation,
     ) -> Path:
-        del cancel_event
+        del phase, cancel_event
         try:
             socket.getaddrinfo("github.com", 443)
             progress(asset.size, asset.size)
@@ -1047,6 +1142,11 @@ def test_update_download_worker_falls_back_to_full_and_reports_actual_release(
     monkeypatch.setattr(update_dialog, "download_installer", fake_download)
     worker = update_dialog.UpdateDownloadWorker(release, tmp_path)
     finished: list[tuple[Path, ReleaseInfo]] = []
+    progress: list[tuple[int, int]] = []
+    worker.signals.progress.connect(
+        lambda received, total: progress.append((received, total)),
+        type=Qt.ConnectionType.DirectConnection,
+    )
     worker.signals.finished.connect(
         lambda path, selected: finished.append((Path(path), selected)),
         type=Qt.ConnectionType.DirectConnection,
@@ -1055,6 +1155,7 @@ def test_update_download_worker_falls_back_to_full_and_reports_actual_release(
     worker.run()
 
     assert calls == [lightweight, full]
+    assert progress == [(0, full.size)]
     assert len(finished) == 1
     assert finished[0][0] == full_path
     assert finished[0][1].asset == full
@@ -1159,6 +1260,8 @@ def test_installer_launch_revalidates_and_uses_only_fixed_arguments(tmp_path: Pa
     )
     assert calls == [(str(path), list(INSTALLER_ARGUMENTS))]
     assert "/AUTOUPDATE=1" in calls[0][1]
+    assert "/SILENT" in calls[0][1]
+    assert "/VERYSILENT" not in calls[0][1]
 
 
 def test_installer_launch_reuses_background_final_verification(
@@ -1316,4 +1419,5 @@ def test_inno_autoupdate_restart_and_metadata_cleanup_are_narrow() -> None:
     restart_line = next(line for line in script.splitlines() if "Check: IsAutoUpdate" in line)
     assert "Flags: nowait;" in restart_line
     assert "runhidden" not in restart_line
+    assert 'Parameters: "--after-update"' in restart_line
     assert 'Name: "{app}\\_internal\\formulasnip-*.dist-info"' in script

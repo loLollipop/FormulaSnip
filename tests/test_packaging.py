@@ -13,7 +13,8 @@ def test_exact_version_license_manifest_and_critical_texts() -> None:
     assert manifest["schema_version"] == 1
     indexed = {item["component"]: item for item in manifest["components"]}
     for component, version in (("antlr4-python3-runtime", "4.9.3"),
-                               ("rapidocr", "3.5.0"), ("tokenizers", "0.21.4")):
+                               ("rapidocr", "3.5.0"), ("tokenizers", "0.21.4"),
+                               ("flatbuffers", "25.12.19")):
         item = indexed[component]
         assert item["version"] == version
         assert item["source_url"].startswith("https://")
@@ -21,7 +22,7 @@ def test_exact_version_license_manifest_and_critical_texts() -> None:
         text = (directory / item["file"]).read_bytes()
         assert hashlib.sha256(text).hexdigest() == item["text_sha256"]
         assert len(text) > 1000
-    assert indexed["flatbuffers"]["review_status"] == "Needs Manual License Review"
+    assert indexed["flatbuffers"]["review_status"].startswith("Exact-tag text")
 
 
 @pytest.mark.parametrize("name", ["direct_url.json", "assets/__pycache__/a.pyc",
@@ -112,6 +113,19 @@ def test_wheel_includes_third_party_notices_and_licenses() -> None:
     assert '[tool.hatch.build.targets.wheel.shared-data]' in project
     assert '"THIRD_PARTY_NOTICES.md" = "share/formulasnip/THIRD_PARTY_NOTICES.md"' in project
     assert '"THIRD_PARTY_LICENSES" = "share/formulasnip/THIRD_PARTY_LICENSES"' in project
+    assert '"/README.zh-CN.md"' in project
+
+
+def test_windows_packages_include_bilingual_readmes() -> None:
+    portable_builder = (ROOT / "scripts" / "build_windows.ps1").read_text(
+        encoding="utf-8"
+    )
+    installer_builder = (ROOT / "scripts" / "build_installer.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"README.zh-CN.md"' in portable_builder
+    assert '"README.zh-CN.md"' in installer_builder
 
 
 def test_installer_requires_verified_bundled_formula_model() -> None:
@@ -171,6 +185,16 @@ def test_full_and_lightweight_installers_handle_models_safely() -> None:
     assert 'schema_version = 2' in builder
     assert 'model_bundle_sha256 = $modelLockHash' in builder
     assert 'update_asset = [ordered]@{' in builder
+
+    file_lines = [
+        line
+        for line in installer.splitlines()
+        if line.startswith('Source: "..\\dist\\FormulaSnip\\*"')
+    ]
+    assert len(file_lines) == 2
+    update_files, full_files = file_lines
+    assert "ignoreversion" in update_files
+    assert "ignoreversion" in full_files
 
 
 def test_upgrade_removes_only_the_retired_rapidlatex_backend() -> None:

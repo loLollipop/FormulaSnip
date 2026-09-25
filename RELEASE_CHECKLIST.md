@@ -1,15 +1,15 @@
-# FormulaSnip v0.2.11 Release Checklist
+# FormulaSnip v0.2.13 Release Checklist
 
-本清单针对未发布的 v0.2.11。`[x]` 表示本轮已通过静态或自动化验证；`[ ]` 表示仍需修复、人工确认或针对最终候选产物重新执行。
+本清单针对 v0.2.13 候选版本。`[x]` 表示已有静态、自动化或产物验证证据；`[ ]` 表示仍需人工实机确认或属于已公开记录的残余风险。未完成的人工项不得被描述为“已验证”，但会在不影响自动化发布门禁时作为后续维护事项保留。
 
 ## Release Gate
 
 - [ ] `RELEASE_AUDIT.md` 中 AUD-001 已关闭，ANTLR 许可证文本已进入仓库和所有二进制产物
 - [ ] Qt/PySide6/QtWebEngine、MathCraft 模型及全部冻结依赖已完成 `Needs Manual License Review`
 - [x] 本轮代码级 P1 项已修复，并经独立故障注入复核未再复现
-- [x] 本清单与所有修复将一起提交到确定的 v0.2.11 release commit
+- [x] 本清单与所有修复将一起提交到确定的 v0.2.13 release commit
 - [ ] 从该 commit 重新构建完整 Setup、轻量 update EXE、ZIP、wheel、sdist 和两版 update manifest
-- [x] 当前候选版本、tag、文件名、大小和 SHA-256 与 v1/v2 manifest 一致
+- [ ] 当前候选版本、tag、文件名、大小和 SHA-256 与 v1/v2 manifest 一致
 - [ ] 最终候选完成干净 Windows 安装/升级/卸载验收
 
 ## Secrets 与凭据
@@ -128,15 +128,15 @@
 - [x] 当前 ZIP/冻结目录不存在 `.env`、`.git`、测试图片、测试配置、构建缓存或个人绝对路径
 - [ ] 在无 Python 的干净 Windows 10 x64 完成全新安装、运行和卸载
 - [ ] 在无 Python 的干净 Windows 11 x64 完成全新安装、运行和卸载
-- [ ] v0.2.10 → v0.2.11 完整 Setup 升级通过
-- [ ] v0.2.10 → v0.2.11 轻量 update 升级通过
+- [ ] v0.2.12 → v0.2.13 完整 Setup 升级通过
+- [ ] v0.2.12 → v0.2.13 轻量 update 升级通过
 - [ ] 模型缺失/损坏时轻量更新拒绝并正确引导完整 Setup
 - [ ] 安装/更新后自动重启时间和行为符合预期
 - [ ] 便携 ZIP 解压到中文、空格和长路径后正常运行
 
 ## 功能与实机稳定性
 
-- [x] 487 项 pytest 全部通过
+- [x] v0.2.13 最终源码的 534 项 pytest 全部通过
 - [x] Ruff 检查通过
 - [x] Python compileall 通过
 - [x] wheel 与 sdist 构建检查通过
@@ -155,5 +155,5 @@
 - [x] `PROJECT_SUMMARY.md` 与 `OPTIMIZATION_REPORT.md` 的模型说明已更新
 - [x] 新增可发现的 `SECURITY.md` 和安全报告渠道
 - [ ] README/隐私说明与最终自动更新、模型回退、缓存和卸载行为一致
-- [x] Release Notes 只描述当前实际进入 v0.2.11 候选的变化
+- [x] Release Notes 只描述当前实际进入 v0.2.13 候选的变化
 - [ ] Git 作者姓名/邮箱及仓库公开个人信息已由维护者确认可公开

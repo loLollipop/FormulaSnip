@@ -108,7 +108,7 @@ try {
         throw "The frozen offline MathCraft model smoke test failed with exit code $($modelSmokeProcess.ExitCode)."
     }
 
-    foreach ($documentName in @("LICENSE", "README.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md", "MODEL_ASSETS.json")) {
+    foreach ($documentName in @("LICENSE", "README.md", "README.zh-CN.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md", "MODEL_ASSETS.json")) {
         Copy-Item `
             -LiteralPath (Join-Path $projectRoot $documentName) `
             -Destination (Join-Path $applicationDirectory $documentName) `

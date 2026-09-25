@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.12"
+  #define AppVersion "0.2.13"
 #endif
 #ifdef UpdatePackage
   #ifndef ModelLockSha256
@@ -77,7 +77,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 #ifdef UpdatePackage
 ; Preserve the compatible model already installed on the machine. The code
 ; gate below rejects this package unless the exact lock and all locked files
-; are present.
+; are present. Every non-model file remains update-owned and is overwritten
+; even when a bundled DLL reports the same or a higher file version, avoiding
+; a mixed private runtime after dependency upgrades or downgrades.
 Source: "..\dist\FormulaSnip\*"; DestDir: "{app}"; Excludes: "_internal\MathCraft\models\*,_internal\MODEL_ASSETS.json,MODEL_ASSETS.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 #else
 Source: "..\dist\FormulaSnip\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -107,7 +109,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent; Check: not IsAutoUpdate
-Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutoUpdate
+Filename: "{app}\{#AppExeName}"; Parameters: "--after-update"; WorkingDir: "{app}"; Flags: nowait; Check: IsAutoUpdate
 
 [Code]
 function IsAutoUpdate: Boolean;

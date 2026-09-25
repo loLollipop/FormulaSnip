@@ -44,7 +44,7 @@ MAX_INSTALLER_BYTES = 4 * 1024 * 1024 * 1024
 MAX_MANIFEST_REDIRECTS = 2
 MAX_DOWNLOAD_REDIRECTS = 2
 INSTALLER_ARGUMENTS = (
-    "/VERYSILENT",
+    "/SILENT",
     "/SUPPRESSMSGBOXES",
     "/SP-",
     "/NORESTART",
@@ -1179,6 +1179,7 @@ def download_installer(
     *,
     client: HttpClient = requests,
     progress: Callable[[int, int], None] | None = None,
+    phase: Callable[[str], None] | None = None,
     cancel_event: CancellationSignal | None = None,
 ) -> Path:
     _raise_if_cancelled(cancel_event)
@@ -1188,6 +1189,7 @@ def download_installer(
             cache_directory,
             client=request_client,
             progress=progress,
+            phase=phase,
             cancel_event=cancel_event,
         )
 
@@ -1198,6 +1200,7 @@ def _download_installer(
     *,
     client: HttpClient,
     progress: Callable[[int, int], None] | None,
+    phase: Callable[[str], None] | None,
     cancel_event: CancellationSignal | None,
 ) -> Path:
     tag = _asset_tag(asset)
@@ -1209,6 +1212,8 @@ def _download_installer(
         f".{asset.name}.{os.getpid()}.{uuid4().hex}.part"
     )
     if destination.is_file():
+        if phase is not None:
+            phase("verifying-cache")
         try:
             verify_installer(
                 destination,
@@ -1217,8 +1222,6 @@ def _download_installer(
                 retain_lock=True,
             )
             _raise_if_cancelled(cancel_event)
-            if progress is not None:
-                progress(asset.size, asset.size)
             _prune_retired_installers(cache_directory, asset.name)
             return destination
         except UpdateCancelled:
@@ -1231,6 +1234,10 @@ def _download_installer(
         except UpdateError:
             _forget_verified_installer(destination)
             destination.unlink(missing_ok=True)
+            if phase is not None:
+                phase("downloading")
+            if progress is not None:
+                progress(0, asset.size)
     response: Any = None
     downloaded = 0
     digest = hashlib.sha256()
@@ -1275,6 +1282,8 @@ def _download_installer(
         _raise_if_cancelled(cancel_event)
         os.replace(partial, destination)
         _forget_verified_installer(destination)
+        if phase is not None:
+            phase("verifying")
         verify_installer(
             destination,
             asset,
@@ -1285,10 +1294,10 @@ def _download_installer(
         return destination
     except requests.RequestException as exc:
         _raise_if_cancelled(cancel_event)
-        raise UpdateError("Unable to download the installer.") from exc
+        raise UpdateError("无法下载安装包，请检查网络后重试。") from exc
     except OSError as exc:
         _raise_if_cancelled(cancel_event)
-        raise UpdateError("Unable to save the installer in the user cache.") from exc
+        raise UpdateError("无法将安装包保存到本地缓存。") from exc
     finally:
         partial.unlink(missing_ok=True)
         if response is not None and callable(getattr(response, "close", None)):

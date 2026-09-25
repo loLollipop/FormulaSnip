@@ -3,6 +3,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from formulasnip.core.latex import (
+    MATHTYPE_MATHML_CLIPBOARD_FORMATS,
     latex_equivalent,
     latex_same_content,
     latex_to_mathml,
@@ -51,6 +52,45 @@ def test_latex_to_mathml_returns_math_root() -> None:
     mathml = latex_to_mathml(r"\frac{a}{b}")
     assert "<math" in mathml
     assert "<mfrac>" in mathml
+    root = ET.fromstring(mathml)
+    assert root.attrib["display"] == "block"
+    style = next(iter(root))
+    assert style.tag.rsplit("}", 1)[-1] == "mstyle"
+    assert style.attrib["displaystyle"] == "true"
+    assert style.attrib["scriptlevel"] == "0"
+    assert MATHTYPE_MATHML_CLIPBOARD_FORMATS == (
+        'application/x-qt-windows-mime;value="MathML Presentation"',
+        "MathML Presentation",
+        "application/mathml-presentation+xml",
+        'application/x-qt-windows-mime;value="MathML"',
+        "MathML",
+        "application/mathml+xml",
+    )
+
+
+def test_latex_to_mathml_preserves_single_letter_roman_style() -> None:
+    root = ET.fromstring(latex_to_mathml(r"\int f(x)\,\mathrm{d}x"))
+    roman_d = [
+        element
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "mi"
+        and (element.text or "") == "d"
+    ]
+
+    assert len(roman_d) == 1
+    assert roman_d[0].attrib["mathvariant"] == "normal"
+
+
+def test_latex_to_mathml_does_not_rewrite_mathrm_inside_verb() -> None:
+    root = ET.fromstring(latex_to_mathml(r"\verb|\mathrm{x}|"))
+    verbatim = [
+        element
+        for element in root.iter()
+        if element.tag.rsplit("}", 1)[-1] == "mtext"
+    ]
+
+    assert len(verbatim) == 1
+    assert verbatim[0].text == r"\mathrm{x}"
 
 
 @pytest.mark.parametrize(

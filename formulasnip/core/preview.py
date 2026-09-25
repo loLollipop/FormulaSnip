@@ -73,7 +73,7 @@ def build_mathjax_html(latex: str, request_id: int) -> str:
     html, body {{ width: 100%; height: 100%; margin: 0; overflow: hidden; }}
     body {{
       box-sizing: border-box; padding: 12px; background: #fff;
-      color: #172033; font-size: 12px;
+      color: #171923; font-size: 12px;
     }}
     #viewport {{
       width: 100%; height: 100%; box-sizing: border-box; overflow: auto;

@@ -60,10 +60,7 @@ class SnipOverlay(QWidget):
             painter.setPen(QPen(accent, 2))
             painter.drawRect(selection)
             self._draw_corner_marks(painter, selection, accent)
-            label_text = (
-                self._selection_error
-                or f"{source.width()} × {source.height()}  松开鼠标完成"
-            )
+            label_text = self._selection_label_text(source)
             label_rect = self._selection_label_rect(selection, label_text)
             painter.fillRect(label_rect, QColor(255, 255, 255, 235))
             painter.setPen(QColor("#b91c1c" if self._selection_error else "#334155"))
@@ -72,8 +69,6 @@ class SnipOverlay(QWidget):
                 Qt.AlignmentFlag.AlignVCenter,
                 label_text,
             )
-
-        self._draw_bottom_hint(painter)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
@@ -148,6 +143,9 @@ class SnipOverlay(QWidget):
         y = min(max(8, y), max(8, self.height() - height - 8))
         return QRect(x, y, width, height)
 
+    def _selection_label_text(self, source: QRect) -> str:
+        return self._selection_error or f"{source.width()} × {source.height()}"
+
     @staticmethod
     def _draw_corner_marks(painter: QPainter, selection: QRect, color: QColor) -> None:
         painter.save()
@@ -166,16 +164,3 @@ class SnipOverlay(QWidget):
             painter.drawLine(start, horizontal_end)
             painter.drawLine(start, vertical_end)
         painter.restore()
-
-    def _draw_bottom_hint(self, painter: QPainter) -> None:
-        text = "拖动框选公式 · Esc / 右键取消"
-        width = min(self.fontMetrics().horizontalAdvance(text) + 26, self.width() - 16)
-        rect = QRect(
-            max(8, (self.width() - width) // 2),
-            max(8, self.height() - 42),
-            width,
-            30,
-        )
-        painter.fillRect(rect, QColor(15, 23, 42, 218))
-        painter.setPen(QColor("#f8fafc"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)

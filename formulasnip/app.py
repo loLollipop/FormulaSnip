@@ -15,6 +15,21 @@ from formulasnip.ui.branding import application_icon, application_version
 from formulasnip.ui.settings import FloatingPreferences
 from formulasnip.ui.styles import apply_application_theme
 
+AFTER_UPDATE_ARGUMENT = "--after-update"
+MODEL_WARMUP_DELAY_MS = 500
+PREVIEW_WARMUP_DELAY_MS = 800
+
+
+def _consume_startup_arguments(argv: list[str]) -> tuple[list[str], bool]:
+    """Remove FormulaSnip-only arguments before passing argv to Qt."""
+
+    after_update = AFTER_UPDATE_ARGUMENT in argv[1:]
+    qt_argv = [
+        argv[0],
+        *(argument for argument in argv[1:] if argument != AFTER_UPDATE_ARGUMENT),
+    ]
+    return qt_argv, after_update
+
 
 def _configure_windows_identity() -> None:
     """Give Windows a stable taskbar identity for source and packaged runs."""
@@ -43,32 +58,38 @@ def create_application(argv: list[str] | None = None) -> QApplication:
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
     preferences = FloatingPreferences.load(QSettings())
-    apply_application_theme(preferences.result_theme)
+    apply_application_theme(
+        preferences.result_theme,
+        preferences.effective_accent_theme,
+    )
     app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
     return app
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     multiprocessing.freeze_support()
+    qt_argv, after_update = _consume_startup_arguments(
+        list(sys.argv if argv is None else argv)
+    )
     guard = SingleInstanceGuard()
     if not guard.acquire():
         return 0
     try:
-        return _run_application()
+        return _run_application(qt_argv, after_update=after_update)
     finally:
         guard.close()
 
 
-def _run_application() -> int:
+def _run_application(argv: list[str], *, after_update: bool = False) -> int:
     from formulasnip.ui.floating import FloatingFormulaAssistant
 
-    app = create_application()
+    app = create_application(argv)
     app.setQuitOnLastWindowClosed(False)
     assistant = FloatingFormulaAssistant()
     app.aboutToQuit.connect(assistant.shutdown)
-    assistant.show()
-    QTimer.singleShot(0, assistant.start_model_warmup)
-    QTimer.singleShot(0, assistant.start_preview_warmup)
+    assistant.show(after_update=after_update)
+    QTimer.singleShot(MODEL_WARMUP_DELAY_MS, assistant.start_model_warmup)
+    QTimer.singleShot(PREVIEW_WARMUP_DELAY_MS, assistant.start_preview_warmup)
     assistant.start_update_checks()
     try:
         return app.exec()

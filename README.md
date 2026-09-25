@@ -1,99 +1,136 @@
 <p align="center">
-  <img src="formulasnip/assets/formulasnip.png" width="112" height="112" alt="FormulaSnip Logo">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/formulasnip/assets/formulasnip.png" width="108" height="108" alt="FormulaSnip logo">
 </p>
 
 <h1 align="center">FormulaSnip</h1>
 
-<p align="center">框选屏幕上的数学公式，获得可编辑的 LaTeX 与 MathML。</p>
+<p align="center"><strong>Turn formula screenshots into editable LaTeX and MathML.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><img src="https://img.shields.io/github/v/release/loLollipop/FormulaSnip?style=flat-square&amp;label=release" alt="Latest release"></a>
-  <a href="https://github.com/loLollipop/FormulaSnip/releases"><img src="https://img.shields.io/github/downloads/loLollipop/FormulaSnip/total?style=flat-square&amp;label=downloads" alt="GitHub downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/loLollipop/FormulaSnip?style=flat-square" alt="GPL-3.0 license"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 and 11">
+  <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><img src="https://img.shields.io/github/v/release/loLollipop/FormulaSnip?style=flat-square&amp;label=Release" alt="Latest release"></a>
+  <a href="https://github.com/loLollipop/FormulaSnip/stargazers"><img src="https://img.shields.io/github/stars/loLollipop/FormulaSnip?style=flat-square&amp;label=Stars&amp;color=FFD700" alt="GitHub stars"></a>
+  <a href="https://github.com/loLollipop/FormulaSnip/releases"><img src="https://img.shields.io/github/downloads/loLollipop/FormulaSnip/total?style=flat-square&amp;label=Downloads" alt="GitHub downloads"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?style=flat-square&amp;logo=windows11&amp;logoColor=white" alt="Windows 10 and 11">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/loLollipop/FormulaSnip?style=flat-square&amp;label=License" alt="GPL-3.0 license"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><strong>下载最新版</strong></a>
-  · <a href="#快速开始">快速开始</a>
-  · <a href="https://github.com/loLollipop/FormulaSnip/issues">问题反馈</a>
+  <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><strong>Download</strong></a>
+  · <a href="#download-and-get-started">Quick Start</a>
+  · <a href="https://github.com/loLollipop/FormulaSnip/blob/main/README.zh-CN.md">简体中文</a>
+  · <a href="https://github.com/loLollipop/FormulaSnip/issues">Report an Issue</a>
 </p>
 
 <p align="center">
-  <img src="artifacts/formulasnip_floating_result_dark.png" width="760" alt="FormulaSnip 公式识别与电子公式预览">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/artifacts/formulasnip_settings_center_dark.png" width="860" alt="FormulaSnip settings center">
 </p>
 
-FormulaSnip 是面向 Windows 论文写作场景的公式截图识别工具。点击悬浮球框选公式，本地识别后即可校对电子公式，并复制到 Word、MathType、LaTeX 编辑器或其他支持 MathML 的软件中。
+FormulaSnip is a focused Windows formula-recognition tool for papers, notes, and technical documents. Click the floating orb, select one formula on screen, review the rendered preview, and copy the result into Word, MathType, LaTeX editors, or other math-aware applications.
 
-项目专注于**单个数学公式**，不处理整页文档、正文、表格或通用 OCR。
+FormulaSnip recognizes **individual mathematical formulas**. It is not a full-page document, table, or general-purpose text OCR application.
 
-## 核心能力
+English · [简体中文](https://github.com/loLollipop/FormulaSnip/blob/main/README.zh-CN.md)
 
-| 能力 | 说明 |
+---
+
+## What You Can Do
+
+| Feature | What it offers |
 | --- | --- |
-| 本地公式识别 | 使用 MathCraft OCR 的 CPU 推理路径，默认不上传截图，无需独立显卡 |
-| 电子公式校对 | 使用离线 MathJax 生成电子公式预览，可在复制前检查并编辑 LaTeX 结果 |
-| 论文写作输出 | 一键复制 LaTeX 或 MathML，适配 Word 与 MathType 工作流 |
-| 悬浮球与系统托盘 | 截图、恢复悬浮球、打开设置、检查更新和退出均可快速完成 |
-| 个性化外观 | 支持深色与浅色主题、圆环颜色和自定义悬浮球 Logo |
-| 可选 AI 辅助 | 接入 OpenAI 兼容视觉接口，与本地引擎并行识别并切换对照 |
+| 📸 **Capture formulas** | Click the floating orb and drag over any formula visible on screen |
+| 🧠 **Recognize locally** | Run the bundled MathCraft OCR CPU model without uploading screenshots by default |
+| ✏️ **Review and edit** | Compare an offline rendered preview with the source and edit LaTeX before copying |
+| 📋 **Copy for writing** | Copy LaTeX or MathML for Word, MathType, Markdown, and LaTeX workflows |
+| ✨ **Enhance with AI** | Optionally run an OpenAI-compatible vision model alongside local recognition |
+| 🎨 **Personalize** | Choose light or dark mode, four interface accents, orb-ring colors, and a custom orb logo |
+| 🔄 **Stay current** | Check for releases in the app; installed builds can apply verified updates with visible progress |
 
-## 快速开始
+---
 
-1. 前往 [Releases](https://github.com/loLollipop/FormulaSnip/releases/latest)：安装版运行下载的 Setup 安装包，便携版解压 ZIP 后运行 `FormulaSnip.exe`。
-2. 启动软件，点击“开始识别”，设置面板会收起并显示悬浮球。
-3. 左键点击悬浮球，框选屏幕上的公式区域。
-4. 在电子公式预览中校对结果，然后复制 LaTeX 或 MathML。
+## Download and Get Started
 
-右键悬浮球可以打开设置或退出软件；截图时按 `Esc` 可以取消。复制任一格式后，结果面板会自动收起，方便立即粘贴。
+1. **Install FormulaSnip.** Download the Setup package from [Releases](https://github.com/loLollipop/FormulaSnip/releases/latest), run it, and create shortcuts when prompted.
+2. **Start recognition.** Open FormulaSnip and select **Start Recognition** to leave the floating orb on screen.
+3. **Capture and copy.** Left-click the orb, drag over one formula, review the result, then copy LaTeX or MathML.
 
-| 粘贴目标 | 建议格式 |
+> [!IMPORTANT]
+> The official Windows Setup and portable ZIP include the Python runtime, application dependencies, and the pinned MathCraft formula model. No separate Python installation or first-use model download is required.
+
+| Package | Use case |
 | --- | --- |
-| Word、MathType | 复制 MathML，在目标软件的公式编辑区域粘贴 |
-| LaTeX 编辑器、Markdown | 复制 LaTeX，在公式环境中粘贴 |
+| `FormulaSnip-v*-windows-x64-setup.exe` | **Recommended.** Installer, shortcuts, uninstaller, and in-app automatic updates |
+| `FormulaSnip-v*-windows-x64.zip` | Portable use; extract the entire archive before running `FormulaSnip.exe` |
 
-## 下载与安装
+**System requirement:** Windows 10 or Windows 11, x64.
 
-| 文件 | 适用场景 |
-| --- | --- |
-| `FormulaSnip-v*-windows-x64-setup.exe` | 推荐。提供安装向导、快捷方式和卸载入口 |
-| `FormulaSnip-v*-windows-x64.zip` | 便携使用。解压后运行 `FormulaSnip.exe` |
+> [!NOTE]
+> Current releases are not Authenticode-signed. Windows SmartScreen may show a warning. Download FormulaSnip only from this repository's official Releases page.
 
-- 系统要求：Windows 10/11，x64。
-- 安装版与便携版已内置 MathCraft 公式模型，安装完成后可以直接离线识别。
-- 当前安装包尚未进行代码签名，Windows SmartScreen 可能显示风险提示，请仅从本仓库下载。
+---
 
-自动检查更新默认开启，启动和后台检查遵循 12 小时节流，可在“设置中心 → 应用与引擎 → 自动检查更新”关闭；手动检查仍立即联网。更新请求不上传截图、LaTeX 或 API Key。安装版可在确认后下载、校验并安装新版本，便携版和源码版打开 Release 页面供用户手动更新。
+## Workflow
 
-源码模式或内置模型损坏时，MathCraft 可能使用缓存或回退联网下载。卸载保留用户设置、凭据、日志及缓存；删除 Key 和保留位置见 [隐私说明](PRIVACY.md)。更新尚无独立签名信任链，安全报告与发布限制见 [SECURITY.md](SECURITY.md)。
+### 1. Capture a formula
 
-## 界面
+Left-click the floating orb and drag around a single formula. Press `Esc` or right-click to cancel the capture.
 
 <p align="center">
-  <img src="artifacts/formulasnip_settings_center_dark.png" width="49%" alt="FormulaSnip 深色设置中心">
-  <img src="artifacts/formulasnip_recognition_engine.png" width="49%" alt="FormulaSnip 识别设置与 AI 辅助">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/artifacts/formulasnip_snip_overlay.png" width="760" alt="FormulaSnip screenshot selection">
 </p>
 
-<details>
-<summary><strong>AI 辅助识别与隐私</strong></summary>
+### 2. Review the rendered formula
 
-- AI 辅助默认关闭，由用户自行配置 OpenAI 兼容 API 地址、API Key 和模型。
-- 启用后，本地 MathCraft 与远程视觉模型独立并行识别；内容一致时采用 AI 的紧凑排版，真正不一致时可以切换对照。
-- 远程服务只会收到本次框选的公式图片，不会收到本地识别结果。
-- API Key 保存在 Windows 凭据管理器，不写入普通应用设置。
-- 远程调用可能产生费用，图片处理规则和数据保留政策取决于所配置的服务提供商。
-- AI 请求失败时，FormulaSnip 会保留本地识别结果。
+FormulaSnip renders an offline MathJax preview instead of showing a magnified screenshot. You can edit the recognized LaTeX and immediately check the updated typesetting.
 
-</details>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/artifacts/formulasnip_floating_result_dark.png" width="620" alt="FormulaSnip rendered formula preview and copy actions">
+</p>
 
-## 使用边界
+### 3. Copy into your editor
 
-- 公式 OCR 无法保证完全正确，请在粘贴前对照原图校对。
-- 复杂公式、低分辨率截图、模糊字符和紧密上下标更容易产生识别误差。
+| Destination | Recommended output |
+| --- | --- |
+| Microsoft Word or MathType | **MathML** — paste into a formula-editing area |
+| LaTeX editor or Markdown | **LaTeX** — paste into the appropriate math environment |
 
-## 从源码运行
+After a successful copy, the result panel closes automatically so you can return directly to your document.
 
-需要 Python 3.10 至 3.12 和 [uv](https://docs.astral.sh/uv/)：
+> [!TIP]
+> Formula OCR is not infallible. Always compare complex fractions, matrices, integrals, partial derivatives, and tightly spaced subscripts with the source before pasting.
+
+---
+
+## Optional AI Assistance
+
+AI assistance is disabled by default. Open **Settings → Recognition**, enable **AI Assistance**, enter an OpenAI-compatible API URL and API key, retrieve and select a model, test the connection, and save the configuration.
+
+- FormulaSnip retrieves the provider's available models and lets you test the connection.
+- Local MathCraft OCR and the remote vision model run independently in parallel.
+- If their results genuinely differ, the result panel lets you switch between them.
+- If the AI request fails, the local result remains available.
+- The API key is stored in Windows Credential Manager, not in the ordinary settings store.
+
+The configured provider receives the selected formula image and may charge for or retain requests according to its own policy. See [Privacy](PRIVACY.md) before enabling this feature.
+
+---
+
+## Interface and Appearance
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/artifacts/formulasnip_appearance_live_preview.png" width="49%" alt="FormulaSnip appearance settings">
+  <img src="https://raw.githubusercontent.com/loLollipop/FormulaSnip/main/artifacts/formulasnip_recognition_engine.png" width="49%" alt="FormulaSnip local and optional AI recognition settings">
+</p>
+
+- The settings center, result panel, and update dialog share the selected interface accent.
+- Light and dark modes are independent of the accent color.
+- The floating-orb ring and center logo can be customized separately.
+- The system tray provides quick access to capture, settings, updates, and exit.
+
+---
+
+## Build from Source
+
+Source development requires Python `>=3.10,<3.13` and [uv](https://docs.astral.sh/uv/):
 
 ```powershell
 git clone https://github.com/loLollipop/FormulaSnip.git
@@ -102,31 +139,53 @@ uv sync --extra dev
 uv run python -m formulasnip
 ```
 
-运行检查：
+Run the test and lint suites:
 
 ```powershell
 uv run pytest -q
 uv run ruff check .
 ```
 
-构建 Windows 便携包和安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
+Build the Windows portable package and Setup installer with [Inno Setup 6](https://jrsoftware.org/isinfo.php):
 
 ```powershell
 .\scripts\build_windows.ps1
 ```
 
-首次发行构建会下载并校验固定版本的 MathCraft 公式模型；后续构建会复用通过完整性校验的构建缓存。
+The release build downloads and verifies the pinned MathCraft model when the build cache does not already contain a valid copy.
 
-## 参与项目
+---
 
-欢迎通过 [Issues](https://github.com/loLollipop/FormulaSnip/issues) 报告识别样例、交互问题或安装故障，也欢迎提交 Pull Request。反馈识别问题时，请附上原始公式截图和预期 LaTeX，避免包含隐私信息。
+## Privacy and Security
 
-## 致谢
+- Local OCR and formula preview run on the user's computer.
+- Formula images are not written to temporary files by the normal recognition path.
+- Recognition stays local unless AI assistance is enabled. Automatic update checks are enabled by default and contact GitHub; they can be disabled in Settings. Optional AI assistance contacts only the configured provider.
+- Update packages are checked by size and SHA-256 before installation.
 
-- [MathCraft OCR](https://github.com/SakuraMathcraft/LaTeXSnipper) 提供本地公式识别能力。
-- [PySide6](https://doc.qt.io/qtforpython-6/) 提供 Windows 桌面界面支持。
-- [latex2mathml](https://github.com/roniemartinez/latex2mathml) 用于生成 MathML 输出。
+Read [Privacy](PRIVACY.md), [Security](SECURITY.md), and [Third-party Notices](THIRD_PARTY_NOTICES.md) for the complete behavior and current release limitations.
 
-## 开源协议
+---
 
-FormulaSnip 采用 [GPL-3.0-only](LICENSE) 协议开源。第三方依赖和模型遵循各自的许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+## Contributing
+
+Bug reports and pull requests are welcome. For recognition issues, please attach the original formula image and the expected LaTeX while removing any private information.
+
+- [Open an issue](https://github.com/loLollipop/FormulaSnip/issues)
+- [View releases](https://github.com/loLollipop/FormulaSnip/releases)
+- [Report a vulnerability privately](https://github.com/loLollipop/FormulaSnip/security/advisories/new)
+
+---
+
+## Acknowledgements
+
+- [MathCraft OCR](https://github.com/SakuraMathcraft/LaTeXSnipper) and [MathCraft Models](https://github.com/SakuraMathcraft/MathCraft-Models) provide the local formula-recognition foundation.
+- [PySide6](https://doc.qt.io/qtforpython-6/) powers the Windows desktop interface.
+- [MathJax](https://www.mathjax.org/) provides the offline electronic formula preview.
+- [latex2mathml](https://github.com/roniemartinez/latex2mathml) provides MathML conversion.
+
+---
+
+## License
+
+FormulaSnip is licensed under [GPL-3.0-only](LICENSE). Third-party components and model files retain their respective licenses; see [Third-party Notices](THIRD_PARTY_NOTICES.md).

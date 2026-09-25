@@ -119,7 +119,16 @@ def _run_abandonable(
 
 
 def format_size(size: int) -> str:
-    return f"{size / (1024 * 1024):.1f} MB"
+    bounded = max(0, int(size))
+    units = ("B", "KB", "MB", "GB")
+    value = float(bounded)
+    for index, unit in enumerate(units):
+        if value < 1024 or index == len(units) - 1:
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable")
 
 
 def _format_inline_note(text: str) -> str:
@@ -238,7 +247,7 @@ class UpdateDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.setModal(False)
         self.setMinimumWidth(600)
-        self.resize(620, 570)
+        self.resize(620, 520)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -258,16 +267,9 @@ class UpdateDialog(QDialog):
         app_icon.setAccessibleName("FormulaSnip 应用图标")
         header_layout.addWidget(app_icon)
 
-        heading_layout = QVBoxLayout()
-        heading_layout.setContentsMargins(0, 1, 0, 1)
-        heading_layout.setSpacing(4)
         title = QLabel("发现新版本")
         title.setObjectName("UpdateTitle")
-        subtitle = QLabel("FormulaSnip 已准备好升级")
-        subtitle.setObjectName("UpdateSubtitle")
-        heading_layout.addWidget(title)
-        heading_layout.addWidget(subtitle)
-        header_layout.addLayout(heading_layout, 1)
+        header_layout.addWidget(title, 1)
         layout.addWidget(header)
 
         self.content_scroll = QScrollArea()
@@ -330,11 +332,15 @@ class UpdateDialog(QDialog):
         self.notes.setAccessibleName("更新内容")
         self.notes.setAccessibleDescription("FormulaSnip 新版本的发布说明")
         self.notes.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.notes.setMinimumHeight(132)
-        self.notes.setMaximumHeight(220)
         self.notes.setHtml(format_release_notes(release.notes))
+        visible_note_lines = max(
+            1,
+            len([line for line in release.notes.splitlines() if line.strip()]),
+        )
+        notes_height = min(180, max(88, 68 + visible_note_lines * 18))
+        self.notes.setFixedHeight(notes_height)
         notes_title.setBuddy(self.notes)
-        content_layout.addWidget(self.notes, 1)
+        content_layout.addWidget(self.notes)
 
         metadata = QHBoxLayout()
         metadata.setContentsMargins(0, 0, 0, 0)
@@ -362,6 +368,7 @@ class UpdateDialog(QDialog):
         self.status_label.setWordWrap(True)
         self.progress_detail_label = QLabel("")
         self.progress_detail_label.setObjectName("UpdateProgressDetail")
+        self.progress_detail_label.setAccessibleName("下载进度详情")
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.progress_detail_label)
         status_layout.addLayout(status_row)
@@ -370,6 +377,7 @@ class UpdateDialog(QDialog):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setAccessibleName("更新下载进度")
         self.progress_bar.hide()
         status_layout.addWidget(self.progress_bar)
         self.status_panel.hide()
@@ -422,21 +430,53 @@ class UpdateDialog(QDialog):
     def show_downloading(self) -> None:
         self._busy_state = "downloading"
         self._cancel_emitted = False
-        self.progress_bar.setValue(0)
-        self._show_status("progress", "正在下载更新", progress=True, detail="0%")
+        self._show_status("progress", "正在下载更新", progress=True)
+        self.set_download_progress(0, self.release.asset.size)
         self.update_button.setText("正在更新…")
         self.update_button.setEnabled(False)
         self.later_button.setText("取消下载")
         self.later_button.setEnabled(True)
 
-    def set_download_progress(self, received: int, total: int) -> None:
-        value = int(received * 100 / total) if total > 0 else 0
-        value = min(max(value, 0), 100)
-        self.progress_bar.setValue(value)
-        self.progress_detail_label.setText(f"{value}%")
-        self.status_label.setText(
-            "正在校验安装包" if value >= 100 else "正在下载更新"
+    def show_verifying_cached_installer(self) -> None:
+        self._busy_state = "downloading"
+        self._show_status(
+            "progress",
+            "正在校验已下载的安装包",
+            progress=True,
         )
+        self.progress_bar.setRange(0, 0)
+        self.progress_detail_label.setText("使用本地缓存，无需重复下载")
+        self.progress_detail_label.show()
+        self.update_button.setText("正在更新…")
+        self.update_button.setEnabled(False)
+        self.later_button.setText("取消校验")
+        self.later_button.setEnabled(True)
+
+    def set_download_progress(self, received: int, total: int) -> None:
+        received = max(0, int(received))
+        total = max(0, int(total))
+        if total <= 0:
+            self.progress_bar.setRange(0, 0)
+            self.progress_detail_label.setText(f"已下载 {format_size(received)}")
+            self.status_label.setText("正在下载更新")
+            self.progress_detail_label.show()
+            return
+
+        bounded_received = min(received, total)
+        value = min(max(int(bounded_received * 100 / total), 0), 100)
+        self.progress_detail_label.setText(
+            f"{value}% · {format_size(bounded_received)} / {format_size(total)}"
+        )
+        self.progress_detail_label.show()
+        if bounded_received >= total:
+            # The bytes are complete, but integrity verification is still
+            # running. Indeterminate state avoids fake overall 100% progress.
+            self.progress_bar.setRange(0, 0)
+            self.status_label.setText("下载完成，正在校验安装包")
+            return
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(value)
+        self.status_label.setText("正在下载更新")
 
     def show_waiting_for_recognition(self) -> None:
         self._busy_state = "waiting"
@@ -507,10 +547,17 @@ class UpdateDialog(QDialog):
         self.progress_bar.setVisible(progress)
         self.status_panel.show()
         _repolish(self.status_panel)
-        QTimer.singleShot(
-            0,
-            lambda: self.content_scroll.ensureWidgetVisible(self.status_panel, 0, 14),
-        )
+        QTimer.singleShot(0, self._ensure_status_visible_if_needed)
+
+    def _ensure_status_visible_if_needed(self) -> None:
+        viewport = self.content_scroll.viewport()
+        top = self.status_panel.mapTo(viewport, self.status_panel.rect().topLeft()).y()
+        bottom = self.status_panel.mapTo(
+            viewport,
+            self.status_panel.rect().bottomLeft(),
+        ).y()
+        if top < 0 or bottom >= viewport.height():
+            self.content_scroll.ensureWidgetVisible(self.status_panel, 0, 14)
 
 
 class UpdateCheckSignals(QObject):
@@ -560,6 +607,7 @@ class UpdateCheckWorker(QRunnable):
 
 class UpdateDownloadSignals(QObject):
     progress = Signal(object, object)
+    phase = Signal(str)
     finished = Signal(object, object)
     failed = Signal(str)
 
@@ -586,6 +634,9 @@ class UpdateDownloadWorker(QRunnable):
     def _publish_progress(self, received: int, total: int) -> None:
         self._publish(lambda: self.signals.progress.emit(received, total))
 
+    def _publish_phase(self, phase: str) -> None:
+        self._publish(lambda: self.signals.phase.emit(phase))
+
     @Slot()
     def run(self) -> None:
         completed_release = self.release
@@ -595,6 +646,7 @@ class UpdateDownloadWorker(QRunnable):
                     self.release.asset,
                     self.cache_directory,
                     progress=self._publish_progress,
+                    phase=self._publish_phase,
                     cancel_event=self._cancellation,
                 ),
                 self._cancellation,
@@ -615,12 +667,14 @@ class UpdateDownloadWorker(QRunnable):
                 asset=fallback_asset,
                 fallback_asset=None,
             )
+            self._publish_progress(0, completed_release.asset.size)
             try:
                 path = _run_abandonable(
                     lambda: download_installer(
                         completed_release.asset,
                         self.cache_directory,
                         progress=self._publish_progress,
+                        phase=self._publish_phase,
                         cancel_event=self._cancellation,
                     ),
                     self._cancellation,

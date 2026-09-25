@@ -37,7 +37,7 @@ def main() -> None:
 
     app = create_application([])
     apply_application_theme("dark")
-    orb = FloatingOrb("#28A9C7")
+    orb = FloatingOrb()
     panel = FloatingResultPanel()
     result = RecognitionResult(
         TUTORIAL_FORMULA_LATEX,
@@ -60,14 +60,14 @@ def main() -> None:
     panel_image = panel.grab()
     orb_image = orb.grab()
     canvas = QPixmap(760, 680)
-    canvas.fill(QColor("#eef3f9"))
+    canvas.fill(QColor("#eef0f7"))
     painter = QPainter(canvas)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor("#ffffff"))
     painter.drawRoundedRect(QRect(24, 22, 712, 636), 12, 12)
-    painter.drawPixmap(48, 48, panel_image)
-    painter.drawPixmap(628, 286, orb_image)
+    painter.drawPixmap(36, 48, panel_image)
+    painter.drawPixmap(668, 48, orb_image)
     painter.end()
 
     floating_output = output_dir / "formulasnip_floating_result_dark.png"
@@ -75,14 +75,14 @@ def main() -> None:
         raise RuntimeError(f"无法保存悬浮模式预览：{floating_output}")
 
     screenshot = QPixmap(900, 500)
-    screenshot.fill(QColor("#f4f6f9"))
+    screenshot.fill(QColor("#f3f4f8"))
     screenshot_painter = QPainter(screenshot)
     screenshot_painter.fillRect(QRect(72, 44, 756, 412), QColor("#ffffff"))
-    screenshot_painter.setPen(QColor("#d8dee8"))
+    screenshot_painter.setPen(QColor("#dde2ee"))
     for line_index, line_width in enumerate((510, 455, 560, 420)):
         y = 92 + line_index * 31
         screenshot_painter.drawLine(126, y, 126 + line_width, y)
-    screenshot_painter.setPen(QColor("#172033"))
+    screenshot_painter.setPen(QColor("#171923"))
     formula_font = QFont("Cambria Math", 24)
     screenshot_painter.setFont(formula_font)
     screenshot_painter.drawText(
@@ -139,7 +139,8 @@ def main() -> None:
         apply_application_theme("dark")
         app.processEvents()
         update_dialog.show_downloading()
-        update_dialog.set_download_progress(47, 100)
+        received = (release.asset.size * 47 + 99) // 100
+        update_dialog.set_download_progress(received, release.asset.size)
         app.processEvents()
         update_dark_output = output_dir / "formulasnip_update_dialog_dark.png"
         save_widget(update_dialog, update_dark_output)

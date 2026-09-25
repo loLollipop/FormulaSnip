@@ -3,7 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtGui import QIcon, QImage
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 
 from formulasnip import __version__
 
@@ -28,6 +29,32 @@ def application_icon() -> QIcon:
     if icon.isNull():
         icon = QIcon(str(APP_ICON_PNG))
     return icon
+
+
+def themed_brand_pixmap(accent_color: str, size: int = 30) -> QPixmap:
+    """Render the in-app brand mark using the active interface accent."""
+
+    side = max(1, size)
+    accent = QColor(accent_color)
+    if not accent.isValid():
+        accent = QColor("#2563EB")
+    pixmap = QPixmap(side, side)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    bounds = QRectF(1.0, 1.0, side - 2.0, side - 2.0)
+    radius = side * 0.23
+    painter.setBrush(accent)
+    outline = accent.lighter(128)
+    painter.setPen(QPen(outline, max(1.0, side / 30.0)))
+    painter.drawRoundedRect(bounds, radius, radius)
+    font = QFont("Segoe UI", max(7, round(side * 0.34)))
+    font.setWeight(QFont.Weight.DemiBold)
+    painter.setFont(font)
+    painter.setPen(QColor("#FFFFFF"))
+    painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "fx")
+    painter.end()
+    return pixmap
 
 
 @lru_cache(maxsize=1)

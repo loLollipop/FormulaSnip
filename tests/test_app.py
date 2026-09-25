@@ -6,6 +6,81 @@ from typing import Any
 from formulasnip import app
 
 
+def test_after_update_argument_is_consumed_before_qt() -> None:
+    argv, after_update = app._consume_startup_arguments(
+        ["FormulaSnip.exe", "-platform", "offscreen", "--after-update"]
+    )
+
+    assert argv == ["FormulaSnip.exe", "-platform", "offscreen"]
+    assert after_update is True
+
+
+def test_normal_arguments_do_not_enable_after_update() -> None:
+    argv, after_update = app._consume_startup_arguments(
+        ["FormulaSnip.exe", "-platform", "offscreen"]
+    )
+
+    assert argv == ["FormulaSnip.exe", "-platform", "offscreen"]
+    assert after_update is False
+
+
+def test_run_application_shows_before_scheduling_warmups(monkeypatch: Any) -> None:
+    from formulasnip.ui import floating
+
+    events: list[Any] = []
+
+    class Signal:
+        def connect(self, callback: Any) -> None:
+            events.append(("connect", callback.__name__))
+
+    class Application:
+        aboutToQuit = Signal()
+
+        def setQuitOnLastWindowClosed(self, value: bool) -> None:  # noqa: N802
+            events.append(("keep-alive", value))
+
+        def exec(self) -> int:
+            events.append("exec")
+            return 17
+
+    class Assistant:
+        def show(self, *, after_update: bool = False) -> None:
+            events.append(("show", after_update))
+
+        def start_model_warmup(self) -> None:
+            pass
+
+        def start_preview_warmup(self) -> None:
+            pass
+
+        def start_update_checks(self) -> None:
+            events.append("updates")
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    application = Application()
+    assistant = Assistant()
+    monkeypatch.setattr(app, "create_application", lambda argv: application)
+    monkeypatch.setattr(floating, "FloatingFormulaAssistant", lambda: assistant)
+    monkeypatch.setattr(
+        app.QTimer,
+        "singleShot",
+        lambda delay, callback: events.append(("warmup", delay, callback.__name__)),
+    )
+
+    assert app._run_application(["FormulaSnip.exe"], after_update=True) == 17
+    assert events.index(("show", True)) < events.index(
+        ("warmup", app.MODEL_WARMUP_DELAY_MS, "start_model_warmup")
+    )
+    assert events.index(("show", True)) < events.index(
+        ("warmup", app.PREVIEW_WARMUP_DELAY_MS, "start_preview_warmup")
+    )
+    assert app.MODEL_WARMUP_DELAY_MS > 0
+    assert app.PREVIEW_WARMUP_DELAY_MS > app.MODEL_WARMUP_DELAY_MS
+    assert events.count("shutdown") == 1
+
+
 def test_second_instance_exits_before_application_creation(monkeypatch: Any) -> None:
     monkeypatch.setattr(app.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(app.SingleInstanceGuard, "acquire", lambda self: False)

@@ -62,7 +62,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $applicationDirectory "FormulaSnip.e
 uv run --locked --project $projectRoot python (Join-Path $PSScriptRoot "verify_release_bundle.py") $applicationDirectory
 if ($LASTEXITCODE -ne 0) { throw "Release bundle hygiene verification failed." }
 
-foreach ($documentName in @("LICENSE", "README.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md")) {
+foreach ($documentName in @("LICENSE", "README.md", "README.zh-CN.md", "SECURITY.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md")) {
     Copy-Item `
         -LiteralPath (Join-Path $projectRoot $documentName) `
         -Destination (Join-Path $applicationDirectory $documentName) `

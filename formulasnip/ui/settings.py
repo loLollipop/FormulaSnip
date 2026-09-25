@@ -67,28 +67,43 @@ from formulasnip.ui.branding import (
     TUTORIAL_FORMULA_LATEX,
     application_icon,
     application_version,
+    themed_brand_pixmap,
     tutorial_formula_image,
 )
-from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.styles import (
+    ACCENT_THEME_SWATCHES,
+    DEFAULT_ACCENT_THEME,
+    apply_application_theme,
+    current_accent_color,
+    normalize_accent_theme,
+    theme_accent_color,
+)
 from formulasnip.ui.worker import CompatibleModelWorker
 
 RECOGNITION_MODES = ("mathcraft",)
 ORB_COLORS = ("blue", "green", "orange")
 RESULT_THEMES = ("dark", "light")
-DEFAULT_RING_COLOR = "#5D83F3"
+LEGACY_DEFAULT_RING_COLOR = "#5D83F3"
+DEFAULT_RING_COLOR = "#7C6CF7"
 RING_PRESETS = {
     "blue": DEFAULT_RING_COLOR,
-    "green": "#35B98A",
-    "orange": "#ED7A45",
-    "rose": "#E65B7A",
-    "cyan": "#28A9C7",
+    "green": "#22C7A9",
+    "orange": "#FF8A4C",
+    "rose": "#F45D92",
+    "cyan": "#27B8D1",
 }
 RING_PRESET_LABELS = {
-    "blue": "靛蓝",
-    "green": "翠绿",
+    "blue": "电光紫",
+    "green": "青绿",
     "orange": "橙色",
     "rose": "玫红",
-    "cyan": "青色",
+    "cyan": "冰蓝",
+}
+THEME_ACCENT_LABELS = {
+    "blue": "星际蓝",
+    "violet": "电光紫",
+    "cyan": "极光青",
+    "teal": "薄荷绿",
 }
 MAX_LOGO_BYTES = 12 * 1024 * 1024
 MAX_LOGO_SIDE = 4096
@@ -560,6 +575,7 @@ class FloatingPreferences:
     ai_base_url: str = ""
     ai_model: str = ""
     auto_check_updates: bool = True
+    accent_theme: str = DEFAULT_ACCENT_THEME
 
     @property
     def effective_ring_color(self) -> str:
@@ -575,6 +591,10 @@ class FloatingPreferences:
             return str(Path(self.logo_path).expanduser().resolve())
         except OSError:
             return ""
+
+    @property
+    def effective_accent_theme(self) -> str:
+        return normalize_accent_theme(self.accent_theme)
 
     @classmethod
     def load(cls, settings: QSettings) -> FloatingPreferences:
@@ -619,12 +639,19 @@ class FloatingPreferences:
             stored_value("appearance/result_theme"), RESULT_THEMES, "dark"
         )
         theme = _choice(stored_value("appearance/theme"), RESULT_THEMES, legacy_theme)
+        stored_accent_theme = stored_value("appearance/accent_theme")
+        accent_theme = normalize_accent_theme(stored_accent_theme)
         stored_ring = stored_value("appearance/ring_color")
         ring = (
             normalize_hex_color(stored_ring)
             if isinstance(stored_ring, str)
             else RING_PRESETS[legacy_orb]
         )
+        migrated_legacy_ring = (
+            ring == LEGACY_DEFAULT_RING_COLOR and legacy_orb == "blue"
+        )
+        if migrated_legacy_ring:
+            ring = DEFAULT_RING_COLOR
         stored_logo = stored_value("appearance/logo_path")
         logo = ""
         if isinstance(stored_logo, str) and read_logo_image(stored_logo) is not None:
@@ -656,10 +683,19 @@ class FloatingPreferences:
             ai_base_url=ai_base_url,
             ai_model=ai_model,
             auto_check_updates=_boolean(stored_value("updates/automatic"), True),
+            accent_theme=accent_theme,
         )
         migrations: dict[str, object] = {}
         if stored_recognition_mode != recognition_mode:
             migrations["recognition/mode"] = recognition_mode
+        if migrated_legacy_ring:
+            migrations["appearance/ring_color"] = DEFAULT_RING_COLOR
+            migrations["appearance/orb_color"] = "blue"
+        if (
+            stored_accent_theme is not None
+            and str(stored_accent_theme).strip().lower() not in ACCENT_THEME_SWATCHES
+        ):
+            migrations["appearance/accent_theme"] = DEFAULT_ACCENT_THEME
         if _boolean(
             stored_value("recognition/ai_correction_enabled"), False
         ) and not ai_correction_enabled:
@@ -692,6 +728,7 @@ class FloatingPreferences:
                 "recognition/mode": "mathcraft",
                 "appearance/ring_color": ring,
                 "appearance/theme": self.result_theme,
+                "appearance/accent_theme": self.effective_accent_theme,
                 "appearance/logo_path": self.effective_logo_path,
                 "window/show_settings_on_startup": self.show_settings_on_startup,
                 "recognition/ai_correction_enabled": ai_enabled,
@@ -786,7 +823,7 @@ class OrbAppearancePreview(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         circle = self.rect().adjusted(13, 13, -13, -13)
         painter.setPen(QPen(QColor(self._ring_color), 5))
-        painter.setBrush(QColor("#1A2434"))
+        painter.setBrush(QColor("#151824"))
         painter.drawEllipse(circle)
         if not self._logo.isNull():
             target = self._logo.size().scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio)
@@ -830,13 +867,13 @@ class TutorialStepIllustration(QWidget):
             QApplication.instance().property("theme") == "dark"
         )
         colors = {
-            "surface": QColor("#161A21" if dark else "#FFFFFF"),
-            "surface_alt": QColor("#1C212A" if dark else "#F4F6F9"),
-            "border": QColor("#39414F" if dark else "#C8CFDA"),
-            "text": QColor("#E8ECF3" if dark else "#151A21"),
-            "muted": QColor("#98A8BF" if dark else "#5F6A79"),
-            "accent": QColor("#6E8CF5"),
-            "success": QColor("#72DFB5" if dark else "#19704F"),
+            "surface": QColor("#131620" if dark else "#FFFFFF"),
+            "surface_alt": QColor("#191D29" if dark else "#F1F3F9"),
+            "border": QColor("#3A4255" if dark else "#C7CEDD"),
+            "text": QColor("#F1F3F8" if dark else "#171923"),
+            "muted": QColor("#9AA3B5" if dark else "#64697A"),
+            "accent": QColor(current_accent_color()),
+            "success": QColor("#2DD4BF" if dark else "#0F8A78"),
         }
         area = QRectF(self.rect()).adjusted(18, 18, -18, -18)
         if self.step_index == 0:
@@ -909,7 +946,7 @@ class TutorialStepIllustration(QWidget):
                 painter,
                 rect,
                 "Gaussian integral",
-                QColor("#172033"),
+                QColor("#171923"),
                 size=10,
                 bold=True,
             )
@@ -978,9 +1015,9 @@ class TutorialStepIllustration(QWidget):
             desktop.height() - 53,
         )
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#F7F9FC"))
+        painter.setBrush(QColor("#F7F8FC"))
         painter.drawRoundedRect(page, 5, 5)
-        painter.setPen(QPen(QColor("#D7DFEB"), 2))
+        painter.setPen(QPen(QColor("#DDE2EE"), 2))
         for index, ratio in enumerate((0.74, 0.58, 0.68, 0.42)):
             y = page.top() + 18 + index * 18
             painter.drawLine(
@@ -996,7 +1033,7 @@ class TutorialStepIllustration(QWidget):
             orb_size,
         )
         painter.setPen(QPen(colors["accent"], 4))
-        painter.setBrush(QColor("#1A2434"))
+        painter.setBrush(QColor("#151824"))
         painter.drawEllipse(orb)
         cls._draw_label(painter, orb, "fx", QColor("#FFFFFF"), size=14, bold=True)
         cls._draw_arrow_cursor(
@@ -1020,8 +1057,8 @@ class TutorialStepIllustration(QWidget):
         self, painter: QPainter, area: QRectF, colors: dict[str, QColor]
     ) -> None:
         page = area.adjusted(5, 4, -5, -4)
-        self._draw_card(painter, page, QColor("#FFFFFF"), QColor("#D7DFEB"))
-        painter.setPen(QPen(QColor("#D7DFEB"), 2))
+        self._draw_card(painter, page, QColor("#FFFFFF"), QColor("#DDE2EE"))
+        painter.setPen(QPen(QColor("#DDE2EE"), 2))
         for index, ratio in enumerate((0.78, 0.61, 0.72, 0.51, 0.67)):
             y = page.top() + 20 + index * 31
             painter.drawLine(
@@ -1068,28 +1105,28 @@ class TutorialStepIllustration(QWidget):
         self, painter: QPainter, area: QRectF, colors: dict[str, QColor]
     ) -> None:
         panel = area.adjusted(3, 6, -3, -6)
-        self._draw_card(painter, panel, QColor("#121B2B"), QColor("#34445E"))
+        self._draw_card(painter, panel, QColor("#10131B"), QColor("#2A3040"))
         self._draw_label(
             painter,
             QRectF(panel.left() + 13, panel.top() + 7, panel.width() - 26, 22),
             "公式识别结果",
-            QColor("#EDF3FB"),
+            QColor("#F3F5FA"),
             size=9,
             bold=True,
             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
         preview = QRectF(panel.left() + 13, panel.top() + 35, panel.width() - 26, 70)
-        self._draw_card(painter, preview, QColor("#FFFFFF"), QColor("#D7DFEB"), 5)
+        self._draw_card(painter, preview, QColor("#FFFFFF"), QColor("#DDE2EE"), 5)
         self._draw_formula(painter, preview.adjusted(13, 13, -13, -13))
         status = QRectF(panel.left() + 13, preview.bottom() + 7, 72, 20)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#173B36"))
+        painter.setBrush(QColor("#103A35"))
         painter.drawRoundedRect(status, 5, 5)
         self._draw_label(
-            painter, status, "✓ 电子公式", QColor("#72DFB5"), size=8, bold=True
+            painter, status, "✓ 电子公式", QColor("#5EEAD4"), size=8, bold=True
         )
         latex = QRectF(panel.left() + 13, status.bottom() + 8, panel.width() - 26, 35)
-        self._draw_card(painter, latex, QColor("#09101D"), QColor("#34445E"), 5)
+        self._draw_card(painter, latex, QColor("#090B10"), QColor("#2A3040"), 5)
         latex_lines = TUTORIAL_FORMULA_LATEX.replace(
             r"\,\mathrm{d}x = ",
             r"\,\mathrm{d}x" "\n" "= ",
@@ -1098,7 +1135,7 @@ class TutorialStepIllustration(QWidget):
             painter,
             latex.adjusted(9, 2, -7, -2),
             latex_lines,
-            QColor("#C9D5E5"),
+            QColor("#D6DAE7"),
             size=6,
             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             family="Consolas",
@@ -1156,7 +1193,7 @@ class TutorialStepIllustration(QWidget):
             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
         )
         formula = QRectF(word.left() + 12, word.top() + 52, word.width() - 24, 36)
-        painter.setPen(QPen(QColor("#D7DFEB"), 1))
+        painter.setPen(QPen(QColor("#DDE2EE"), 1))
         painter.setBrush(QColor("#FFFFFF"))
         painter.drawRoundedRect(formula, 5, 5)
         self._draw_formula(painter, formula.adjusted(9, 8, -9, -8))
@@ -1211,8 +1248,8 @@ class ToggleSwitch(QAbstractButton):
         dark = QApplication.instance() is not None and (
             QApplication.instance().property("theme") == "dark"
         )
-        accent = QColor("#6E8CF5")
-        inactive = QColor("#39414F" if dark else "#C8CFDA")
+        accent = QColor(current_accent_color())
+        inactive = QColor("#3A4255" if dark else "#C7CEDD")
         track = accent if self.isChecked() else inactive
         if not self.isEnabled():
             track.setAlpha(120)
@@ -1220,7 +1257,7 @@ class ToggleSwitch(QAbstractButton):
         painter.setBrush(track)
         painter.drawRoundedRect(QRectF(1, 1, 42, 22), 11, 11)
         x = 4.0 + self._position * 20.0
-        thumb_color = "#FFFFFF" if self.isChecked() or not dark else "#161A21"
+        thumb_color = "#FFFFFF" if self.isChecked() or not dark else "#131620"
         painter.setBrush(QColor(thumb_color))
         painter.drawEllipse(QRectF(x, 4, 16, 16))
         if self.hasFocus():
@@ -1253,7 +1290,13 @@ class ModeCard(QPushButton):
 
     selected = Signal(str)
 
-    def __init__(self, key: str, title: str, tag: str, body: str, meta: str) -> None:
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        tag: str,
+        accessible_description: str,
+    ) -> None:
         super().__init__()
         self.mode_key = key
         self.setObjectName("ModeCard")
@@ -1261,15 +1304,17 @@ class ModeCard(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(f"{title}识别模式")
-        self.setMinimumHeight(84)
+        self.setAccessibleDescription(accessible_description)
+        self.setToolTip(accessible_description)
+        self.setMinimumHeight(68)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 14, 20, 14)
-        layout.setSpacing(14)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(12)
         self.indicator = QLabel()
         self.indicator.setObjectName("ModeIndicator")
         self.indicator.setFixedSize(18, 18)
         self.indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignVCenter)
         copy = QVBoxLayout()
         copy.setSpacing(4)
         title_row = QHBoxLayout()
@@ -1281,23 +1326,14 @@ class ModeCard(QPushButton):
         title_row.addWidget(self.title_label)
         title_row.addWidget(tag_label)
         title_row.addStretch(1)
-        body_label = QLabel(body)
-        body_label.setObjectName("ModeBody")
-        body_label.setWordWrap(True)
-        meta_label = QLabel(meta)
-        meta_label.setObjectName("ModeMeta")
         for label in (
             self.indicator,
             self.title_label,
             tag_label,
-            body_label,
-            meta_label,
         ):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         copy.addLayout(title_row)
-        copy.addWidget(body_label)
         layout.addLayout(copy, 1)
-        layout.addWidget(meta_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.toggled.connect(self._sync_visual)
         self.clicked.connect(lambda: self.selected.emit(self.mode_key))
         self._sync_visual(False)
@@ -1324,26 +1360,25 @@ class SettingsPanel(QWidget):
         (
             "点击悬浮球",
             "点击悬浮球开始截图",
-            "左键点击桌面上的 fx 悬浮球，屏幕进入浅色框选状态，使用箭头光标拖动。",
+            "左键点击桌面上的 fx 悬浮球，然后拖动框选公式。",
             "截图只覆盖鼠标所在的那块屏幕；按 Esc 可随时取消。",
         ),
         (
             "框选公式",
             "拖动鼠标框住一个公式",
-            "拖出矩形框住单个公式即可，不需要贴边精确。松开鼠标后自动开始识别。",
+            "用矩形框住单个公式，松开鼠标后自动识别。",
             "一次只识别一个公式，不做正文 OCR、表格或整页版面识别。",
         ),
         (
             "核对结果",
             "核对排版后的电子公式",
-            "结果面板紧贴悬浮球展开，用 MathJax 排版复杂公式，放大仍然清晰。"
-            "质量规则会提示括号不配对、裸 frac / sqrt 等可疑结果。",
+            "对照原图核对电子公式，必要时直接修改 LaTeX。",
             "语法正确但数学含义错误的结果无法自动发现，仍需人工校对。",
         ),
         (
             "复制",
             "复制 LaTeX 或 MathML",
-            "选择 LaTeX 或带 MathML MIME 的 MathML，复制成功后结果面板自动收起。",
+            "选择 LaTeX 或 MathML，复制成功后结果面板自动收起。",
             "直接粘贴到 Word、MathType 或其他支持 LaTeX / MathML 的编辑器。",
         ),
     )
@@ -1398,7 +1433,10 @@ class SettingsPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.resize(1080, 700)
         self.setMinimumSize(960, 620)
-        apply_application_theme(preferences.result_theme)
+        apply_application_theme(
+            preferences.result_theme,
+            preferences.effective_accent_theme,
+        )
         self._build_ui()
         self._load_controls(preferences)
         self._building = False
@@ -1467,7 +1505,7 @@ class SettingsPanel(QWidget):
         self.brand_logo.setObjectName("BrandLogo")
         self.brand_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.brand_logo.setFixedSize(30, 30)
-        self.brand_logo.setPixmap(application_icon().pixmap(QSize(30, 30)))
+        self._update_brand_logo()
         self.brand_logo.setAccessibleName("FormulaSnip 应用图标")
         title = QLabel("FormulaSnip")
         title.setObjectName("BrandTitle")
@@ -1485,8 +1523,8 @@ class SettingsPanel(QWidget):
         for label, title, hint, icon_name in (
             ("常规", "常规", "", "general"),
             ("识别", "识别", "", "recognition"),
-            ("悬浮球", "悬浮球", "", "orb"),
-            ("使用方法", "使用方法", "4 步", "tutorial"),
+            ("外观", "外观", "", "orb"),
+            ("使用方法", "使用方法", "", "tutorial"),
         ):
             button = NavigationButton(label, hint)
             button.setObjectName("NavButton")
@@ -1503,7 +1541,7 @@ class SettingsPanel(QWidget):
         self.github_button.setFixedHeight(36)
         self.github_button.setIcon(
             github_mark_icon(
-                "#98A8BF" if self._preferences.result_theme == "dark" else "#5F6A79"
+                "#9BA5B8" if self._preferences.result_theme == "dark" else "#697083"
             )
         )
         self.github_button.setIconSize(QSize(16, 16))
@@ -1518,19 +1556,12 @@ class SettingsPanel(QWidget):
     def _build_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("SettingsHeader")
-        header.setFixedHeight(78)
+        header.setFixedHeight(66)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(28, 10, 28, 10)
         layout.setSpacing(10)
         self.page_title = QLabel()
         self.page_title.setObjectName("PageTitle")
-        self.page_subtitle = QLabel(header)
-        self.page_subtitle.setObjectName("PageSubtitle")
-        title_layout = QVBoxLayout()
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(2)
-        title_layout.addWidget(self.page_title)
-        title_layout.addWidget(self.page_subtitle)
         self.theme_toggle_button = QPushButton()
         self.theme_toggle_button.setObjectName("ThemeToggleButton")
         self.theme_toggle_button.setFixedSize(34, 34)
@@ -1542,7 +1573,7 @@ class SettingsPanel(QWidget):
         self.start_button.setFixedHeight(34)
         self.start_button.setMinimumWidth(104)
         self.start_button.clicked.connect(self.start_requested.emit)
-        layout.addLayout(title_layout)
+        layout.addWidget(self.page_title)
         layout.addStretch(1)
         layout.addWidget(self.theme_toggle_button)
         layout.addWidget(self.start_button)
@@ -1552,8 +1583,8 @@ class SettingsPanel(QWidget):
         body = QWidget()
         body.setObjectName("SettingsPageBody")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(28, 24, 28, 28)
-        layout.setSpacing(16)
+        layout.setContentsMargins(28, 20, 28, 24)
+        layout.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(body)
@@ -1571,8 +1602,7 @@ class SettingsPanel(QWidget):
         assert mode_layout is not None
         mode_row = QHBoxLayout()
         mode_copy = QVBoxLayout()
-        mode_copy.setSpacing(5)
-        mode_copy.addWidget(_muted_text("公式识别引擎"))
+        mode_copy.setSpacing(0)
         mode_title_row = QHBoxLayout()
         mode_title_row.setSpacing(9)
         self.overview_mode_name = QLabel()
@@ -1585,12 +1615,7 @@ class SettingsPanel(QWidget):
         mode_copy.addLayout(mode_title_row)
         self.mode_summary_label = _muted_text("")
         self.mode_summary_label.hide()
-        change_button = QPushButton("更改")
-        change_button.setObjectName("CompactButton")
-        change_button.setFixedSize(72, 36)
-        change_button.clicked.connect(lambda: self._select_page(1))
         mode_row.addLayout(mode_copy, 1)
-        mode_row.addWidget(change_button, 0, Qt.AlignmentFlag.AlignVCenter)
         mode_layout.addLayout(mode_row)
         layout.addWidget(mode_card)
 
@@ -1612,7 +1637,7 @@ class SettingsPanel(QWidget):
         general_layout.addWidget(_divider())
 
         automatic_row = QHBoxLayout()
-        automatic_row.addWidget(_row_title("自动检查更新（每 12 小时）"), 1)
+        automatic_row.addWidget(_row_title("自动检查更新"), 1)
         self.auto_update_toggle = ToggleSwitch()
         self.auto_update_toggle.setAccessibleName("自动检查更新")
         self.auto_update_toggle.toggled.connect(self._controls_changed)
@@ -1629,7 +1654,8 @@ class SettingsPanel(QWidget):
             f"当前版本 v{application_version()}"
         )
         update_copy.addWidget(self.update_version_label)
-        self.update_status_label = _muted_text("稳定通道")
+        self.update_status_label = _muted_text("")
+        self.update_status_label.hide()
         update_copy.addWidget(self.update_status_label)
         self.check_update_button = QPushButton("检查更新")
         self.update_button = self.check_update_button
@@ -1674,8 +1700,12 @@ class SettingsPanel(QWidget):
             self.engine_status_dots[key] = dot
             row_layout.addWidget(badge)
             row_layout.addLayout(copy, 1)
-            row_layout.addWidget(status)
-            row_layout.addWidget(dot)
+            status_row = QHBoxLayout()
+            status_row.setContentsMargins(0, 0, 0, 0)
+            status_row.setSpacing(6)
+            status_row.addWidget(dot)
+            status_row.addWidget(status)
+            row_layout.addLayout(status_row)
             general_layout.addWidget(row)
             if index < len(summaries) - 1:
                 general_layout.addWidget(_divider())
@@ -1733,33 +1763,33 @@ class SettingsPanel(QWidget):
                 "mathcraft",
                 "MathCraft OCR",
                 "CPU" if mathcraft_available else "安装缺失",
-                "单引擎本地公式识别",
-                "本地模型 · 无需 API" if mathcraft_available else "未安装",
+                "本地单引擎公式识别；无需 API。"
+                if mathcraft_available
+                else "MathCraft 本地识别引擎未安装。",
             ),
         )
         self.mode_card_group = QButtonGroup(self)
         self.mode_card_group.setExclusive(True)
         self.mode_cards: dict[str, ModeCard] = {}
-        for key, title, tag, body, meta in modes:
-            mode_card = ModeCard(key, title, tag, body, meta)
+        for key, title, tag, description in modes:
+            mode_card = ModeCard(key, title, tag, description)
             mode_card.setEnabled(key != "mathcraft" or mathcraft_available)
             mode_card.selected.connect(self._select_recognition_mode)
             self.mode_card_group.addButton(mode_card)
             self.mode_cards[key] = mode_card
             layout.addWidget(mode_card)
 
-        ai_card = _card("AI 辅助识别")
+        ai_card = _card("")
         ai_layout = ai_card.layout()
         assert ai_layout is not None
         ai_header = QHBoxLayout()
-        ai_copy = QVBoxLayout()
-        ai_copy.setSpacing(2)
-        ai_copy.addWidget(_row_title("兼容 API 智能并行"))
-        ai_copy.addWidget(_muted_text("与 MathCraft 同时识别，不一致时可切换对照"))
+        ai_title = _row_title("AI 辅助识别")
+        ai_title.setToolTip("与 MathCraft 并行识别，结果不一致时可切换对照")
+        ai_title.setAccessibleDescription(ai_title.toolTip())
         self.ai_correction_toggle = ToggleSwitch()
         self.ai_correction_toggle.setAccessibleName("启用 AI 智能并行")
         self.ai_correction_toggle.toggled.connect(self._ai_toggle_changed)
-        ai_header.addLayout(ai_copy, 1)
+        ai_header.addWidget(ai_title, 1)
         ai_header.addWidget(self.ai_correction_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         ai_layout.addLayout(ai_header)
 
@@ -1835,11 +1865,15 @@ class SettingsPanel(QWidget):
         self.ai_connection_status_label.setObjectName("AiConnectionStatus")
         self.ai_connection_status_label.setWordWrap(True)
         ai_configuration_layout.addWidget(self.ai_connection_status_label)
-        privacy = _muted_text(
-            "默认关闭。仅将框选区域上传给所配置的兼容 API，不上传本地识别结果；调用可能产生费用。"
+        self.ai_privacy_label = _muted_text("框选图像将发送到所配 API，并可能产生费用。")
+        privacy_detail = (
+            "AI 默认关闭。启用后仅上传当前框选图像，不上传本地识别结果；"
+            "兼容 API 服务商可能收取费用。"
         )
-        privacy.setWordWrap(True)
-        ai_configuration_layout.addWidget(privacy)
+        self.ai_privacy_label.setWordWrap(True)
+        self.ai_privacy_label.setToolTip(privacy_detail)
+        self.ai_privacy_label.setAccessibleDescription(privacy_detail)
+        ai_configuration_layout.addWidget(self.ai_privacy_label)
         save_row = QHBoxLayout()
         save_row.addStretch(1)
         self.ai_save_config_button = QPushButton("保存配置")
@@ -1865,9 +1899,9 @@ class SettingsPanel(QWidget):
         assert preview_layout is not None
         stage = QWidget()
         stage.setObjectName("OrbPreviewStage")
-        stage.setFixedHeight(258)
+        stage.setFixedHeight(210)
         stage_layout = QVBoxLayout(stage)
-        stage_layout.setContentsMargins(20, 20, 20, 12)
+        stage_layout.setContentsMargins(20, 16, 20, 12)
         self.orb_preview = OrbAppearancePreview()
         stage_layout.addWidget(self.orb_preview, 0, Qt.AlignmentFlag.AlignCenter)
         self.ring_hex_label = QLabel(self._ring_color)
@@ -1878,9 +1912,30 @@ class SettingsPanel(QWidget):
         preview_layout.addWidget(stage)
         row.addWidget(preview_card, 5)
 
-        controls = _card("外观")
+        controls = _card("")
         controls_layout = controls.layout()
         assert controls_layout is not None
+        controls_layout.addWidget(_field_label("界面主题色"))
+        theme_swatches = QHBoxLayout()
+        theme_swatches.setSpacing(10)
+        self.theme_color_group = QButtonGroup(self)
+        self.theme_color_group.setExclusive(True)
+        self.theme_color_buttons: dict[str, QPushButton] = {}
+        for name, color in ACCENT_THEME_SWATCHES.items():
+            button = QPushButton()
+            button.setObjectName("ThemeSwatchButton")
+            button.setCheckable(True)
+            button.setFixedSize(34, 34)
+            button.setProperty("accentTheme", name)
+            button.setToolTip(THEME_ACCENT_LABELS[name])
+            button.setAccessibleName(f"界面主题色：{THEME_ACCENT_LABELS[name]}")
+            button.setStyleSheet(f"QPushButton {{ background: {color}; }}")
+            self.theme_color_group.addButton(button)
+            self.theme_color_buttons[name] = button
+            theme_swatches.addWidget(button)
+        theme_swatches.addStretch(1)
+        controls_layout.addLayout(theme_swatches)
+        controls_layout.addWidget(_divider())
         controls_layout.addWidget(_field_label("圆环颜色"))
         swatches = QHBoxLayout()
         swatches.setSpacing(10)
@@ -1923,13 +1978,15 @@ class SettingsPanel(QWidget):
         logo_row.addWidget(self.upload_logo_button)
         logo_row.addWidget(self.restore_logo_button)
         controls_layout.addLayout(logo_row)
-        self.logo_status_label = QLabel("默认 Logo")
+        self.logo_status_label = QLabel("")
         self.logo_status_label.setObjectName("MutedText")
         self.logo_status_label.setWordWrap(True)
+        self.logo_status_label.hide()
         controls_layout.addWidget(self.logo_status_label)
         row.addWidget(controls, 6)
         layout.addLayout(row)
         layout.addStretch(1)
+        self.theme_color_group.buttonClicked.connect(self._accent_theme_selected)
         self.color_group.buttonClicked.connect(self._preset_color_selected)
         return page
 
@@ -1942,6 +1999,8 @@ class SettingsPanel(QWidget):
             step_button = QPushButton(f"{step_index + 1:02d}  {step_data[0]}")
             step_button.setObjectName("TutorialStepButton")
             step_button.setFixedHeight(38)
+            step_button.setToolTip(step_data[3])
+            step_button.setAccessibleDescription(f"{step_data[2]} {step_data[3]}")
             step_button.clicked.connect(
                 lambda _checked=False, target=step_index: self._set_tutorial_step(target)
             )
@@ -1971,17 +2030,17 @@ class SettingsPanel(QWidget):
             body_label = QLabel(body)
             body_label.setObjectName("TutorialBody")
             body_label.setWordWrap(True)
-            tip_label = QLabel(tip)
-            tip_label.setObjectName("TutorialTip")
-            tip_label.setWordWrap(True)
+            step.setToolTip(tip)
+            step.setAccessibleDescription(f"{body} {tip}")
+            heading_label.setToolTip(tip)
+            body_label.setToolTip(tip)
             counter.hide()
             copy.addWidget(heading_label)
             copy.addSpacing(12)
             copy.addWidget(body_label)
-            copy.addSpacing(12)
-            copy.addWidget(tip_label)
             copy.addStretch(1)
             illustration = TutorialStepIllustration(step_index)
+            illustration.setToolTip(tip)
             self.tutorial_illustrations.append(illustration)
             step_layout.addLayout(copy, 3)
             step_layout.addWidget(illustration, 2)
@@ -2038,12 +2097,17 @@ class SettingsPanel(QWidget):
         self.startup_checkbox.set_position(
             1.0 if preferences.show_settings_on_startup else 0.0
         )
+        self.auto_update_toggle.set_position(
+            1.0 if preferences.auto_check_updates else 0.0
+        )
         self._startup_toggle_changed(self.startup_checkbox.isChecked())
         self._ring_color = preferences.effective_ring_color
         selected = _preset_name(self._ring_color)
         if RING_PRESETS.get(selected) == self._ring_color:
             self.color_buttons[selected].setChecked(True)
         self._logo_path = preferences.effective_logo_path
+        selected_accent = preferences.effective_accent_theme
+        self.theme_color_buttons[selected_accent].setChecked(True)
         self._update_appearance_preview()
         self._update_theme_button()
 
@@ -2066,13 +2130,6 @@ class SettingsPanel(QWidget):
                 )
             )
         self.page_title.setText(title)
-        subtitles = (
-            "启动、更新与引擎状态",
-            "本地识别与可选 AI 增强",
-            "调整圆环与中心 Logo",
-            "4 步完成截图、校对与复制",
-        )
-        self.page_subtitle.setText(subtitles[bounded])
 
     @Slot()
     def _open_github_repository(self) -> None:
@@ -2606,51 +2663,59 @@ class SettingsPanel(QWidget):
     @Slot()
     def toggle_theme(self) -> None:
         next_theme = "light" if self._preferences.result_theme == "dark" else "dark"
-        self._preferences = FloatingPreferences(
-            recognition_mode=self._preferences.recognition_mode,
-            orb_color=self._preferences.orb_color,
+        self._preferences = replace(
+            self._preferences,
             result_theme=next_theme,
-            show_settings_on_startup=self._preferences.show_settings_on_startup,
             ring_color=self._ring_color,
             logo_path=self._logo_path,
-            ai_correction_enabled=self._preferences.ai_correction_enabled,
-            ai_base_url=self._preferences.ai_base_url,
-            ai_model=self._preferences.ai_model,
-            auto_check_updates=self._preferences.auto_check_updates,
         )
-        apply_application_theme(next_theme)
+        apply_application_theme(
+            next_theme,
+            self._preferences.effective_accent_theme,
+        )
         self._update_theme_button()
         if not self._building:
             self._save_preferences()
 
     def _update_theme_button(self) -> None:
+        self._update_brand_logo()
         if self._preferences.result_theme == "dark":
             self.theme_toggle_button.setText("")
-            self.theme_toggle_button.setIcon(line_icon("sun", "#98A2B3"))
+            self.theme_toggle_button.setIcon(line_icon("sun", "#9BA5B8"))
             self.theme_toggle_button.setToolTip("切换到浅色主题")
             self.theme_toggle_button.setAccessibleDescription(
                 "当前为深色主题，按下切换到浅色主题"
             )
         else:
             self.theme_toggle_button.setText("")
-            self.theme_toggle_button.setIcon(line_icon("moon", "#667085"))
+            self.theme_toggle_button.setIcon(line_icon("moon", "#697083"))
             self.theme_toggle_button.setToolTip("切换到深色主题")
             self.theme_toggle_button.setAccessibleDescription(
                 "当前为浅色主题，按下切换到深色主题"
             )
         self.github_button.setIcon(
             github_mark_icon(
-                "#98A8BF" if self._preferences.result_theme == "dark" else "#5F6A79"
+                "#9BA5B8" if self._preferences.result_theme == "dark" else "#697083"
             )
         )
         self.theme_toggle_button.setIconSize(QSize(17, 17))
         self._update_navigation_icons()
 
+    def _update_brand_logo(self) -> None:
+        accent = theme_accent_color(
+            self._preferences.result_theme,
+            self._preferences.effective_accent_theme,
+        )
+        self.brand_logo.setPixmap(themed_brand_pixmap(accent, 30))
+
     def _navigation_icon_color(self, *, selected: bool) -> str:
         dark = self._preferences.result_theme == "dark"
         if selected:
-            return "#86A5FF" if dark else "#2563EB"
-        return "#98A2B3" if dark else "#667085"
+            return theme_accent_color(
+                self._preferences.result_theme,
+                self._preferences.effective_accent_theme,
+            )
+        return "#9BA5B8" if dark else "#697083"
 
     def _update_navigation_icons(self) -> None:
         for button, _title in self._nav_entries:
@@ -2660,6 +2725,24 @@ class SettingsPanel(QWidget):
                     self._navigation_icon_color(selected=button.isChecked()),
                 )
             )
+
+    @Slot()
+    def _accent_theme_selected(self) -> None:
+        checked = self.theme_color_group.checkedButton()
+        if checked is None:
+            return
+        accent_theme = normalize_accent_theme(checked.property("accentTheme"))
+        if accent_theme == self._preferences.effective_accent_theme:
+            return
+        self._preferences = replace(self._preferences, accent_theme=accent_theme)
+        apply_application_theme(self._preferences.result_theme, accent_theme)
+        self._update_theme_button()
+        for toggle in self.findChildren(ToggleSwitch):
+            toggle.update()
+        for illustration in self.tutorial_illustrations:
+            illustration.update()
+        if not self._building:
+            self._save_preferences()
 
     @Slot()
     def _preset_color_selected(self) -> None:
@@ -2701,10 +2784,12 @@ class SettingsPanel(QWidget):
         image = read_logo_image(path)
         if image is None:
             self.logo_status_label.setText("图片无效或格式不匹配，已保留原 Logo。")
+            self.logo_status_label.show()
             return
         else:
             self._logo_path = str(Path(path).resolve())
             self.logo_status_label.setText(Path(path).name)
+            self.logo_status_label.show()
         self._update_appearance_preview()
         self._controls_changed()
 
@@ -2713,6 +2798,8 @@ class SettingsPanel(QWidget):
         if not self._logo_path:
             return
         self._logo_path = ""
+        self.logo_status_label.clear()
+        self.logo_status_label.hide()
         self._update_appearance_preview()
         self._controls_changed()
 
@@ -2720,7 +2807,11 @@ class SettingsPanel(QWidget):
         self.orb_preview.set_appearance(self._ring_color, self._logo_path)
         self.ring_hex_label.setText(self._ring_color)
         if not self._logo_path:
-            self.logo_status_label.setText("默认 Logo")
+            self.logo_status_label.clear()
+            self.logo_status_label.hide()
+        else:
+            self.logo_status_label.setText(Path(self._logo_path).name)
+            self.logo_status_label.show()
 
     @Slot()
     def show_tutorial(self) -> None:
@@ -2756,6 +2847,7 @@ class SettingsPanel(QWidget):
 
     def set_update_status(self, message: str, *, checking: bool = False) -> None:
         self.update_status_label.setText(message)
+        self.update_status_label.setVisible(bool(message.strip()))
         self.check_update_button.setEnabled(not checking)
 
     def _update_tutorial_controls(self) -> None:
@@ -2783,8 +2875,8 @@ def _card(title: str, description: str = "") -> QWidget:
     card.setObjectName("SettingsCard")
     card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     layout = QVBoxLayout(card)
-    layout.setContentsMargins(22, 20, 22, 20)
-    layout.setSpacing(10)
+    layout.setContentsMargins(20, 16, 20, 16)
+    layout.setSpacing(12)
     if title:
         heading = QLabel(title)
         heading.setObjectName("CardTitle")

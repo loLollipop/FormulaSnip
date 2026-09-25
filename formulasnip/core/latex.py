@@ -10,6 +10,9 @@ _DISPLAY_WRAPPERS = (("$$", "$$"), ("\\[", "\\]"), ("$", "$"))
 _MATHML_MACRO_DEFINITION = re.compile(
     r"\\(?:def|newcommand|newenvironment|DeclareMathOperator)(?![A-Za-z])"
 )
+_SINGLE_LETTER_ROMAN_GROUP = re.compile(
+    r"\\mathrm\s*\{\s*([A-Za-z])\s*\}"
+)
 _SINGLE_LETTER_ROMAN_SUBSCRIPT = re.compile(
     r"_\s*\{\s*\\mathrm(?:\s*\{\s*([A-Za-z])\s*\}|\s+([A-Za-z]))\s*\}"
 )
@@ -53,6 +56,16 @@ _IGNORED_EQUIVALENCE_ATTRIBUTES = {
 }
 _MATHTYPE_BINARY_SPACE = "0.222em"
 _MATHTYPE_RELATION_SPACE = "0.278em"
+# Qt exposes registered Windows clipboard formats through this special MIME
+# bridge. Keep the ordinary names/MIME types too for non-Qt consumers.
+MATHTYPE_MATHML_CLIPBOARD_FORMATS = (
+    'application/x-qt-windows-mime;value="MathML Presentation"',
+    "MathML Presentation",
+    "application/mathml-presentation+xml",
+    'application/x-qt-windows-mime;value="MathML"',
+    "MathML",
+    "application/mathml+xml",
+)
 _BINARY_OPERATORS = frozenset(
     "+−-±∓×·⋅∙÷∗⋆∘•∪∩∨∧⊕⊖⊗⊘⊙⊎⊓⊔∖≀⋄△▽⊲⊳⊴⊵†‡⨿"
 )
@@ -94,7 +107,10 @@ def latex_to_mathml(value: str) -> str:
     except ImportError as exc:  # pragma: no cover - dependency is part of the app install
         raise FormulaSnipError("缺少 latex2mathml，无法生成 MathML。") from exc
     try:
-        return _make_mathml_mathtype_compatible(convert(latex))
+        conversion_source = _preserve_single_letter_roman_style(latex)
+        return _make_mathml_mathtype_compatible(
+            convert(conversion_source, display="block")
+        )
     except Exception as exc:
         raise FormulaSnipError(f"MathML 转换失败：{exc}") from exc
 
@@ -151,6 +167,26 @@ def _normalize_single_letter_roman_subscripts(value: str) -> str:
         return f"_{{{match.group(1) or match.group(2)}}}"
 
     return _SINGLE_LETTER_ROMAN_SUBSCRIPT.sub(replace, value)
+
+
+def _preserve_single_letter_roman_style(value: str) -> str:
+    """Work around latex2mathml dropping ``\\mathrm`` on one Latin letter.
+
+    A nested group makes the converter retain ``mathvariant=\"normal\"``.  That
+    distinction matters when MathType imports differentials, units, and roman
+    subscripts from Presentation MathML.
+    """
+
+    opaque_ranges = _opaque_latex_ranges(value)
+
+    def replace(match: re.Match[str]) -> str:
+        if _is_escaped_character(value, match.start()) or any(
+            start <= match.start() < end for start, end in opaque_ranges
+        ):
+            return match.group(0)
+        return f"\\mathrm{{{{{match.group(1)}}}}}"
+
+    return _SINGLE_LETTER_ROMAN_GROUP.sub(replace, value)
 
 
 def _opaque_latex_ranges(value: str) -> tuple[tuple[int, int], ...]:
@@ -248,15 +284,30 @@ def _ignore_equivalence_attribute(element: ET.Element, name: str) -> bool:
 
 
 def _make_mathml_mathtype_compatible(mathml: str) -> str:
-    """Materialize operator spacing for MathType's MathML importer.
+    """Create display-style Presentation MathML for MathType's importer.
 
     MathType 7 ignores ``mo`` lspace/rspace attributes but preserves ``mspace``
     widths. Explicit spaces plus zeroed ``mo`` spacing keep the same layout in
     standards-compliant renderers without relying on an operator dictionary.
+    A standalone captured formula uses display style so fractions, large operators,
+    and limits match a formula entered directly in MathType more closely.
     """
 
     root = ET.fromstring(mathml)
     ET.register_namespace("", _MATHML_NAMESPACE)
+    root.set("display", "block")
+    children = list(root)
+    if len(children) == 1 and _local_name(children[0].tag) == "mstyle":
+        display_style = children[0]
+    else:
+        display_style = ET.Element(
+            _qualified_name("mstyle"),
+            {"displaystyle": "true", "scriptlevel": "0"},
+        )
+        display_style.extend(children)
+        root[:] = [display_style]
+    display_style.set("displaystyle", "true")
+    display_style.set("scriptlevel", "0")
     _space_mathml_tree(root)
     return ET.tostring(root, encoding="unicode", short_empty_elements=True)
 

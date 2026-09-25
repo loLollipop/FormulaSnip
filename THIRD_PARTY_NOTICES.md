@@ -62,15 +62,12 @@ redistribution or the preferred form for modification: **Needs Manual License Re
 `THIRD_PARTY_LICENSES/manifest.json` records exact source URLs, artifact/text
 SHA-256 values and review status. ANTLR runtime 4.9.3 BSD-3-Clause text is copied
 from ANTLR's `4.9.3` tag (the complete upstream file also includes JS MIT notices).
-RapidOCR 3.5.0 and tokenizers 0.21.4 Apache-2.0 texts are copied from their exact
-`v3.5.0` and `v0.21.4` tags. These files are included through the existing license
-directory packaging rule; final binary inclusion still needs verification.
-
-Flatbuffers 25.12.19 remains **Needs Manual License Review**: its exact PyPI wheel
-contains no LICENSE/NOTICE, PyPI offers no sdist, and the corresponding attempted
-upstream tag URL did not resolve. The inspected wheel URL and SHA-256 are recorded;
-no license from an unverified version has been substituted. This manifest is a
-supplemental inventory, not a complete SBOM or legal clearance.
+RapidOCR 3.5.0, tokenizers 0.21.4, and Flatbuffers 25.12.19 Apache-2.0 texts are
+copied from their matching upstream tags. Flatbuffers' exact PyPI wheel omits a
+LICENSE/NOTICE file, so FormulaSnip preserves the license from upstream tag
+`v25.12.19`. These files are included through the existing license-directory
+packaging rule and verified in the release bundle. The manifest is a supplemental
+inventory, not a complete SBOM or legal clearance.
 
 ## Transformers advisory handling
 

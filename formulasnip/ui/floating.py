@@ -51,7 +51,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from formulasnip.core.latex import latex_to_mathml
+from formulasnip.core.latex import (
+    MATHTYPE_MATHML_CLIPBOARD_FORMATS,
+    latex_to_mathml,
+    normalize_latex,
+)
 from formulasnip.core.limits import LATEX_LIMIT_MESSAGE, MAX_LATEX_CHARS
 from formulasnip.credentials import CredentialError, OpenAIApiKeyStore
 from formulasnip.diagnostics import log_exception
@@ -92,9 +96,9 @@ from formulasnip.update import (
 )
 
 ORB_PALETTES = {
-    "blue": (RING_PRESETS["blue"], "#1A2434"),
-    "green": (RING_PRESETS["green"], "#1A2434"),
-    "orange": (RING_PRESETS["orange"], "#1A2434"),
+    "blue": (RING_PRESETS["blue"], "#151824"),
+    "green": (RING_PRESETS["green"], "#151824"),
+    "orange": (RING_PRESETS["orange"], "#151824"),
 }
 
 
@@ -154,9 +158,9 @@ class FloatingOrb(QWidget):
         self._busy_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._busy_label.setStyleSheet(
             "QLabel#OrbBusyStatus {"
-            "background-color: rgba(15, 23, 42, 238);"
-            "color: #F8FAFC;"
-            "border: 1px solid rgba(148, 163, 184, 110);"
+            "background-color: rgba(11, 13, 18, 242);"
+            "color: #F3F5FA;"
+            "border: 1px solid rgba(124, 108, 247, 120);"
             "border-radius: 8px;"
             "padding: 6px 10px;"
             'font-family: "Microsoft YaHei UI", "Segoe UI";'
@@ -320,7 +324,7 @@ class FloatingOrb(QWidget):
             painter.setPen(QPen(base_ring, 4))
         else:
             painter.setPen(QPen(ring_color, 4))
-        painter.setBrush(QColor("#1A2434"))
+        painter.setBrush(QColor("#151824"))
         painter.drawEllipse(circle)
 
         if self._busy:
@@ -350,7 +354,7 @@ class FloatingOrb(QWidget):
             painter.drawEllipse(self.width() - 18, 7, 11, 11)
 
         if self.hasFocus():
-            focus_pen = QPen(QColor("#c7d2fe"), 2)
+            focus_pen = QPen(QColor("#c9c2ff"), 2)
             focus_pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(focus_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -506,10 +510,21 @@ class FloatingResultPanel(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 16, 18, 18)
-        outer.setSpacing(10)
+        outer.setContentsMargins(18, 14, 18, 18)
+        outer.setSpacing(12)
 
-        header = QHBoxLayout()
+        header_widget = QWidget()
+        header_widget.setObjectName("FloatingResultHeader")
+        header_widget.setFixedHeight(45)
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(0, 0, 0, 10)
+        header.setSpacing(10)
+        self.brand_badge = QLabel()
+        self.brand_badge.setObjectName("FloatingBrandBadge")
+        self.brand_badge.setFixedSize(34, 34)
+        self.brand_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.brand_badge.setPixmap(application_icon().pixmap(28, 28))
+        self.brand_badge.setAccessibleName("FormulaSnip")
         title = QLabel("公式识别结果")
         title.setObjectName("FloatingResultTitle")
         self.backend_label = QLabel()
@@ -519,21 +534,25 @@ class FloatingResultPanel(QWidget):
         close_button.setToolTip("放弃本次结果")
         close_button.setAccessibleName("放弃本次结果")
         close_button.setAccessibleDescription("放弃本次识别结果并关闭校对窗口")
-        close_button.setFixedSize(36, 36)
+        close_button.setFixedSize(34, 34)
         close_button.clicked.connect(self._dismiss_result)
-        header.addWidget(title)
-        header.addWidget(self.backend_label)
+        header.addWidget(
+            self.brand_badge,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        header.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addStretch(1)
-        header.addWidget(close_button)
-        outer.addLayout(header)
-
-        preview_section_label = QLabel("公式预览")
-        preview_section_label.setObjectName("FloatingSectionLabel")
-        outer.addWidget(preview_section_label)
+        header.addWidget(self.backend_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(close_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        outer.addWidget(header_widget)
 
         self.preview_stack = QStackedWidget()
         self.preview_stack.setObjectName("FloatingPreviewStack")
-        self.preview_stack.setFixedHeight(180)
+        self.preview_stack.setAccessibleName("公式预览")
+        self.preview_stack.setAccessibleDescription("排版后的电子公式预览")
+        self.preview_stack.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.preview_stack.setFixedHeight(190)
         self.preview_message = QLabel("等待识别")
         self.preview_message.setObjectName("FloatingPreviewMessage")
         self.preview_message.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -541,7 +560,7 @@ class FloatingResultPanel(QWidget):
         self.preview_frame = QWidget()
         self.preview_frame.setObjectName("FloatingPreviewFrame")
         preview_layout = QVBoxLayout(self.preview_frame)
-        preview_layout.setContentsMargins(12, 12, 12, 12)
+        preview_layout.setContentsMargins(16, 14, 16, 14)
         preview_layout.setSpacing(0)
         self.formula_preview = FormulaPreviewWidget()
         self.formula_preview.setObjectName("FloatingFormulaPreview")
@@ -555,6 +574,7 @@ class FloatingResultPanel(QWidget):
         self.quality_label = QLabel()
         self.quality_label.setObjectName("FloatingQuality")
         self.quality_label.setWordWrap(True)
+        self.quality_label.hide()
         outer.addWidget(self.quality_label)
 
         self.source_switch = QWidget()
@@ -588,22 +608,22 @@ class FloatingResultPanel(QWidget):
         self.source_switch.hide()
         outer.addWidget(self.source_switch)
 
-        latex_section_label = QLabel("LaTeX（可编辑）")
-        latex_section_label.setObjectName("FloatingSectionLabel")
-        outer.addWidget(latex_section_label)
-
         self.latex_view = LatexEditor()
         self.latex_view.setObjectName("FloatingLatex")
-        self.latex_view.setMaximumHeight(68)
+        self.latex_view.setFixedHeight(78)
         self.latex_view.setPlaceholderText("在此修改 LaTeX，预览会自动更新")
+        self.latex_view.setAccessibleName("可编辑 LaTeX")
+        self.latex_view.setAccessibleDescription("修改 LaTeX 后会自动更新公式预览")
         outer.addWidget(self.latex_view)
+        QWidget.setTabOrder(self.preview_stack, self.local_result_button)
         QWidget.setTabOrder(self.local_result_button, self.ai_result_button)
         QWidget.setTabOrder(self.ai_result_button, self.latex_view)
 
         copy_row = QHBoxLayout()
+        copy_row.setSpacing(10)
         self.copy_latex_button = QPushButton("复制 LaTeX")
-        self.copy_latex_button.setObjectName("FloatingPrimary")
         self.copy_mathml_button = QPushButton("复制 MathML")
+        self.copy_mathml_button.setObjectName("FloatingPrimary")
         for button in (self.copy_latex_button, self.copy_mathml_button):
             button.setMinimumHeight(44)
             copy_row.addWidget(button)
@@ -613,9 +633,12 @@ class FloatingResultPanel(QWidget):
         self.copy_mathml_button.setAccessibleDescription(
             "将当前 LaTeX 转换为 MathML 并复制"
         )
+        QWidget.setTabOrder(self.latex_view, self.copy_latex_button)
+        QWidget.setTabOrder(self.copy_latex_button, self.copy_mathml_button)
         outer.addLayout(copy_row)
 
         self.recapture_button = QPushButton("重新截图")
+        self.recapture_button.setObjectName("FloatingRecapture")
         self.recapture_button.setMinimumHeight(44)
         self.recapture_button.setAccessibleName("重新截图")
         self.recapture_button.setAccessibleDescription("放弃当前结果并重新框选公式")
@@ -670,7 +693,7 @@ class FloatingResultPanel(QWidget):
             candidate=None if edited_draft else selected_candidate,
         )
         self._show_near(anchor)
-        self.latex_view.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.preview_stack.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_error(self, message: str, anchor: QRect) -> None:
         self._clear_source_switch()
@@ -682,7 +705,8 @@ class FloatingResultPanel(QWidget):
             "请重新截图；若问题持续，请在设置中检查识别引擎。"
         )
         self.quality_label.setProperty("warning", True)
-        _refresh_style(self.quality_label)
+        self.quality_label.show()
+        self._refresh_quality_label()
         self._preview_timer.stop()
         self._preview_request_id = None
         blocker = QSignalBlocker(self.latex_view)
@@ -802,8 +826,12 @@ class FloatingResultPanel(QWidget):
             self.quality_label.setText("正在生成预览…")
             self.quality_label.setProperty("warning", False)
         else:
-            self.quality_label.setText("电子公式已生成，请与原公式核对后复制")
+            self.quality_label.clear()
             self.quality_label.setProperty("warning", False)
+        self._refresh_quality_label()
+
+    def _refresh_quality_label(self) -> None:
+        self.quality_label.setVisible(bool(self.quality_label.text().strip()))
         _refresh_style(self.quality_label)
 
     def _show_near(self, anchor: QRect) -> None:
@@ -813,14 +841,34 @@ class FloatingResultPanel(QWidget):
             self.show()
             return
         area = screen.availableGeometry()
-        panel_width = min(560, max(300, area.width() - 24))
+        gap = 12
+        minimum_panel_width = min(320, max(1, area.width() - 24))
+        left_space = max(0, anchor.left() - area.left() - gap)
+        right_space = max(0, area.right() - anchor.right() - gap)
+        side_space = max(left_space, right_space)
+        use_side = side_space >= minimum_panel_width
+        panel_width = (
+            min(620, side_space)
+            if use_side
+            else min(620, max(1, area.width() - 24))
+        )
         self.setFixedWidth(panel_width)
         self.adjustSize()
-        x = anchor.left() - self.width() - 12
-        if x < area.left():
-            x = anchor.right() + 12
-        x = min(max(x, area.left()), area.right() - self.width() + 1)
-        y = min(max(anchor.top(), area.top()), area.bottom() - self.height() + 1)
+        if use_side:
+            if left_space >= right_space:
+                x = anchor.left() - gap - self.width()
+            else:
+                x = anchor.right() + gap + 1
+            y = min(max(anchor.top(), area.top()), area.bottom() - self.height() + 1)
+        else:
+            x = min(max(anchor.left(), area.left()), area.right() - self.width() + 1)
+            above_space = max(0, anchor.top() - area.top() - gap)
+            below_space = max(0, area.bottom() - anchor.bottom() - gap)
+            if below_space >= self.height() or below_space >= above_space:
+                y = anchor.bottom() + gap + 1
+            else:
+                y = anchor.top() - gap - self.height()
+            y = min(max(y, area.top()), area.bottom() - self.height() + 1)
         self.move(x, y)
         self.show()
         self.raise_()
@@ -830,8 +878,8 @@ class FloatingResultPanel(QWidget):
     def _copy_latex(self) -> None:
         if self._result is None:
             return
-        latex = self.latex_view.toPlainText()
-        if not latex.strip():
+        latex = normalize_latex(self.latex_view.toPlainText())
+        if not latex:
             return
         try:
             QApplication.clipboard().setText(latex)
@@ -859,7 +907,9 @@ class FloatingResultPanel(QWidget):
             mathml = latex_to_mathml(latex)
             mime_data = QMimeData()
             mime_data.setText(mathml)
-            mime_data.setData("application/mathml+xml", mathml.encode("utf-8"))
+            encoded_mathml = mathml.encode("utf-8")
+            for clipboard_format in MATHTYPE_MATHML_CLIPBOARD_FORMATS:
+                mime_data.setData(clipboard_format, encoded_mathml)
             QApplication.clipboard().setMimeData(mime_data)
         except (FormulaSnipError, RuntimeError) as exc:
             self._set_status(str(exc), "error")
@@ -930,7 +980,7 @@ class FloatingResultPanel(QWidget):
                 self.quality_label.setText("LaTeX 为空，请继续修改。")
                 self.quality_label.setProperty("warning", True)
                 self._set_status("", "error")
-                _refresh_style(self.quality_label)
+                self._refresh_quality_label()
             return
         try:
             request_id = self.formula_preview.set_formula(latex)
@@ -945,7 +995,7 @@ class FloatingResultPanel(QWidget):
                 self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
                 self.quality_label.setProperty("warning", True)
                 self._set_status("预览生成失败，可继续修改", "error")
-                _refresh_style(self.quality_label)
+                self._refresh_quality_label()
             return
         self._preview_request_id = request_id
         self.preview_stack.setCurrentWidget(self.preview_frame)
@@ -973,7 +1023,7 @@ class FloatingResultPanel(QWidget):
         else:
             self._show_candidate_quality(candidate, preview_pending=True)
             return
-        _refresh_style(self.quality_label)
+        self._refresh_quality_label()
 
     @Slot(int, str)
     def _preview_rendered(self, request_id: int, _backend: str) -> None:
@@ -992,7 +1042,7 @@ class FloatingResultPanel(QWidget):
                 self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
                 self.quality_label.setProperty("warning", True)
             else:
-                self.quality_label.setText("电子公式预览已更新，请核对后复制")
+                self.quality_label.clear()
                 self.quality_label.setProperty("warning", False)
             self._set_status()
         else:
@@ -1001,7 +1051,7 @@ class FloatingResultPanel(QWidget):
                 preview_pending=False,
             )
             self._set_status()
-        _refresh_style(self.quality_label)
+        self._refresh_quality_label()
 
     @Slot(int, str)
     def _preview_failed(self, request_id: int, _detail: str) -> None:
@@ -1018,7 +1068,7 @@ class FloatingResultPanel(QWidget):
         self.quality_label.setText("\n".join(dict.fromkeys(warnings)))
         self.quality_label.setProperty("warning", True)
         self._set_status("预览生成失败，可继续修改", "error")
-        _refresh_style(self.quality_label)
+        self._refresh_quality_label()
 
     def _persistent_result_warnings(self) -> tuple[str, ...]:
         if self._result is None:
@@ -1075,7 +1125,10 @@ class FloatingFormulaAssistant(QObject):
         super().__init__()
         self.settings_store = settings or QSettings()
         self.preferences = FloatingPreferences.load(self.settings_store)
-        apply_application_theme(self.preferences.result_theme)
+        apply_application_theme(
+            self.preferences.result_theme,
+            self.preferences.effective_accent_theme,
+        )
         self.manager = manager or BackendManager()
         self._api_key_store = OpenAIApiKeyStore()
         self.orb = FloatingOrb(
@@ -1281,8 +1334,13 @@ class FloatingFormulaAssistant(QObject):
             self._start_recognition(pending_image)
         self._try_launch_pending_installer()
 
-    def show(self) -> None:
-        if self.preferences.show_settings_on_startup:
+    def show(self, *, after_update: bool = False) -> None:
+        if after_update:
+            self.open_settings()
+            self.settings_panel.set_update_status(
+                f"已更新到 v{application_version()}"
+            )
+        elif self.preferences.show_settings_on_startup:
             self.open_settings()
         else:
             self.enter_floating_mode()
@@ -1484,6 +1542,9 @@ class FloatingFormulaAssistant(QObject):
                 received, total, task
             )
         )
+        worker.signals.phase.connect(
+            lambda phase, task=worker: self._update_download_phase(phase, task)
+        )
         worker.signals.finished.connect(
             lambda path, selected, task=worker: self._update_downloaded(
                 path, selected, task
@@ -1643,6 +1704,24 @@ class FloatingFormulaAssistant(QObject):
         self._update_dialog.set_download_progress(received, total)
 
     @Slot(str)
+    def _update_download_phase(
+        self,
+        phase: str,
+        worker: UpdateDownloadWorker | None = None,
+    ) -> None:
+        if (
+            worker is not None
+            and worker is not self._update_download_worker
+            or self._shutdown
+            or self._update_dialog is None
+        ):
+            return
+        if phase == "verifying-cache":
+            self._update_dialog.show_verifying_cached_installer()
+        elif phase == "downloading":
+            self._update_dialog.show_downloading()
+
+    @Slot(str)
     def _update_download_failed(
         self, message: str, worker: UpdateDownloadWorker | None = None
     ) -> None:
@@ -1762,7 +1841,10 @@ class FloatingFormulaAssistant(QObject):
         self.orb.set_color(preferences.effective_ring_color)
         self.orb.set_logo_path(preferences.effective_logo_path)
         self.panel.set_theme(preferences.result_theme)
-        apply_application_theme(preferences.result_theme)
+        apply_application_theme(
+            preferences.result_theme,
+            preferences.effective_accent_theme,
+        )
 
     @Slot()
     def _cancel_active_recognition(self) -> None:

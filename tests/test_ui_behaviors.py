@@ -18,7 +18,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt, QThreadPool
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea, QSystemTrayIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QSystemTrayIcon,
+    QWidget,
+)
 
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
@@ -44,7 +51,13 @@ from formulasnip.ui.settings import (
     read_logo_image,
 )
 from formulasnip.ui.snip_overlay import OVERLAY_ALPHA, OVERLAY_COLOR, SnipOverlay
-from formulasnip.ui.styles import application_stylesheet, apply_application_theme
+from formulasnip.ui.styles import (
+    ACCENT_THEME_SWATCHES,
+    DEFAULT_ACCENT_THEME,
+    application_stylesheet,
+    apply_application_theme,
+    theme_accent_color,
+)
 from formulasnip.ui.update_dialog import UpdateDialog
 from formulasnip.ui.widgets import FormulaPreviewWidget
 from formulasnip.ui.worker import ModelWarmupWorker
@@ -929,16 +942,32 @@ def test_update_release_notes_are_bounded_and_have_empty_fallback() -> None:
 def test_update_dialog_presents_download_waiting_and_error_states() -> None:
     application = _application()
     dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
+    requested = QSignalSpy(dialog.update_requested)
 
+    assert dialog.findChild(QLabel, "UpdateSubtitle") is None
     assert dialog.status_panel.isHidden()
     dialog.show_downloading()
     assert not dialog.status_panel.isHidden()
     assert not dialog.progress_bar.isHidden()
+    assert dialog.progress_bar.minimum() == 0
+    assert dialog.progress_bar.maximum() == 100
     assert dialog.update_button.text() == "正在更新…"
     assert not dialog.update_button.isEnabled()
     dialog.set_download_progress(3, 4)
     assert dialog.progress_bar.value() == 75
-    assert dialog.progress_detail_label.text() == "75%"
+    assert dialog.progress_detail_label.text() == "75% · 3 B / 4 B"
+    dialog.set_download_progress(4, 4)
+    assert dialog.progress_bar.minimum() == 0
+    assert dialog.progress_bar.maximum() == 0
+    assert dialog.progress_detail_label.text() == "100% · 4 B / 4 B"
+    assert dialog.status_label.text() == "下载完成，正在校验安装包"
+
+    dialog.show_verifying_cached_installer()
+    assert dialog.progress_bar.minimum() == 0
+    assert dialog.progress_bar.maximum() == 0
+    assert dialog.status_label.text() == "正在校验已下载的安装包"
+    assert dialog.progress_detail_label.text() == "使用本地缓存，无需重复下载"
+    assert dialog.later_button.text() == "取消校验"
 
     dialog.show_waiting_for_recognition()
     assert dialog.progress_bar.isHidden()
@@ -951,6 +980,24 @@ def test_update_dialog_presents_download_waiting_and_error_states() -> None:
     assert dialog.update_button.isEnabled()
     assert dialog.later_button.text() == "关闭"
     assert dialog.later_button.isEnabled()
+    dialog.update_button.click()
+    assert requested.count() == 1
+    assert dialog.content_scroll.verticalScrollBar().value() == 0
+    dialog.close()
+    application.processEvents()
+
+
+def test_update_dialog_shows_downloaded_size_when_total_is_unknown() -> None:
+    application = _application()
+    dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
+
+    dialog.show_downloading()
+    dialog.set_download_progress(2 * 1024 * 1024, 0)
+
+    assert dialog.progress_bar.minimum() == 0
+    assert dialog.progress_bar.maximum() == 0
+    assert dialog.progress_detail_label.text() == "已下载 2.0 MB"
+    assert dialog.status_label.text() == "正在下载更新"
     dialog.close()
     application.processEvents()
 
@@ -1011,16 +1058,32 @@ def test_update_dialog_keeps_footer_visible_at_constrained_height() -> None:
         dialog, dialog.update_button.rect().bottomRight()
     ).y()
     assert button_bottom < dialog.height()
+    status_top = dialog.status_panel.mapTo(
+        dialog.content_scroll.viewport(),
+        dialog.status_panel.rect().topLeft(),
+    ).y()
+    status_bottom = dialog.status_panel.mapTo(
+        dialog.content_scroll.viewport(),
+        dialog.status_panel.rect().bottomLeft(),
+    ).y()
+    assert status_top >= 0
+    assert status_bottom < dialog.content_scroll.viewport().height()
     dialog.close()
     application.processEvents()
 
 
 def test_update_dialog_style_contract_exists_in_both_themes() -> None:
-    for theme in ("light", "dark"):
+    expected_error_colors = {
+        "light": ("#fff1f0", "#b42318"),
+        "dark": ("#321b20", "#fda29b"),
+    }
+    for theme, (error_soft, error) in expected_error_colors.items():
         stylesheet = application_stylesheet(theme)
         assert "QFrame#UpdateHeader" in stylesheet
         assert "QTextBrowser#UpdateNotes" in stylesheet
         assert 'QFrame#UpdateStatusPanel[state="error"]' in stylesheet
+        assert f"background: {error_soft}; border-color: {error};" in stylesheet
+        assert f"color: {error};" in stylesheet
         assert "QProgressBar#UpdateProgress" in stylesheet
 
 
@@ -1159,6 +1222,10 @@ def test_overlay_right_click_and_source_pixel_small_selection_feedback() -> None
     source = too_small._map_to_source(too_small._selection_rect())
     assert (source.width(), source.height()) == (10, 10)
     assert "选区过小" in too_small._selection_error
+    assert too_small._selection_label_text(source) == too_small._selection_error
+    too_small._selection_error = ""
+    assert too_small._selection_label_text(source) == "10 × 10"
+    assert not hasattr(too_small, "_draw_bottom_hint")
 
     click = SnipOverlay(screen, screenshot)
     click.resize(100, 100)
@@ -1295,15 +1362,25 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     assert close_button is not None
     assert close_button.text() == "×"
     assert close_button.accessibleName() == "放弃本次结果"
+    assert panel.brand_badge.accessibleName() == "FormulaSnip"
+    assert not panel.brand_badge.pixmap().isNull()
+    assert panel.findChild(QWidget, "FloatingResultHeader").height() == 45
+    assert panel.copy_mathml_button.objectName() == "FloatingPrimary"
+    assert panel.copy_latex_button.objectName() != "FloatingPrimary"
+    assert panel.recapture_button.objectName() == "FloatingRecapture"
+    stylesheet = application_stylesheet("dark")
+    assert "QWidget#FloatingResultPanel QPushButton#FloatingPrimary" in stylesheet
+    assert "QWidget#FloatingResultPanel QPushButton#FloatingRecapture" in stylesheet
 
     margins = panel.preview_frame.layout().contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
-        12,
-        12,
-        12,
-        12,
+        16,
+        14,
+        16,
+        14,
     )
-    assert panel.preview_stack.height() == 180
+    assert panel.preview_stack.height() == 190
+    assert panel.latex_view.height() == 78
 
     panel.show_result(result, QRect(20, 20, 68, 68))
     assert panel.formula_preview.current_backend == "mathjax"
@@ -1315,11 +1392,49 @@ def test_result_panel_has_compact_padded_preview_and_copy_hides_panel() -> None:
     panel.show_result(result, QRect(20, 20, 68, 68))
     panel.copy_mathml_button.click()
     mime_data = QApplication.clipboard().mimeData()
-    assert mime_data.hasFormat("application/mathml+xml")
+    for clipboard_format in (
+        'application/x-qt-windows-mime;value="MathML Presentation"',
+        "MathML Presentation",
+        "application/mathml-presentation+xml",
+        'application/x-qt-windows-mime;value="MathML"',
+        "MathML",
+        "application/mathml+xml",
+    ):
+        assert mime_data.hasFormat(clipboard_format)
     assert "<math" in mime_data.text()
     assert panel.isHidden()
     assert consumed == [True, True]
     QApplication.clipboard().clear()
+    panel.close()
+    application.processEvents()
+
+
+def test_result_panel_does_not_overlap_centered_orb_anchor() -> None:
+    application = _application()
+    screen = application.primaryScreen()
+    assert screen is not None
+    area = screen.availableGeometry()
+    anchor = QRect(
+        area.center().x() - 34,
+        area.center().y() - 34,
+        68,
+        68,
+    )
+    panel = FloatingResultPanel()
+
+    panel.show_result(RecognitionResult("x+y", "MathCraft", 0.1), anchor)
+    application.processEvents()
+
+    assert not panel.geometry().intersects(anchor)
+    if panel.geometry().right() < anchor.left():
+        clearance = anchor.left() - panel.geometry().right() - 1
+    else:
+        clearance = panel.geometry().left() - anchor.right() - 1
+    assert clearance >= 12
+    assert panel.width() <= max(
+        anchor.left() - area.left() - 12,
+        area.right() - anchor.right() - 12,
+    )
     panel.close()
     application.processEvents()
 
@@ -1717,8 +1832,14 @@ def test_result_panel_escape_bubbles_from_focused_latex_editor() -> None:
     )
     application.processEvents()
 
-    assert application.focusWidget() is panel.latex_view
-    QTest.keyClick(panel.latex_view, Qt.Key.Key_Escape)
+    labels = {label.text() for label in panel.findChildren(QLabel)}
+    assert "公式预览" not in labels
+    assert "LaTeX（可编辑）" not in labels
+    assert panel.preview_stack.accessibleName() == "公式预览"
+    assert panel.latex_view.accessibleName() == "可编辑 LaTeX"
+    assert panel.preview_stack.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert application.focusWidget() is panel.preview_stack
+    QTest.keyClick(panel.preview_stack, Qt.Key.Key_Escape)
 
     assert panel.isHidden()
     assert consumed.count() == 1
@@ -1772,6 +1893,30 @@ def test_result_panel_surfaces_derivative_review_warning() -> None:
     panel.show_result(result, QRect(20, 20, 68, 68))
 
     assert "疑似偏导" in panel.quality_label.text()
+    assert panel.quality_label.property("warning") is True
+    panel.close()
+    application.processEvents()
+
+
+def test_edited_formula_warning_becomes_visible_after_clean_preview() -> None:
+    application = _application()
+    panel = FloatingResultPanel()
+    panel.show_result(
+        RecognitionResult("x+y", "MathCraft", 0.2),
+        QRect(20, 20, 68, 68),
+    )
+    panel.quality_label.clear()
+    panel._refresh_quality_label()
+    assert panel.quality_label.isHidden()
+
+    panel._show_pending_preview_quality(
+        r"\frac{x}{y",
+        edited=True,
+        candidate=None,
+    )
+
+    assert "需要人工校对" in panel.quality_label.text()
+    assert not panel.quality_label.isHidden()
     assert panel.quality_label.property("warning") is True
     panel.close()
     application.processEvents()
@@ -1961,6 +2106,9 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
     application.processEvents()
 
     assert panel.tutorial_stack.count() == 4
+    assert panel.tutorial_page.findChild(QLabel, "TutorialTip") is None
+    assert all(button.toolTip() for button in panel.tutorial_step_buttons)
+    assert all(button.accessibleDescription() for button in panel.tutorial_step_buttons)
     assert panel.tutorial_stack.currentIndex() == 0
     assert [item.step_index for item in panel.tutorial_illustrations] == [0, 1, 2, 3]
     assert all(item.accessibleDescription() for item in panel.tutorial_illustrations)
@@ -2033,14 +2181,15 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     assert [button.text().strip() for button, _title in panel._nav_entries] == [
         "常规",
         "识别",
-        "悬浮球",
+        "外观",
         "使用方法",
     ]
     assert panel.sidebar.width() == 220
-    assert panel.header.height() == 78
+    assert panel.header.height() == 66
     assert panel.brand_logo.size().width() == 30
     assert all(button.height() == 44 for button, _title in panel._nav_entries)
     assert all(not button.icon().isNull() for button, _title in panel._nav_entries)
+    assert panel.sidebar.findChild(QLabel, "NavHint") is None
     assert panel.theme_toggle_button.size().width() == 34
     assert panel.theme_toggle_button.size().height() == 34
     assert not panel.theme_toggle_button.icon().isNull()
@@ -2053,11 +2202,11 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
     margins = body_layout.contentsMargins()
     assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
         28,
+        20,
+        28,
         24,
-        28,
-        28,
     )
-    assert body_layout.spacing() == 16
+    assert body_layout.spacing() == 12
     assert panel.startup_checkbox.isCheckable()
     assert not application_icon().isNull()
     assert not tutorial_formula_image().isNull()
@@ -2073,24 +2222,22 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
         for dot in panel.engine_status_dots.values()
     )
     assert all(button.accessibleName() for button in panel.color_buttons.values())
+    assert all(
+        button.accessibleName() for button in panel.theme_color_buttons.values()
+    )
     assert panel.findChild(settings_ui.QWidget, "SettingsCTA") is None
     panel.hide()
 
 
-def test_settings_header_subtitles_and_error_banner(tmp_path: Path) -> None:
+def test_settings_header_is_single_line_and_error_banner_is_dynamic(tmp_path: Path) -> None:
     panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
     assert panel.settings_error_label.objectName() == "SettingsErrorBanner"
     assert panel.settings_error_label.isHidden()
-    expected = (
-        "启动、更新与引擎状态",
-        "本地识别与可选 AI 增强",
-        "调整圆环与中心 Logo",
-        "4 步完成截图、校对与复制",
-    )
-    for index, subtitle in enumerate(expected):
+    assert not hasattr(panel, "page_subtitle")
+    assert panel.findChild(QLabel, "PageSubtitle") is None
+    for index, title in enumerate(("常规", "识别", "外观", "使用方法")):
         panel._select_page(index)
-        assert panel.page_subtitle.text() == subtitle
-        assert panel.page_subtitle.isVisibleTo(panel)
+        assert panel.page_title.text() == title
     panel._set_settings_error("无法保存")
     assert not panel.settings_error_label.isHidden()
     panel._set_settings_error("")
@@ -2132,12 +2279,21 @@ def test_appearance_page_uses_reference_stage_and_swatch_sizes(tmp_path: Path) -
 
     stage = panel.appearance_page.findChild(settings_ui.QWidget, "OrbPreviewStage")
     assert stage is not None
-    assert stage.height() == 258
+    assert stage.height() == 210
     assert all(button.size().width() == 34 for button in panel.color_buttons.values())
     assert all(button.size().height() == 34 for button in panel.color_buttons.values())
+    assert set(panel.theme_color_buttons) == set(ACCENT_THEME_SWATCHES)
+    assert all(
+        button.size().width() == 34 for button in panel.theme_color_buttons.values()
+    )
+    assert all(
+        button.size().height() == 34 for button in panel.theme_color_buttons.values()
+    )
+    assert panel.theme_color_buttons[DEFAULT_ACCENT_THEME].isChecked()
     assert panel.custom_color_button.size().width() == 34
     assert panel.ring_hex_label.text() == DEFAULT_RING_COLOR
-    assert panel.logo_status_label.text() == "默认 Logo"
+    assert panel.logo_status_label.text() == ""
+    assert panel.logo_status_label.isHidden()
     assert "12 MB" in panel.upload_logo_button.toolTip()
     panel.hide()
 
@@ -2152,8 +2308,31 @@ def test_recognition_page_only_shows_mathcraft(tmp_path: Path) -> None:
     assert panel.mode_cards["mathcraft"].isChecked()
     assert panel.overview_mode_name.text() == "MathCraft OCR"
     assert panel.overview_mode_tag.text() == "CPU"
+    overview_buttons = {
+        button.text() for button in panel.settings_page.findChildren(QPushButton)
+    }
+    assert "更改" not in overview_buttons
+    assert "自动检查更新（每 12 小时）" not in {
+        label.text() for label in panel.settings_page.findChildren(QLabel)
+    }
+    assert panel.auto_update_toggle.get_position() == 1.0
     assert panel.mode_summary_label.text() == "本地单引擎公式识别"
     assert panel.mode_summary_label.isHidden()
+    assert panel.recognition_page.findChild(QLabel, "ModeBody") is None
+    assert panel.recognition_page.findChild(QLabel, "ModeMeta") is None
+    assert panel.mode_cards["mathcraft"].toolTip()
+    assert panel.mode_cards["mathcraft"].accessibleDescription()
+    mode_card = panel.mode_cards["mathcraft"]
+    indicator_item = mode_card.layout().itemAt(mode_card.layout().indexOf(mode_card.indicator))
+    assert indicator_item.alignment() == Qt.AlignmentFlag.AlignVCenter
+    visible_copy = "".join(
+        widget.text()
+        for widget in panel.recognition_page.findChildren(QLabel)
+        if widget.isVisibleTo(panel)
+    )
+    assert "兼容 API 智能并行" not in visible_copy
+    assert "与 MathCraft 同时识别" not in visible_copy
+    assert not panel.ai_privacy_label.isVisibleTo(panel)
     assert "Rapid" not in "".join(
         widget.text() for widget in panel.findChildren(settings_ui.QLabel)
     )
@@ -2332,6 +2511,17 @@ def test_tutorial_progress_items_jump_between_steps(tmp_path: Path) -> None:
     panel.hide()
 
 
+def test_auto_update_toggle_loads_unchecked_at_the_off_position(
+    tmp_path: Path,
+) -> None:
+    preferences = replace(FloatingPreferences(), auto_check_updates=False)
+    panel = SettingsPanel(_settings(tmp_path), preferences)
+
+    assert not panel.auto_update_toggle.isChecked()
+    assert panel.auto_update_toggle.get_position() == 0.0
+    panel.hide()
+
+
 def test_legacy_preferences_migrate_to_ring_and_global_theme(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     settings.setValue("appearance/orb_color", "green")
@@ -2344,6 +2534,90 @@ def test_legacy_preferences_migrate_to_ring_and_global_theme(tmp_path: Path) -> 
     preferences.save(settings)
     assert settings.value("appearance/ring_color") == RING_PRESETS["green"]
     assert settings.value("appearance/theme") == "light"
+
+
+def test_previous_default_blue_ring_migrates_to_new_brand_color(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.setValue("appearance/orb_color", "blue")
+    settings.setValue("appearance/ring_color", "#5D83F3")
+
+    preferences = FloatingPreferences.load(settings)
+
+    assert preferences.effective_ring_color == DEFAULT_RING_COLOR
+    assert settings.value("appearance/ring_color") == DEFAULT_RING_COLOR
+    assert settings.value("appearance/orb_color") == "blue"
+
+
+def test_accent_theme_round_trips_and_invalid_value_migrates(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings = FloatingPreferences(accent_theme="cyan").save(settings)
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.accent_theme == "cyan"
+    assert loaded.effective_accent_theme == "cyan"
+    assert settings.value("appearance/accent_theme") == "cyan"
+
+    settings.setValue("appearance/accent_theme", "unsupported")
+    settings.sync()
+    migrated = FloatingPreferences.load(settings)
+
+    assert migrated.accent_theme == DEFAULT_ACCENT_THEME
+    assert settings.value("appearance/accent_theme") == DEFAULT_ACCENT_THEME
+
+
+@pytest.mark.parametrize("theme", ("light", "dark"))
+@pytest.mark.parametrize("accent_theme", tuple(ACCENT_THEME_SWATCHES))
+def test_every_accent_theme_has_light_and_dark_styles(
+    theme: str,
+    accent_theme: str,
+) -> None:
+    accent_color = theme_accent_color(theme, accent_theme)
+    stylesheet = application_stylesheet(theme, accent_theme)
+
+    assert accent_color in stylesheet
+    assert f"background: {accent_color};" in stylesheet
+
+
+def test_accent_theme_switch_updates_global_ui_and_storage(tmp_path: Path) -> None:
+    application = _application()
+    settings = _settings(tmp_path)
+    panel = SettingsPanel(settings, FloatingPreferences(result_theme="light"))
+
+    panel.theme_color_buttons["cyan"].click()
+
+    assert panel.preferences.accent_theme == "cyan"
+    assert application.property("accentTheme") == "cyan"
+    assert settings.value("appearance/accent_theme") == "cyan"
+    assert theme_accent_color("light", "cyan") in application.styleSheet()
+    assert panel.theme_color_buttons["cyan"].isChecked()
+    light_logo = panel.brand_logo.pixmap().toImage()
+    light_accent = QColor(theme_accent_color("light", "cyan")).rgb()
+    assert any(
+        light_logo.pixelColor(x, y).rgb() == light_accent
+        for x in range(light_logo.width())
+        for y in range(light_logo.height())
+    )
+
+    panel.toggle_theme()
+
+    assert panel.preferences.result_theme == "dark"
+    assert panel.preferences.accent_theme == "cyan"
+    assert application.property("accentTheme") == "cyan"
+    assert theme_accent_color("dark", "cyan") in application.styleSheet()
+    dark_logo = panel.brand_logo.pixmap().toImage()
+    dark_accent = QColor(theme_accent_color("dark", "cyan")).rgb()
+    assert any(
+        dark_logo.pixelColor(x, y).rgb() == dark_accent
+        for x in range(dark_logo.width())
+        for y in range(dark_logo.height())
+    )
+    panel.hide()
+    apply_application_theme("dark")
 
 
 @pytest.mark.parametrize("stored_mode", ("auto", "rapid", "paddle", "unknown"))
@@ -2675,8 +2949,10 @@ def test_theme_toggle_updates_application_result_panel_and_storage(tmp_path: Pat
     assert assistant.preferences.result_theme == "light"
     assert assistant.panel.theme_name == "light"
     assert application.property("theme") == "light"
+    assert application.property("accentTheme") == DEFAULT_ACCENT_THEME
     assert settings.value("appearance/theme") == "light"
-    assert "#F7F8FA" in application.styleSheet()
+    assert settings.value("appearance/accent_theme") == DEFAULT_ACCENT_THEME
+    assert "#F6F7FB" in application.styleSheet()
     assistant.orb.close()
     assistant.panel.close()
     assistant.settings_panel.hide()
@@ -2973,7 +3249,8 @@ def test_settings_check_update_button_emits_request(tmp_path: Path) -> None:
     panel.check_update_button.click()
 
     assert requests == [True]
-    assert panel.update_status_label.text() == "稳定通道"
+    assert panel.update_status_label.text() == ""
+    assert panel.update_status_label.isHidden()
     panel.hide()
 
 
@@ -3001,7 +3278,8 @@ def test_startup_update_check_respects_background_throttle(
 
     assert started == []
     assert assistant._update_check_worker is None
-    assert assistant.settings_panel.update_status_label.text() == "稳定通道"
+    assert assistant.settings_panel.update_status_label.text() == ""
+    assert assistant.settings_panel.update_status_label.isHidden()
     assert assistant.settings_panel.check_update_button.isEnabled()
     assistant.shutdown()
 
@@ -3137,6 +3415,66 @@ def test_starting_download_cancels_overlapping_update_check(
     assert assistant._update_check_manual_requested is False
     assert assistant.settings_panel.check_update_button.isEnabled()
     assert len(assistant._thread_pool.started) == 1  # type: ignore[attr-defined]
+    assistant.shutdown()
+
+
+def test_failed_update_download_keeps_same_dialog_retryable(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+
+    class Dialog:
+        def __init__(self) -> None:
+            self.downloading_count = 0
+            self.cancelled_count = 0
+            self.errors: list[str] = []
+
+        def show_downloading(self) -> None:
+            self.downloading_count += 1
+
+        def show_error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def show_cancelled(self) -> None:
+            self.cancelled_count += 1
+
+    class Pool:
+        def __init__(self) -> None:
+            self.started: list[Any] = []
+
+        def start(self, worker: Any) -> None:
+            self.started.append(worker)
+
+    monkeypatch.setattr(floating, "is_installed_build", lambda: True)
+    monkeypatch.setattr(
+        floating.QStandardPaths,
+        "writableLocation",
+        lambda _location: str(tmp_path),
+    )
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    pool = Pool()
+    assistant._thread_pool = pool  # type: ignore[assignment]
+    dialog = Dialog()
+    assistant._update_dialog = dialog  # type: ignore[assignment]
+    asset = UpdateAsset("setup.exe", "https://example.invalid/setup.exe", 5, "0" * 64)
+    release = ReleaseInfo("0.3.0", "v0.3.0", "", asset)
+
+    assistant._begin_update(release, dialog)  # type: ignore[arg-type]
+    first_worker = assistant._update_download_worker
+    assert first_worker is not None
+    assistant._update_download_failed("网络不可用", first_worker)
+
+    assert assistant._update_download_worker is None
+    assert dialog.errors == ["更新失败：网络不可用"]
+
+    assistant._begin_update(release, dialog)  # type: ignore[arg-type]
+
+    assert dialog.downloading_count == 2
+    assert len(pool.started) == 2
+    assert assistant._update_download_worker is not first_worker
+    assistant._cancel_update(dialog)  # type: ignore[arg-type]
+    assert dialog.cancelled_count == 1
     assistant.shutdown()
 
 
@@ -3364,6 +3702,29 @@ def test_startup_settings_and_preferences_are_applied(tmp_path: Path) -> None:
     assert assistant.orb.isVisible()
     assert assistant.orb.color_name == "green"
     assert assistant.panel.theme_name == "light"
+    assistant.orb.close()
+    assistant.panel.close()
+
+
+def test_after_update_forces_visible_settings_and_reports_version(tmp_path: Path) -> None:
+    application = _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant.preferences = replace(
+        assistant.preferences,
+        show_settings_on_startup=False,
+    )
+
+    assistant.show(after_update=True)
+    application.processEvents()
+
+    assert assistant.settings_panel.isVisible()
+    assert assistant.settings_panel.pages.currentIndex() == 0
+    assert assistant.orb.isHidden()
+    assert (
+        assistant.settings_panel.update_status_label.text()
+        == f"已更新到 v{application_version()}"
+    )
+    assistant.shutdown()
     assistant.orb.close()
     assistant.panel.close()
 
