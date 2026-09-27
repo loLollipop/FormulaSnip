@@ -5,15 +5,14 @@ import multiprocessing
 import sys
 
 from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from formulasnip.diagnostics import initialize_logging
 from formulasnip.runtime import _configure_windowed_streams, configure_runtime  # noqa: F401
 from formulasnip.single_instance import SingleInstanceGuard
 from formulasnip.ui.branding import application_icon, application_version
-from formulasnip.ui.settings import FloatingPreferences
-from formulasnip.ui.styles import apply_application_theme
+from formulasnip.ui.settings import read_settings_value
+from formulasnip.ui.styles import application_ui_font, apply_application_theme
 
 AFTER_UPDATE_ARGUMENT = "--after-update"
 MODEL_WARMUP_DELAY_MS = 500
@@ -56,11 +55,14 @@ def create_application(argv: list[str] | None = None) -> QApplication:
     app.setOrganizationName("FormulaSnip")
     app.setWindowIcon(application_icon())
     app.setStyle("Fusion")
-    app.setFont(QFont("Microsoft YaHei UI", 10))
-    preferences = FloatingPreferences.load(QSettings())
+    app.setFont(application_ui_font())
+    # Theme setup must not run preference migrations before the assistant can
+    # distinguish a new installation from an existing settings store.
+    settings = QSettings()
     apply_application_theme(
-        preferences.result_theme,
-        preferences.effective_accent_theme,
+        read_settings_value(settings, "appearance/theme",
+                            read_settings_value(settings, "appearance/result_theme", "dark")),
+        read_settings_value(settings, "appearance/accent_theme", "blue"),
     )
     app.setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, False)
     return app

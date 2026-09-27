@@ -150,9 +150,20 @@ def main() -> None:
         app.processEvents()
 
         settings.show_recognition_page()
+        settings.ai_configure_button.click()
         app.processEvents()
         recognition_output = output_dir / "formulasnip_recognition_engine.png"
         save_widget(settings, recognition_output)
+
+        settings._select_page(1)  # noqa: SLF001
+        app.processEvents()
+        output_settings_output = output_dir / "formulasnip_output_settings.png"
+        save_widget(settings, output_settings_output)
+
+        settings.show_about_page()
+        app.processEvents()
+        about_output = output_dir / "formulasnip_about_updates.png"
+        save_widget(settings, about_output)
 
         settings.show_appearance_page()
         app.processEvents()
@@ -203,6 +214,8 @@ def main() -> None:
         dark_settings_output,
         light_settings_output,
         recognition_output,
+        output_settings_output,
+        about_output,
         appearance_output,
         tutorial_output,
         tutorial_illustrations_output,

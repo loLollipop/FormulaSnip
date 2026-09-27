@@ -16,7 +16,7 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt, QThreadPool
-from PySide6.QtGui import QColor, QImage, QPixmap
+from PySide6.QtGui import QColor, QFont, QImage, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from formulasnip.credentials import CredentialError
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
 from formulasnip.exceptions import FormulaSnipError
 from formulasnip.ui import floating
@@ -55,6 +56,7 @@ from formulasnip.ui.styles import (
     ACCENT_THEME_SWATCHES,
     DEFAULT_ACCENT_THEME,
     application_stylesheet,
+    application_ui_font,
     apply_application_theme,
     theme_accent_color,
 )
@@ -72,6 +74,444 @@ def _settings(tmp_path: Path) -> QSettings:
     settings = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
     settings.clear()
     return settings
+
+
+def test_product_preferences_round_trip_and_positional_compatibility(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    preferences = FloatingPreferences(
+        "mathcraft", "green", "light", True,
+        default_copy_format="latex", close_after_copy=False,
+        result_panel_position="screen_center", orb_size="large", orb_opacity=70,
+        orb_snap_to_edge=False,
+    )
+    assert tuple(FloatingPreferences.__dataclass_fields__)[:4] == (
+        "recognition_mode", "orb_color", "result_theme", "show_settings_on_startup",
+    )
+    loaded = FloatingPreferences.load(preferences.save(settings))
+    assert loaded.show_settings_on_startup
+    for name in (
+        "default_copy_format", "close_after_copy", "result_panel_position", "orb_size",
+        "orb_opacity", "orb_snap_to_edge",
+    ):
+        assert getattr(loaded, name) == getattr(preferences, name)
+    assert not FloatingPreferences().show_settings_on_startup
+
+
+def test_direct_preference_construction_normalizes_privacy_booleans() -> None:
+    preferences = FloatingPreferences(
+        show_settings_on_startup="false",  # type: ignore[arg-type]
+        ai_correction_enabled="false",  # type: ignore[arg-type]
+        ai_base_url="https://example.com/v1",
+        ai_model="vision",
+        auto_check_updates="0",  # type: ignore[arg-type]
+    )
+
+    assert preferences.show_settings_on_startup is False
+    assert preferences.ai_correction_enabled is False
+    assert preferences.auto_check_updates is False
+
+
+def test_native_preference_save_commits_ai_opt_in_last(monkeypatch: Any) -> None:
+    calls: list[dict[str, object]] = []
+
+    class NativeStore:
+        pass
+
+    store = NativeStore()
+
+    def record_write(current: object, values: dict[str, object]) -> object:
+        calls.append(dict(values))
+        return current
+
+    monkeypatch.setattr(settings_ui, "write_settings_values", record_write)
+    saved = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://example.com/v1",
+        ai_model="vision",
+    ).save(store)  # type: ignore[arg-type]
+
+    assert saved is store
+    assert calls[0] == {"recognition/ai_correction_enabled": False}
+    assert "recognition/ai_correction_enabled" not in calls[1]
+    assert calls[2] == {"recognition/ai_correction_enabled": True}
+
+
+def test_invalid_product_preferences_fall_back_and_save_safe_values(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    bad = {
+        "output/default_copy_format": "html",
+        "output/close_after_copy": "invalid",
+        "window/result_panel_position": "anywhere",
+        "appearance/orb_size": "giant",
+        "appearance/orb_opacity": 59,
+        "window/orb_snap_to_edge": 2,
+    }
+    for key, value in bad.items():
+        settings.setValue(key, value)
+    loaded = FloatingPreferences.load(settings)
+    assert loaded.default_copy_format == "mathml"
+    assert loaded.close_after_copy is True
+    assert loaded.result_panel_position == "near_orb"
+    assert loaded.orb_size == "medium"
+    assert loaded.orb_opacity == 100
+    assert loaded.orb_snap_to_edge is True
+    assert FloatingPreferences.load(loaded.save(settings)) == loaded
+
+
+@pytest.mark.parametrize("value", (True, False, 65.5, 101, -1, None, "61.0", "9" * 5000))
+def test_orb_opacity_rejects_non_integer_and_out_of_range_values(value: Any) -> None:
+    assert FloatingPreferences(orb_opacity=value).orb_opacity == 100
+    assert FloatingPreferences(orb_opacity="60").orb_opacity == 60
+
+
+@pytest.mark.parametrize("format_name", ("mathml", "latex"))
+@pytest.mark.parametrize("close_after_copy", (True, False))
+def test_output_preferences_keep_both_copy_formats_and_control_consumption(
+    format_name: str, close_after_copy: bool, monkeypatch: Any,
+) -> None:
+    application = _application()
+    panel = FloatingResultPanel(
+        default_copy_format=format_name, close_after_copy=close_after_copy,
+    )
+    consumed = QSignalSpy(panel.result_consumed)
+    monkeypatch.setattr(floating, "latex_to_mathml", lambda _latex: "<math><mi>x</mi></math>")
+    result = RecognitionResult("x", "test", 0.1)
+    panel.show_result(result, QRect(30, 30, 68, 68))
+    application.processEvents()
+    primary = panel.copy_mathml_button if format_name == "mathml" else panel.copy_latex_button
+    secondary = panel.copy_latex_button if format_name == "mathml" else panel.copy_mathml_button
+    assert primary.objectName() == "FloatingPrimary"
+    assert secondary.objectName() != "FloatingPrimary"
+    assert primary.isDefault() and not secondary.isDefault()
+    assert primary.isVisible() and secondary.isVisible()
+    assert application.focusWidget() is primary
+    primary.click()
+    mime = application.clipboard().mimeData()
+    if format_name == "mathml":
+        assert mime.text() == "<math><mi>x</mi></math>"
+        for name in floating.MATHTYPE_MATHML_CLIPBOARD_FORMATS:
+            assert bytes(mime.data(name)) == b"<math><mi>x</mi></math>"
+    else:
+        assert mime.text() == "x"
+    assert panel.isHidden() == close_after_copy
+    assert consumed.count() == int(close_after_copy)
+    assert (panel._result is None) == close_after_copy
+    if not close_after_copy:
+        secondary.click()
+        assert panel.isVisible() and panel._result is result
+        assert consumed.count() == 0
+    panel.close()
+    application.clipboard().clear()
+
+
+def test_centered_result_uses_anchor_screen(monkeypatch: Any) -> None:
+    _application()
+    area = QRect(-1600, 100, 1600, 1000)
+
+    class Screen:
+        def availableGeometry(self) -> QRect:  # noqa: N802
+            return area
+
+    points: list[QPoint] = []
+    monkeypatch.setattr(QApplication, "screenAt", lambda point: points.append(point) or Screen())
+    panel = FloatingResultPanel(result_panel_position="screen_center")
+    anchor = QRect(-1200, 300, 68, 68)
+    panel.show_result(RecognitionResult("x", "test", 0.1), anchor)
+    assert anchor.center() in points
+    assert abs(panel.geometry().center().x() - area.center().x()) <= 1
+    assert abs(panel.geometry().center().y() - area.center().y()) <= 1
+    panel.close()
+
+
+def test_centered_result_stays_reachable_on_a_short_screen(monkeypatch: Any) -> None:
+    application = _application()
+    area = QRect(120, 80, 900, 260)
+
+    class Screen:
+        def availableGeometry(self) -> QRect:  # noqa: N802
+            return area
+
+    monkeypatch.setattr(QApplication, "screenAt", lambda _point: Screen())
+    panel = FloatingResultPanel(result_panel_position="screen_center")
+    panel.show_result(RecognitionResult("x", "test", 0.1), QRect(400, 100, 68, 68))
+
+    assert panel.geometry().top() >= area.top()
+    assert panel.geometry().bottom() <= area.bottom()
+    assert abs(panel.geometry().center().x() - area.center().x()) <= 1
+    scroll_bar = panel.result_scroll_area.verticalScrollBar()
+    assert scroll_bar.maximum() > 0
+    scroll_bar.setValue(scroll_bar.maximum())
+    application.processEvents()
+    recapture_top_left = panel.recapture_button.mapTo(
+        panel.result_scroll_area.viewport(), QPoint()
+    )
+    assert panel.result_scroll_area.viewport().rect().intersects(
+        QRect(recapture_top_left, panel.recapture_button.size())
+    )
+    panel.close()
+
+
+@pytest.mark.parametrize(("preset", "size"), (("small", 56), ("medium", 68), ("large", 80)))
+def test_orb_size_opacity_and_paint_scale(preset: str, size: int) -> None:
+    _application()
+    orb = FloatingOrb()
+    orb.set_size_preset(preset)
+    orb.set_opacity_percent(65)
+    assert orb.width() == orb.height() == size
+    assert orb.windowOpacity() == pytest.approx(0.65, abs=0.005)
+    orb.set_result_available(True)
+    assert not orb.grab().isNull()
+    orb.close()
+
+
+def test_orb_drag_snap_toggle_clamps_and_reset_repositions(monkeypatch: Any) -> None:
+    _application()
+    area = QRect(-1600, 0, 1600, 900)
+
+    class Screen:
+        def availableGeometry(self) -> QRect:  # noqa: N802
+            return area
+
+    monkeypatch.setattr(QApplication, "screenAt", lambda _point: Screen())
+    orb = FloatingOrb()
+    for enabled in (False, True):
+        orb.set_snap_to_edge(enabled)
+        orb.move(-700, 300)
+        orb._press_global = QPoint(-700, 300)
+        orb._dragged = True
+        orb.mouseReleaseEvent(MouseRelease())  # type: ignore[arg-type]
+        assert orb.x() == (-700 if not enabled else area.right() - orb.width() - 11)
+    orb.set_snap_to_edge(False)
+    orb.move(500, 1000)
+    orb._press_global = QPoint(500, 1000)
+    orb._dragged = True
+    orb.mouseReleaseEvent(MouseRelease())  # type: ignore[arg-type]
+    assert area.contains(orb.geometry())
+    orb.reset_position()
+    assert not orb._positioned and orb.isHidden()
+    orb.show()
+    expected = QPoint(area.right() - orb.width() - 20, area.center().y() - orb.height() // 2)
+    assert orb.pos() == expected
+    orb.move(-700, 100)
+    orb.reset_position()
+    assert orb.pos() == expected and orb.isVisible()
+    orb.close()
+
+
+def test_help_is_keyboard_accessible_and_navigation_excludes_tutorial(tmp_path: Path) -> None:
+    application = _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    panel.show()
+    panel.help_button.setFocus()
+    QTest.keyClick(panel.help_button, Qt.Key.Key_Space)
+    application.processEvents()
+    assert panel.pages.currentWidget() is panel.tutorial_page
+    assert panel.help_button.toolTip() and panel.help_button.accessibleName()
+    assert all(not button.isChecked() for button, _title in panel._nav_entries)
+    panel.show_appearance_page()
+    assert panel.pages.currentWidget() is panel.appearance_page
+    panel.show_recognition_page()
+    assert panel.pages.currentWidget() is panel.recognition_page
+    panel.show_about_page()
+    assert panel.about_page.isAncestorOf(panel.auto_update_toggle)
+    assert panel.about_page.isAncestorOf(panel.update_button)
+    requests = QSignalSpy(panel.update_check_requested)
+    panel.check_update_button.click()
+    assert requests.count() == 1
+    panel.set_update_status("正在检查", checking=True)
+    assert not panel.update_button.isEnabled()
+    panel.close()
+
+
+def test_settings_pages_do_not_scroll_horizontally_at_minimum_size(tmp_path: Path) -> None:
+    application = _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    panel.resize(panel.minimumSize())
+    panel.show()
+    panel.ai_configure_button.click()
+    for theme in ("dark", "light"):
+        apply_application_theme(theme)
+        for index in range(panel.pages.count()):
+            panel._select_page(index)
+            application.processEvents()
+            scroll = panel.pages.currentWidget().findChild(QScrollArea)
+            assert scroll is not None
+            assert scroll.horizontalScrollBar().maximum() == 0
+    panel.close()
+    apply_application_theme("dark")
+
+
+def test_ai_saved_configuration_can_disable_edit_and_reenable_without_losing_key(
+    tmp_path: Path,
+) -> None:
+    _application()
+    saved = FloatingPreferences(
+        ai_correction_enabled=True, ai_base_url="https://example.com/v1", ai_model="vision",
+    )
+    key_store = FakeApiKeyStore("test-key", saved.ai_base_url)
+    panel = SettingsPanel(_settings(tmp_path), saved, api_key_store=key_store)
+    assert panel.ai_configuration_widget.isHidden()
+    assert panel.ai_status_badge.text() == "已启用"
+    assert not panel.ai_correction_toggle.isHidden()
+    panel.ai_correction_toggle.click()
+    assert not panel.preferences.ai_correction_enabled
+    assert panel.ai_summary_label.text() == "已关闭，不会上传图片"
+    assert panel.ai_configure_button.text() == "编辑配置"
+    panel.ai_configure_button.click()
+    assert not panel.ai_configuration_widget.isHidden()
+    assert panel.ai_delete_key_button.isEnabled()
+    assert panel.ai_base_url_input.text() == saved.ai_base_url
+    assert key_store.key == "test-key"
+    panel.ai_configure_button.click()
+    panel.ai_correction_toggle.click()
+    assert panel.preferences.ai_correction_enabled
+    assert panel.ai_status_badge.text() == "已启用"
+    panel.close()
+
+
+def test_credential_read_failure_disables_ai_until_user_reenables(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    saved = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://example.com/v1",
+        ai_model="vision",
+    )
+    saved.save(settings)
+    key_store = FlakyApiKeyStore("test-key", saved.ai_base_url)
+    monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assert assistant.preferences.ai_correction_enabled
+
+    key_store.fail_reads = True
+    assistant.settings_panel._update_ai_action_state()
+
+    assert not assistant.settings_panel.preferences.ai_correction_enabled
+    assert not assistant.preferences.ai_correction_enabled
+    assert assistant.settings_panel.ai_summary_label.text() == "已关闭，不会上传图片"
+    assert not settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    )
+
+    key_store.fail_reads = False
+    assistant.settings_panel._update_ai_action_state()
+    assert assistant.settings_panel._saved_ai_is_configured()
+    assert assistant.settings_panel._ai_key_present
+    assert assistant.settings_panel._credential_error == ""
+    assistant.settings_panel.ai_configure_button.click()
+    assert assistant.settings_panel.ai_delete_key_button.isEnabled()
+    assert not assistant.preferences.ai_correction_enabled
+    assistant.shutdown()
+
+
+def test_new_preferences_apply_live_and_restore_appearance_preserves_theme(tmp_path: Path) -> None:
+    _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    panel = assistant.settings_panel
+    panel._building = True
+    panel.copy_format_control.set_value("latex")
+    panel.result_position_control.set_value("screen_center")
+    panel.close_after_copy_toggle.setChecked(False)
+    panel.orb_size_control.set_value("large")
+    panel.orb_opacity_slider.setValue(75)
+    panel.orb_snap_toggle.setChecked(False)
+    panel._building = False
+    panel._controls_changed()
+    assert assistant.preferences.default_copy_format == "latex"
+    assert assistant.panel.copy_latex_button.isDefault()
+    assert assistant.panel._close_after_copy is False
+    assert assistant.panel._result_panel_position == "screen_center"
+    assert assistant.orb.width() == 80
+    assert assistant.orb.windowOpacity() == pytest.approx(0.75, abs=0.005)
+    assert not assistant.orb._snap_enabled
+    assistant.orb._positioned = True
+    panel.orb_reset_button.click()
+    assert not assistant.orb._positioned
+    panel._preferences = replace(panel.preferences, result_theme="light", accent_theme="cyan")
+    panel._ring_color = "#112233"
+    panel.restore_appearance_button.click()
+    assert assistant.preferences.result_theme == "light"
+    assert assistant.preferences.accent_theme == DEFAULT_ACCENT_THEME
+    assert assistant.preferences.effective_ring_color == DEFAULT_RING_COLOR
+    assert assistant.preferences.logo_path == ""
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    panel.hide()
+
+
+def test_first_run_precedes_migrations_and_following_launch_uses_orb(tmp_path: Path) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    assert settings.allKeys() == []
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assert settings.allKeys()  # The loader has now written migration keys.
+    assistant.show()
+    assert assistant.settings_panel.pages.currentWidget() is assistant.settings_panel.tutorial_page
+    assert assistant.settings_panel.isVisible()
+    assistant.shutdown()
+    assistant.settings_panel.hide()
+    restarted = FloatingFormulaAssistant(settings=settings)
+    restarted.show()
+    assert restarted.orb.isVisible()
+    assert restarted.settings_panel.isHidden()
+    restarted.shutdown()
+    restarted.orb.close()
+
+
+@pytest.mark.parametrize("show_settings", (True, False))
+def test_existing_launch_preference_survives_settings_upgrade(
+    tmp_path: Path, show_settings: bool,
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    settings.setValue("window/show_settings_on_startup", show_settings)
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assistant.show()
+    assert assistant.settings_panel.isVisible() == show_settings
+    assert assistant.orb.isVisible() != show_settings
+    assert (
+        assistant.settings_panel.pages.currentWidget()
+        is not assistant.settings_panel.tutorial_page
+    )
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.settings_panel.hide()
+
+
+def test_legacy_store_without_startup_key_retains_previous_default(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/mode", "mathcraft")
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.show_settings_on_startup is True
+    assert settings_ui._boolean(
+        settings.value("window/show_settings_on_startup"), False
+    )
+
+
+def test_application_theme_initialization_does_not_write_migration_keys(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    from formulasnip import app as app_module
+
+    application = _application()
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(app_module, "QApplication", lambda _argv: application)
+    monkeypatch.setattr(app_module, "QSettings", lambda: settings)
+    monkeypatch.setattr(app_module, "initialize_logging", lambda: None)
+    monkeypatch.setattr(app_module, "configure_runtime", lambda: None)
+    monkeypatch.setattr(app_module, "_configure_windows_identity", lambda: None)
+    app_module.create_application(["formulasnip-test"])
+    assert settings.allKeys() == []
+    assistant = FloatingFormulaAssistant(settings=settings)
+    assert assistant._first_run
+    assistant.shutdown()
 
 
 def test_latex_editor_rejects_paste_ime_and_programmatic_overflow() -> None:
@@ -721,7 +1161,7 @@ def test_failed_ai_enable_stays_disabled_when_settings_storage_recovers(
     path.unlink()
     directory.rmdir()
     directory.write_text("temporarily blocked", encoding="utf-8")
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel._save_ai_configuration()
 
     assert not panel.preferences.ai_correction_enabled
@@ -758,7 +1198,7 @@ def test_lazy_corrupt_ini_cannot_persist_failed_ai_opt_in(tmp_path: Path) -> Non
     original = path.read_bytes() + b"\n[unused-section]\nINVALID-LINE-WITHOUT-EQUALS\n"
     path.write_bytes(original)
 
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel._save_ai_configuration()
 
     assert not panel.preferences.ai_correction_enabled
@@ -840,7 +1280,7 @@ def test_ai_configuration_save_error_does_not_claim_success(tmp_path: Path) -> N
     settings = BrokenSettings(str(tmp_path / "failure.ini"), QSettings.Format.IniFormat)
     panel = SettingsPanel(settings, FloatingPreferences(),
                           api_key_store=FakeApiKeyStore("unit-test-token"))
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel.ai_base_url_input.setText("https://gateway.example/v1")
     panel.ai_model_combo.addItem("vision-model")
     panel.ai_model_combo.setCurrentIndex(0)
@@ -1132,6 +1572,17 @@ class FakeApiKeyStore:
     def delete(self) -> None:
         self.key = None
         self.base_url = None
+
+
+class FlakyApiKeyStore(FakeApiKeyStore):
+    def __init__(self, key: str | None = None, base_url: str | None = None) -> None:
+        super().__init__(key, base_url)
+        self.fail_reads = False
+
+    def load_for_base_url(self, base_url: str) -> str | None:
+        if self.fail_reads:
+            raise CredentialError("无法读取 Windows 中保存的 API Key。")
+        return super().load_for_base_url(base_url)
 
 
 class MouseRelease:
@@ -1815,7 +2266,7 @@ def test_result_panel_error_state_generic_help_and_escape_consumes() -> None:
     panel._set_status("预览失败", "error")
     assert panel.status_label.wordWrap()
     assert panel.status_label.property("state") == "error"
-    assert "设置中检查识别引擎" in panel.quality_label.text()
+    assert "常规设置中查看本地识别状态" in panel.quality_label.text()
     assert application.focusWidget() is panel.recapture_button
     QTest.keyClick(panel.recapture_button, Qt.Key.Key_Escape)
     assert panel.isHidden()
@@ -1838,8 +2289,9 @@ def test_result_panel_escape_bubbles_from_focused_latex_editor() -> None:
     assert panel.preview_stack.accessibleName() == "公式预览"
     assert panel.latex_view.accessibleName() == "可编辑 LaTeX"
     assert panel.preview_stack.focusPolicy() == Qt.FocusPolicy.StrongFocus
-    assert application.focusWidget() is panel.preview_stack
-    QTest.keyClick(panel.preview_stack, Qt.Key.Key_Escape)
+    assert application.focusWidget() is panel.copy_mathml_button
+    panel.latex_view.setFocus()
+    QTest.keyClick(panel.latex_view, Qt.Key.Key_Escape)
 
     assert panel.isHidden()
     assert consumed.count() == 1
@@ -2082,9 +2534,9 @@ def test_start_model_warmup_is_ordered_idempotent_and_updates_status(
     assert assistant._model_warmup_state == "warming"
     assert "初始化中" in assistant.orb.toolTip()
     worker.signals.started.emit("mathcraft")
-    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "正在初始化"
+    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "初始化中"
     worker.signals.succeeded.emit("mathcraft")
-    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "已初始化"
+    assert assistant.settings_panel.engine_status_labels["mathcraft"].text() == "已就绪"
     assert assistant._model_warmup_state == "ready"
     worker.signals.failed.emit("mathcraft", "offline")
     assert "初始化失败" in assistant.settings_panel.engine_status_labels["mathcraft"].text()
@@ -2120,8 +2572,8 @@ def test_settings_tutorial_has_four_steps_and_final_start(tmp_path: Path) -> Non
             application.processEvents()
             preview = illustration.grab()
             assert not preview.isNull()
-            assert preview.width() >= 220
-            assert preview.height() >= 220
+            assert preview.width() >= 180
+            assert preview.height() >= 200
     assert panel.tutorial_stack.currentIndex() == 3
     assert panel.tutorial_start_button.isVisible()
     panel.tutorial_start_button.click()
@@ -2175,14 +2627,15 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
 
     assert panel.size().width() == 1080
     assert panel.size().height() == 700
-    assert panel.minimumWidth() == 960
-    assert panel.minimumHeight() == 620
-    assert panel.pages.count() == 4
+    assert panel.minimumWidth() == 800
+    assert panel.minimumHeight() == 520
+    assert panel.pages.count() == 6
     assert [button.text().strip() for button, _title in panel._nav_entries] == [
         "常规",
-        "识别",
+        "输出",
+        "AI 增强",
         "外观",
-        "使用方法",
+        "关于",
     ]
     assert panel.sidebar.width() == 220
     assert panel.header.height() == 66
@@ -2235,7 +2688,7 @@ def test_settings_header_is_single_line_and_error_banner_is_dynamic(tmp_path: Pa
     assert panel.settings_error_label.isHidden()
     assert not hasattr(panel, "page_subtitle")
     assert panel.findChild(QLabel, "PageSubtitle") is None
-    for index, title in enumerate(("常规", "识别", "外观", "使用方法")):
+    for index, title in enumerate(("常规", "输出", "AI 增强", "外观", "关于", "使用方法")):
         panel._select_page(index)
         assert panel.page_title.text() == title
     panel._set_settings_error("无法保存")
@@ -2280,17 +2733,18 @@ def test_appearance_page_uses_reference_stage_and_swatch_sizes(tmp_path: Path) -
     stage = panel.appearance_page.findChild(settings_ui.QWidget, "OrbPreviewStage")
     assert stage is not None
     assert stage.height() == 210
-    assert all(button.size().width() == 34 for button in panel.color_buttons.values())
-    assert all(button.size().height() == 34 for button in panel.color_buttons.values())
+    assert all(button.size().width() == 32 for button in panel.color_buttons.values())
+    assert all(button.size().height() == 32 for button in panel.color_buttons.values())
     assert set(panel.theme_color_buttons) == set(ACCENT_THEME_SWATCHES)
     assert all(
-        button.size().width() == 34 for button in panel.theme_color_buttons.values()
+        button.size().width() == 32 for button in panel.theme_color_buttons.values()
     )
     assert all(
-        button.size().height() == 34 for button in panel.theme_color_buttons.values()
+        button.size().height() == 32 for button in panel.theme_color_buttons.values()
     )
     assert panel.theme_color_buttons[DEFAULT_ACCENT_THEME].isChecked()
-    assert panel.custom_color_button.size().width() == 34
+    assert panel.custom_color_button.size().width() == 32
+    assert panel.custom_color_button.size().height() == 32
     assert panel.ring_hex_label.text() == DEFAULT_RING_COLOR
     assert panel.logo_status_label.text() == ""
     assert panel.logo_status_label.isHidden()
@@ -2298,16 +2752,18 @@ def test_appearance_page_uses_reference_stage_and_swatch_sizes(tmp_path: Path) -
     panel.hide()
 
 
-def test_recognition_page_only_shows_mathcraft(tmp_path: Path) -> None:
+def test_local_status_is_compact_and_engine_selection_is_absent(tmp_path: Path) -> None:
     _application()
     settings = _settings(tmp_path)
     panel = SettingsPanel(settings, FloatingPreferences())
-    assert panel.mode_combo.isHidden()
-    assert set(panel.mode_cards) == {"mathcraft"}
-    assert panel.mode_combo.currentData() == "mathcraft"
-    assert panel.mode_cards["mathcraft"].isChecked()
-    assert panel.overview_mode_name.text() == "MathCraft OCR"
-    assert panel.overview_mode_tag.text() == "CPU"
+    assert not hasattr(panel, "mode_combo")
+    assert not hasattr(panel, "mode_cards")
+    assert panel.preferences.recognition_mode == "mathcraft"
+    general_text = " ".join(label.text() for label in panel.settings_page.findChildren(QLabel))
+    assert "本地识别" in general_text
+    assert all(word not in general_text for word in ("MathCraft", "OCR", "CPU"))
+    assert len(panel.engine_status_labels) == 1
+    assert panel.about_page.isAncestorOf(panel.auto_update_toggle)
     overview_buttons = {
         button.text() for button in panel.settings_page.findChildren(QPushButton)
     }
@@ -2316,15 +2772,8 @@ def test_recognition_page_only_shows_mathcraft(tmp_path: Path) -> None:
         label.text() for label in panel.settings_page.findChildren(QLabel)
     }
     assert panel.auto_update_toggle.get_position() == 1.0
-    assert panel.mode_summary_label.text() == "本地单引擎公式识别"
-    assert panel.mode_summary_label.isHidden()
     assert panel.recognition_page.findChild(QLabel, "ModeBody") is None
     assert panel.recognition_page.findChild(QLabel, "ModeMeta") is None
-    assert panel.mode_cards["mathcraft"].toolTip()
-    assert panel.mode_cards["mathcraft"].accessibleDescription()
-    mode_card = panel.mode_cards["mathcraft"]
-    indicator_item = mode_card.layout().itemAt(mode_card.layout().indexOf(mode_card.indicator))
-    assert indicator_item.alignment() == Qt.AlignmentFlag.AlignVCenter
     visible_copy = "".join(
         widget.text()
         for widget in panel.recognition_page.findChildren(QLabel)
@@ -2356,14 +2805,16 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
     preference_changes = QSignalSpy(panel.preferences_changed)
 
     assert panel.ai_correction_toggle.isChecked() is False
-    assert panel.ai_correction_toggle.isEnabled() is True
+    assert panel.ai_correction_toggle.isEnabled() is False
+    assert panel.ai_correction_toggle.isHidden()
+    assert panel.ai_status_badge.text() == "未配置"
     assert panel.ai_configuration_widget.isHidden()
     assert panel.ai_base_url_input.text() == ""
     assert panel.ai_model_combo.count() == 0
     assert panel.ai_model_combo.currentIndex() == -1
     assert not panel.ai_save_config_button.isEnabled()
 
-    panel.ai_correction_toggle.click()
+    panel.ai_configure_button.click()
     assert not panel.ai_configuration_widget.isHidden()
     assert panel.preferences.ai_correction_enabled is False
     assert preference_changes.count() == 0
@@ -2378,6 +2829,13 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
     assert preference_changes.count() == 0
     assert panel.ai_refresh_models_button.isEnabled()
     assert not panel.ai_test_connection_button.isEnabled()
+
+    panel.ai_base_url_input.setText("invalid address")
+    assert panel.ai_key_status_label.text() == "未配置 API Key"
+    assert panel.ai_key_status_label.property("saved") is False
+    assert not panel.ai_refresh_models_button.isEnabled()
+    panel.ai_base_url_input.setText("https://gateway.example/v1")
+    assert "Windows 凭据管理器" in panel.ai_key_status_label.text()
 
     class ListedModels:
         action = "list"
@@ -2406,6 +2864,7 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
 
     panel.ai_save_config_button.click()
     assert panel.preferences.ai_correction_enabled is True
+    assert panel.ai_correction_toggle.get_position() == 1.0
     assert settings_ui._boolean(
         settings.value("recognition/ai_correction_enabled"), False
     ) is True
@@ -2423,12 +2882,72 @@ def test_ai_correction_is_off_by_default_and_key_stays_out_of_qsettings(
     panel.ai_delete_key_button.click()
     assert key_store.key is None
     assert panel.ai_correction_toggle.isChecked() is False
-    assert panel.ai_configuration_widget.isHidden()
+    assert not panel.ai_configuration_widget.isHidden()
     assert panel.preferences.ai_correction_enabled is False
     assert settings_ui._boolean(
         settings.value("recognition/ai_correction_enabled"), True
     ) is False
     assert preference_changes.count() == 2
+    panel.hide()
+
+
+def test_switching_ai_provider_can_fetch_models_and_enable(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    provider_a = "https://provider-a.example/v1"
+    provider_b = "https://provider-b.example/v1"
+    saved = FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url=provider_a,
+        ai_model="provider-a-model",
+    )
+    key_store = FakeApiKeyStore("provider-a-key", provider_a)
+    panel = SettingsPanel(
+        _settings(tmp_path),
+        saved,
+        api_key_store=key_store,  # type: ignore[arg-type]
+    )
+    panel.ai_configure_button.click()
+    panel.ai_base_url_input.setText(provider_b)
+
+    assert not panel.preferences.ai_correction_enabled
+    assert not panel.ai_refresh_models_button.isEnabled()
+    assert not panel.ai_delete_key_button.isEnabled()
+
+    panel.ai_api_key_input.setText("provider-b-key")
+    panel.ai_save_key_button.click()
+
+    assert panel.ai_refresh_models_button.isEnabled()
+    assert panel.ai_delete_key_button.isEnabled()
+
+    def list_models(api_key: str, base_url: str, **_kwargs: Any) -> tuple[str, ...]:
+        assert api_key == "provider-b-key"
+        assert base_url == provider_b
+        return ("provider-b-model",)
+
+    class Pool:
+        @staticmethod
+        def start(worker: Any) -> None:
+            worker.run()
+
+    class ThreadPool:
+        globalInstance = staticmethod(lambda: Pool())  # noqa: N815
+
+    monkeypatch.setattr(worker_module, "list_compatible_models", list_models)
+    monkeypatch.setattr(settings_ui, "QThreadPool", ThreadPool)
+    panel.ai_refresh_models_button.click()
+
+    assert panel.ai_model_combo.findText("provider-b-model") >= 0
+    panel.ai_model_combo.setCurrentText("provider-b-model")
+    assert panel.ai_save_config_button.isEnabled()
+    panel.ai_save_config_button.click()
+
+    assert panel.preferences.ai_correction_enabled
+    assert panel.preferences.ai_base_url == provider_b
+    assert panel.preferences.ai_model == "provider-b-model"
+    assert panel.ai_correction_toggle.isChecked()
     panel.hide()
 
 
@@ -2450,11 +2969,12 @@ def test_invalid_ai_draft_does_not_replace_saved_configuration(
     )
 
     assert not panel.ai_save_config_button.isEnabled()
+    panel.ai_configure_button.click()
     panel.ai_model_combo.addItem("invalid model")
     panel.ai_model_combo.setCurrentIndex(1)
-    assert panel.ai_save_config_button.isEnabled()
+    assert not panel.ai_save_config_button.isEnabled()
 
-    panel.ai_save_config_button.click()
+    panel._save_ai_configuration()
 
     assert panel.ai_model_combo.currentText() == "invalid model"
     assert panel.preferences == saved
@@ -2476,7 +2996,7 @@ def test_ai_configuration_save_is_disabled_while_request_is_active(
         FloatingPreferences(),
         api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
     )
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel.ai_base_url_input.setText("https://gateway.example/v1")
     panel.ai_model_combo.addItem("vision-model")
     panel.ai_model_combo.setCurrentIndex(0)
@@ -2583,6 +3103,43 @@ def test_every_accent_theme_has_light_and_dark_styles(
     assert f"background: {accent_color};" in stylesheet
 
 
+def test_ai_model_picker_uses_modern_theme_aware_style() -> None:
+    stylesheet = application_stylesheet("light", "blue")
+
+    assert "QComboBox#AiModelCombo::drop-down" in stylesheet
+    assert "QComboBox#AiModelCombo::down-arrow" in stylesheet
+    assert "QComboBox#AiModelCombo QAbstractItemView::item" in stylesheet
+    assert "border-radius: 10px" in stylesheet
+
+
+def test_application_ui_font_prefers_crisp_windows_fonts() -> None:
+    font = application_ui_font()
+
+    assert font.families() == [
+        "Segoe UI Variable Text",
+        "Segoe UI",
+        "Microsoft YaHei UI",
+    ]
+    assert font.pointSizeF() == 10.0
+    assert font.weight() == QFont.Weight.Normal
+    assert font.styleStrategy() & QFont.StyleStrategy.PreferAntialias
+    assert font.styleStrategy() & QFont.StyleStrategy.PreferQuality
+    assert font.styleStrategy() & QFont.StyleStrategy.ContextFontMerging
+    assert font.hintingPreference() == QFont.HintingPreference.PreferVerticalHinting
+
+
+def test_settings_typography_uses_semantic_weights() -> None:
+    stylesheet = application_stylesheet("light", "blue")
+
+    assert (
+        'font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI";'
+        in stylesheet
+    )
+    assert "QLabel#CardTitle { font-size: 15px; font-weight: 500; }" in stylesheet
+    assert "QLabel#SettingsFieldLabel, QLabel#RowTitle" in stylesheet
+    assert "QPushButton#NavButton:checked" in stylesheet
+
+
 def test_accent_theme_switch_updates_global_ui_and_storage(tmp_path: Path) -> None:
     application = _application()
     settings = _settings(tmp_path)
@@ -2634,14 +3191,9 @@ def test_legacy_mode_migrates_to_mathcraft_and_persists(
 
     preferences = FloatingPreferences.load(settings)
     panel = SettingsPanel(settings, preferences)
-    mathcraft_index = panel.mode_combo.findData("mathcraft")
-    mathcraft_item = panel.mode_combo.model().item(mathcraft_index)
-
     assert settings.value("recognition/mode") == "mathcraft"
-    assert panel.mode_combo.currentData() == "mathcraft"
-    assert mathcraft_item is not None
-    assert not mathcraft_item.isEnabled()
-    assert not panel.mode_cards["mathcraft"].isEnabled()
+    assert panel.preferences.recognition_mode == "mathcraft"
+    assert panel.engine_status_labels["mathcraft"].text() == "安装缺失"
     panel.close()
 
 
@@ -2670,6 +3222,50 @@ def test_ai_provider_preferences_round_trip_without_api_key(tmp_path: Path) -> N
     assert all("key" not in key.casefold() for key in settings.allKeys())
 
 
+def test_fresh_install_loads_provider_neutral_empty_ai_fields(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.ai_correction_enabled is False
+    assert loaded.ai_base_url == ""
+    assert loaded.ai_model == ""
+    assert settings.value("recognition/ai_base_url") is None
+    assert settings.value("recognition/ai_model") is None
+
+
+def test_disabled_ai_configuration_is_preserved_without_guessing_user_intent(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/ai_correction_enabled", False)
+    settings.setValue("recognition/ai_base_url", "https://api.openai.com/v1")
+    settings.setValue("recognition/ai_model", "gpt-5.6-luna")
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.ai_correction_enabled is False
+    assert loaded.ai_base_url == "https://api.openai.com/v1"
+    assert loaded.ai_model == "gpt-5.6-luna"
+    assert settings.value("recognition/ai_base_url") == "https://api.openai.com/v1"
+    assert settings.value("recognition/ai_model") == "gpt-5.6-luna"
+
+
+def test_legacy_ai_defaults_migration_preserves_enabled_user_configuration(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.setValue("recognition/ai_correction_enabled", True)
+    settings.setValue("recognition/ai_base_url", "https://api.openai.com/v1")
+    settings.setValue("recognition/ai_model", "gpt-5.6-luna")
+
+    loaded = FloatingPreferences.load(settings)
+
+    assert loaded.ai_correction_enabled is True
+    assert loaded.ai_base_url == "https://api.openai.com/v1"
+    assert loaded.ai_model == "gpt-5.6-luna"
+
+
 def test_unsafe_ai_provider_url_is_not_persisted(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     FloatingPreferences(
@@ -2686,7 +3282,10 @@ def test_unsafe_ai_provider_url_is_not_persisted(tmp_path: Path) -> None:
 def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     settings.setValue("recognition/ai_correction_enabled", True)
-    settings.setValue("recognition/ai_base_url", "http://remote.example/v1")
+    settings.setValue(
+        "recognition/ai_base_url",
+        "https://remote.example/v1?api_key=PLAINTEXT_SECRET",
+    )
     settings.setValue("recognition/ai_model", "vision-model")
 
     loaded = FloatingPreferences.load(settings)
@@ -2696,6 +3295,8 @@ def test_invalid_stored_provider_disables_ai_before_falling_back(tmp_path: Path)
     assert settings_ui._boolean(
         settings.value("recognition/ai_correction_enabled"), True
     ) is False
+    assert settings.value("recognition/ai_base_url") == ""
+    assert settings.value("recognition/ai_model") == ""
 
 
 def test_stale_model_list_does_not_overwrite_new_provider_config(
@@ -2707,7 +3308,7 @@ def test_stale_model_list_does_not_overwrite_new_provider_config(
         FloatingPreferences(),
         api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
     )
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel.ai_base_url_input.setText("https://first.example/v1")
     panel.ai_model_combo.addItems(("vision-a", "vision-b"))
     panel.ai_model_combo.setCurrentIndex(0)
@@ -2778,7 +3379,7 @@ def test_ai_model_request_terminal_releases_workers(
         FloatingPreferences(),
         api_key_store=FakeApiKeyStore("unit-test-token"),  # type: ignore[arg-type]
     )
-    panel.ai_correction_toggle.setChecked(True)
+    panel.ai_configure_button.click()
     panel.ai_base_url_input.setText("https://gateway.example/v1")
 
     def request_models(*_args: Any, **kwargs: Any) -> tuple[str, ...]:
@@ -2849,6 +3450,7 @@ def test_replacing_ai_key_cancels_active_recognition_without_preference_change(
 
     worker = ActiveWorker()
     assistant._worker = worker  # type: ignore[assignment]
+    assistant.settings_panel.ai_configure_button.click()
     assistant.settings_panel.ai_api_key_input.setText("replacement-placeholder")
     assistant.settings_panel.ai_save_key_button.click()
 
@@ -3718,7 +4320,7 @@ def test_after_update_forces_visible_settings_and_reports_version(tmp_path: Path
     application.processEvents()
 
     assert assistant.settings_panel.isVisible()
-    assert assistant.settings_panel.pages.currentIndex() == 0
+    assert assistant.settings_panel.pages.currentWidget() is assistant.settings_panel.about_page
     assert assistant.orb.isHidden()
     assert (
         assistant.settings_panel.update_status_label.text()
@@ -3983,6 +4585,7 @@ def test_draft_provider_change_disables_ai_before_replacement_key_capture(
     assistant = FloatingFormulaAssistant(settings=settings)
     assistant._thread_pool = Pool()  # type: ignore[assignment]
 
+    assistant.settings_panel.ai_configure_button.click()
     assistant.settings_panel.ai_base_url_input.setText(
         "https://provider-b.example/v1"
     )

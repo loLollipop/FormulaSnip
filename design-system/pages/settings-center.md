@@ -11,7 +11,7 @@
   accessibility descriptions.
 - Persistent secondary copy is reserved for information required to make a decision. Dynamic
   progress, validation, error, and custom-selection feedback remain visible beside their control.
-- Body text is 15 px and muted supporting text is at least 13 px; only version and code/value
+- Body text is 14 px and muted supporting text is at least 13 px; only version and code/value
   chips may use 12 px.
 - Use 8 px / 12 px spacing increments, crisp card borders, moderate corners, and no gradients.
 - The appearance page separates global UI accent from floating-orb ring color.

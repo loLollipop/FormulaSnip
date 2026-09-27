@@ -4,7 +4,7 @@
 
 AI 辅助默认关闭。用户配置并启用后，当前选区会重新编码为 PNG 并发往配置地址的 `/chat/completions`，附带固定提示、模型与请求参数及 Bearer API Key；当前生产路径不发送本地 OCR 候选、用户名、路径或日志。获取模型会请求 `/models`，连接测试也会联网。`store: false` 不是第三方不保留数据的保证，具体费用和保留规则由服务商决定。远程服务要求 HTTPS，明文 HTTP 仅用于字面回环地址；请求不跟随重定向。
 
-自动检查更新默认开启，启动约 1.5 秒后和运行期间按 **12 小时节流**检查，连续重启遵循已保存的检查时间；失败或配置无法写入时可能在下次启动重试。在“设置中心 → 应用与引擎 → 自动检查更新”关闭；手动“检查更新”仍会立即联网。请求地址是 `https://github.com/loLollipop/FormulaSnip/releases/latest/download/FormulaSnip-update-v2.json`，回退到同目录 `FormulaSnip-update.json`，再回退到 `https://api.github.com/repos/loLollipop/FormulaSnip/releases/latest`。受限重定向/下载可能访问 `release-assets.githubusercontent.com`、`objects.githubusercontent.com`。GitHub 可看到 IP、请求时间、URL 与 `FormulaSnip-Updater` User-Agent，更新请求不上传截图、LaTeX 或 API Key。安装版确认后下载与安装，便携版/源码版打开 Release 页面。
+自动检查更新默认开启，启动约 1.5 秒后和运行期间按 **12 小时节流**检查，连续重启遵循已保存的检查时间；失败或配置无法写入时可能在下次启动重试。在“设置中心 → 关于 → 自动检查更新”关闭；手动“检查更新”仍会立即联网。请求地址是 `https://github.com/loLollipop/FormulaSnip/releases/latest/download/FormulaSnip-update-v2.json`，回退到同目录 `FormulaSnip-update.json`，再回退到 `https://api.github.com/repos/loLollipop/FormulaSnip/releases/latest`。受限重定向/下载可能访问 `release-assets.githubusercontent.com`、`objects.githubusercontent.com`。GitHub 可看到 IP、请求时间、URL 与 `FormulaSnip-Updater` User-Agent，更新请求不上传截图、LaTeX 或 API Key。安装版确认后下载与安装，便携版/源码版打开 Release 页面。
 
 Windows 发行包内置 MathCraft 公式模型，可离线首次识别。源码模式未提供内置模型，或内置模型损坏被禁用时，MathCraft 可能使用已有用户缓存或从上游模型源下载；源与固定发行模型信息见 `MODEL_ASSETS.json`。这与更新检查开关独立。
 

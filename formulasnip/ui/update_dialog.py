@@ -205,7 +205,7 @@ def format_release_notes(notes: str) -> str:
 <head>
 <style>
 body {{
-    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
     font-size: 13px;
     line-height: 1.55;
     margin: 5px 8px;

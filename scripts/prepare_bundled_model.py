@@ -226,9 +226,10 @@ def _validated_staging_root(destination: Path) -> tuple[Path, Path]:
     project_root = Path(__file__).resolve().parents[1]
     allowed_root = (project_root / "build" / "bundled-models").resolve()
     resolved = destination.resolve()
-    if resolved != allowed_root and allowed_root not in resolved.parents:
+    if resolved == allowed_root or allowed_root not in resolved.parents:
         raise ModelBundleError(
-            f"Bundle destination must stay below {allowed_root}: {resolved}"
+            f"Bundle destination must stay below {allowed_root} as a strict child: "
+            f"{resolved}"
         )
     return allowed_root, resolved
 

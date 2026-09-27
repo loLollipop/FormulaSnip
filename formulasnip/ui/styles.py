@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import QApplication
 
 DEFAULT_ACCENT_THEME = "blue"
+UI_FONT_FAMILIES = (
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    "Microsoft YaHei UI",
+)
+UI_FONT_FAMILY_QSS = ', '.join(f'"{family}"' for family in UI_FONT_FAMILIES)
 ACCENT_THEME_SWATCHES = {
     "blue": "#3B82F6",
     "violet": "#7C6CF7",
@@ -111,6 +117,22 @@ def current_accent_color() -> str:
     )
 
 
+def application_ui_font() -> QFont:
+    """Return a crisp Windows UI font stack with reliable Chinese fallback."""
+
+    font = QFont()
+    font.setFamilies(list(UI_FONT_FAMILIES))
+    font.setPointSizeF(10.0)
+    font.setWeight(QFont.Weight.Normal)
+    font.setStyleStrategy(
+        QFont.StyleStrategy.PreferAntialias
+        | QFont.StyleStrategy.PreferQuality
+        | QFont.StyleStrategy.ContextFontMerging
+    )
+    font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
+    return font
+
+
 def application_stylesheet(
     theme: str,
     accent_theme: object = DEFAULT_ACCENT_THEME,
@@ -164,12 +186,14 @@ def application_stylesheet(
 QWidget {{
     color: {colors['text']};
     font-size: 14px;
-    font-family: "Microsoft YaHei UI", "Segoe UI";
+    font-family: {UI_FONT_FAMILY_QSS};
+    font-weight: 400;
 }}
 QWidget#SettingsPanel, QWidget#SettingsPanel QWidget {{
     color: {settings['text']};
-    font-size: 15px;
-    font-family: "Microsoft YaHei UI", "Segoe UI";
+    font-size: 14px;
+    font-family: {UI_FONT_FAMILY_QSS};
+    font-weight: 400;
 }}
 QWidget#SettingsPanel {{ background: {settings['window']}; }}
 QDialog#UpdateDialog {{ background: {colors['surface']}; }}
@@ -279,7 +303,7 @@ QLabel#BrandEdition, QLabel#SettingsHint,
 QLabel#CardDescription, QLabel#TutorialCounter, QLabel#MutedText,
 QLabel#LogoSafetyText {{ color: {settings['muted']}; }}
 QLabel#BrandEdition {{ font-size: 12px; }}
-QLabel#PageTitle {{ font-size: 21px; font-weight: 600; }}
+QLabel#PageTitle {{ font-size: 20px; font-weight: 600; }}
 QLabel#SettingsHint, QLabel#CardDescription, QLabel#TutorialCounter,
 QLabel#MutedText, QLabel#LogoSafetyText {{ font-size: 13px; }}
 QLabel#SettingsErrorBanner {{
@@ -287,16 +311,16 @@ QLabel#SettingsErrorBanner {{
     border: 1px solid {settings['warning']}; border-radius: 8px;
     margin: 10px 28px 0 28px; padding: 9px 12px;
 }}
-QLabel#CardTitle, QLabel#SettingsFieldLabel, QLabel#RowTitle {{
-    font-size: 15px; font-weight: 600;
+QLabel#CardTitle {{ font-size: 15px; font-weight: 500; }}
+QLabel#SettingsFieldLabel, QLabel#RowTitle {{
+    font-size: 14px; font-weight: 500;
 }}
 QLabel#OfflineCard {{
     background: {settings['surface']}; color: {settings['muted']};
     border: 1px solid {settings['border']}; border-radius: 8px;
     padding: 12px; font-size: 13px;
 }}
-QWidget#SettingsCard, QWidget#OverviewModeCard, QWidget#RecognitionTriggerCard,
-QStackedWidget#TutorialStack {{
+QWidget#SettingsCard, QStackedWidget#TutorialStack {{
     background: {settings['surface']};
     border: 1px solid {settings['border']};
     border-radius: 10px;
@@ -319,11 +343,6 @@ QLabel#RingHexLabel {{
     color: {settings['muted']}; background: transparent;
     font-family: Consolas, monospace; font-size: 12px;
 }}
-QLabel#OverviewModeName {{ font-size: 24px; font-weight: 700; }}
-QLabel#EngineBadge {{
-    color: {settings['accent']}; background: {settings['accent_soft']};
-    border-radius: 8px; font-family: Consolas, monospace; font-size: 11px;
-}}
 QLabel#EngineDot {{
     background: {settings['muted']}; border-radius: 4px;
 }}
@@ -336,16 +355,45 @@ QLabel#EngineStatus[available="true"] {{
     color: {colors['success']};
 }}
 QWidget#SettingsPanel QLineEdit#ApiKeyInput,
-QWidget#SettingsPanel QLineEdit#AiTextInput,
-QWidget#SettingsPanel QComboBox#AiModelCombo {{
+QWidget#SettingsPanel QLineEdit#AiTextInput {{
     background: {settings['input']}; color: {settings['text']};
     border: 1px solid {settings['border']}; border-radius: 8px;
     padding: 8px 11px; min-height: 18px;
 }}
 QWidget#SettingsPanel QLineEdit#ApiKeyInput:focus,
-QWidget#SettingsPanel QLineEdit#AiTextInput:focus,
-QWidget#SettingsPanel QComboBox#AiModelCombo:focus {{
+QWidget#SettingsPanel QLineEdit#AiTextInput:focus {{
     border: 1px solid {settings['accent']};
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo {{
+    background: {settings['input']}; color: {settings['text']};
+    border: 1px solid {settings['border']}; border-radius: 10px;
+    padding: 8px 44px 8px 12px; min-height: 22px;
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo:hover,
+QWidget#SettingsPanel QComboBox#AiModelCombo:focus,
+QWidget#SettingsPanel QComboBox#AiModelCombo:on {{
+    border-color: {settings['accent']};
+    background: {settings['surface']};
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo:disabled {{
+    color: {settings['muted']}; background: {settings['hover']};
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: top right;
+    width: 40px; border: none; background: transparent;
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo::down-arrow {{
+    image: none; width: 0; height: 0;
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo QAbstractItemView {{
+    background: {settings['surface']}; color: {settings['text']};
+    border: 1px solid {settings['border']}; border-radius: 10px;
+    padding: 6px; outline: 0;
+    selection-background-color: {settings['accent_soft']};
+    selection-color: {settings['text']};
+}}
+QWidget#SettingsPanel QComboBox#AiModelCombo QAbstractItemView::item {{
+    min-height: 28px; padding: 5px 10px; border-radius: 6px;
 }}
 QLabel#ApiKeyStatus {{ color: {settings['muted']}; font-size: 13px; }}
 QLabel#ApiKeyStatus[saved="true"] {{ color: {colors['success']}; }}
@@ -371,7 +419,7 @@ QPushButton:disabled {{
 QWidget#SettingsPanel QPushButton {{
     background: {settings['surface']}; color: {settings['text']};
     border: 1px solid {settings['border']}; border-radius: 8px;
-    padding: 8px 14px; font-weight: 500;
+    padding: 8px 14px; font-weight: 400;
 }}
 QWidget#SettingsPanel QPushButton:hover {{
     background: {settings['hover']}; border-color: {settings['accent']};
@@ -383,6 +431,46 @@ QWidget#SettingsPanel QPushButton:pressed {{
 QWidget#SettingsPanel QPushButton:disabled {{
     color: {settings['muted']}; background: {settings['sidebar']};
     border-color: {settings['border']};
+}}
+QWidget#SegmentedControl {{
+    background: {settings['input']}; border: 1px solid {settings['border']};
+    border-radius: 11px;
+}}
+QWidget#SettingsPanel QPushButton#SegmentButton {{
+    background: transparent; color: {settings['muted']};
+    border: 1px solid transparent; border-radius: 7px; padding: 5px 14px;
+}}
+QWidget#SettingsPanel QPushButton#SegmentButton:checked {{
+    color: {settings['accent']}; background: {settings['accent_soft']};
+    border-color: {settings['border']}; font-weight: 500;
+}}
+QWidget#SettingsPanel QPushButton#SegmentButton:hover,
+QWidget#SettingsPanel QPushButton#SegmentButton:focus {{
+    border: 1px solid {settings['accent']}; color: {settings['text']};
+}}
+QWidget#SettingsPanel QLabel#StatusBadge {{
+    color: {settings['muted']}; background: {settings['hover']};
+    border: 1px solid {settings['border']}; border-radius: 9px;
+    padding: 4px 10px; font-size: 12px;
+}}
+QWidget#SettingsPanel QLabel#StatusBadge[active="true"] {{
+    color: {colors['success']}; background: {colors['success_soft']};
+    border-color: {colors['success']};
+}}
+QWidget#SettingsPanel QSlider {{ min-height: 24px; }}
+QWidget#SettingsPanel QSlider::groove:horizontal {{
+    height: 6px; margin: 0 11px;
+    background: {settings['border']}; border-radius: 3px;
+}}
+QWidget#SettingsPanel QSlider::sub-page:horizontal {{
+    background: {settings['accent']}; border-radius: 3px;
+}}
+QWidget#SettingsPanel QSlider::handle:horizontal {{
+    width: 16px; margin: -6px 0; border-radius: 9px;
+    background: {settings['surface']}; border: 2px solid {settings['accent']};
+}}
+QWidget#SettingsPanel QSlider::handle:horizontal:focus {{
+    background: {settings['accent_soft']}; border-width: 3px;
 }}
 QWidget#FloatingResultPanel QPushButton, QDialog#UpdateDialog QPushButton {{
     background: {colors['surface_alt']}; color: {colors['text']};
@@ -416,14 +504,14 @@ QWidget#FloatingResultPanel QPushButton#FloatingCloseButton:focus {{
 QWidget#SettingsPanel QPushButton#NavButton {{
     background: transparent; border: 1px solid transparent; color: {settings['muted']};
     border-radius: 8px; padding: 0 12px; text-align: left;
-    font-weight: 500;
+    font-weight: 400;
 }}
 QWidget#SettingsPanel QPushButton#NavButton:hover {{
     background: {settings['hover']}; color: {settings['text']};
 }}
 QWidget#SettingsPanel QPushButton#NavButton:checked {{
     background: {settings['accent_soft']}; color: {settings['accent']};
-    border-color: {settings['border']}; font-weight: 600;
+    border-color: {settings['border']}; font-weight: 500;
 }}
 QLabel#NavMarker {{ background: transparent; border-radius: 2px; }}
 QLabel#NavMarker[selected="true"] {{ background: {settings['accent']}; }}
@@ -438,16 +526,23 @@ QWidget#SettingsPanel QPushButton#GitHubLink:focus {{
     background: {settings['hover']}; color: {settings['text']};
     border: 1px solid {settings['accent']};
 }}
-QWidget#SettingsPanel QPushButton#ThemeToggleButton {{
+QWidget#SettingsPanel QPushButton#ThemeToggleButton,
+QWidget#SettingsPanel QPushButton#HelpButton {{
     background: transparent; color: {settings['muted']}; border: 1px solid {settings['border']};
     border-radius: 8px; padding: 0; font-size: 15px;
 }}
-QWidget#SettingsPanel QPushButton#ThemeToggleButton:hover {{
+QWidget#SettingsPanel QPushButton#ThemeToggleButton:hover,
+QWidget#SettingsPanel QPushButton#HelpButton:hover {{
     background: {settings['hover']}; color: {settings['text']};
+}}
+QWidget#SettingsPanel QPushButton#ThemeToggleButton:focus,
+QWidget#SettingsPanel QPushButton#HelpButton:focus {{
+    border: 2px solid {settings['accent']};
 }}
 QWidget#SettingsPanel QPushButton#SettingsPrimary {{
     background: {settings['accent']};
     border-color: {settings['accent']}; color: {settings['accent_text']};
+    font-weight: 500;
 }}
 QWidget#SettingsPanel QPushButton#SettingsPrimary:hover {{
     background: {settings['accent_hover']}; border-color: {settings['accent_hover']};
@@ -480,34 +575,6 @@ QDialog#UpdateDialog QPushButton#SettingsPrimary:disabled {{
 QWidget#FloatingResultPanel QPushButton#FloatingPrimary:disabled {{
     color: {colors['muted']}; background: {colors['surface_alt']};
     border-color: {colors['border']};
-}}
-QWidget#SettingsPanel QPushButton#ModeCard {{
-    background: {settings['surface']}; border: 1px solid {settings['border']};
-    border-radius: 10px; padding: 0; text-align: left; min-height: 68px;
-}}
-QWidget#SettingsPanel QPushButton#ModeCard:hover,
-QWidget#SettingsPanel QPushButton#ModeCard:focus {{
-    border: 1px solid {settings['accent']};
-}}
-QWidget#SettingsPanel QPushButton#ModeCard[selected="true"] {{
-    background: {settings['accent_soft']}; border: 1px solid {settings['accent']};
-}}
-QWidget#SettingsPanel QPushButton#ModeCard:disabled {{
-    background: {settings['sidebar']};
-}}
-QLabel#ModeIndicator {{
-    border: 1px solid {settings['border']}; border-radius: 9px;
-    color: {settings['accent']}; font-size: 10px;
-}}
-QLabel#ModeIndicator[selected="true"] {{ border-color: {settings['accent']}; }}
-QLabel#ModeTitle {{ font-size: 15px; font-weight: 600; background: transparent; }}
-QLabel#ModeTag {{
-    color: {settings['accent']}; background: {settings['accent_soft']};
-    border-radius: 8px; padding: 2px 8px; font-size: 12px; font-weight: 600;
-}}
-QLabel#TriggerTag {{
-    background: {settings['sidebar']}; border: 1px solid {settings['border']};
-    border-radius: 7px; padding: 6px 10px; font-size: 13px;
 }}
 QWidget#SettingsPanel QPushButton#TutorialStepButton {{
     background: transparent; color: {settings['muted']};
@@ -715,6 +782,10 @@ def apply_application_theme(
     palette.setColor(
         QPalette.ColorRole.Text,
         QColor("#171923" if normalized == "light" else "#f1f3f8"),
+    )
+    palette.setColor(
+        QPalette.ColorRole.PlaceholderText,
+        QColor("#697083" if normalized == "light" else "#9ba5b8"),
     )
     palette.setColor(
         QPalette.ColorRole.Highlight,

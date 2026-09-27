@@ -32,13 +32,16 @@ from PySide6.QtGui import (
     QImage,
     QImageReader,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QPolygon,
+    QShowEvent,
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QColorDialog,
@@ -47,11 +50,17 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
+    QListView,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QStackedWidget,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -83,6 +92,9 @@ from formulasnip.ui.worker import CompatibleModelWorker
 RECOGNITION_MODES = ("mathcraft",)
 ORB_COLORS = ("blue", "green", "orange")
 RESULT_THEMES = ("dark", "light")
+COPY_FORMATS = ("mathml", "latex")
+RESULT_POSITIONS = ("near_orb", "screen_center")
+ORB_SIZES = {"small": 56, "medium": 68, "large": 80}
 LEGACY_DEFAULT_RING_COLOR = "#5D83F3"
 DEFAULT_RING_COLOR = "#7C6CF7"
 RING_PRESETS = {
@@ -477,6 +489,9 @@ LINE_ICON_PATHS = {
         '12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>'
     ),
     "moon": '<path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5z"/>',
+    "output": '<path d="M8 4H4v16h16v-4M12 3h9v9M10 14L21 3"/>',
+    "about": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/>',
+    "help": '<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 1 1 5 2c-2 1-2 2-2 3m0 3v.1"/>',
 }
 
 
@@ -568,7 +583,7 @@ class FloatingPreferences:
     recognition_mode: str = "mathcraft"
     orb_color: str = "blue"
     result_theme: str = "dark"
-    show_settings_on_startup: bool = True
+    show_settings_on_startup: bool = False
     ring_color: str | None = None
     logo_path: str = ""
     ai_correction_enabled: bool = False
@@ -576,6 +591,48 @@ class FloatingPreferences:
     ai_model: str = ""
     auto_check_updates: bool = True
     accent_theme: str = DEFAULT_ACCENT_THEME
+    default_copy_format: str = "mathml"
+    close_after_copy: bool = True
+    result_panel_position: str = "near_orb"
+    orb_size: str = "medium"
+    orb_opacity: int = 100
+    orb_snap_to_edge: bool = True
+
+    def __post_init__(self) -> None:
+        # Normalize at the value boundary, including direct/positional callers.
+        normalized = {
+            "recognition_mode": "mathcraft",
+            "orb_color": _choice(self.orb_color, ORB_COLORS, "blue"),
+            "result_theme": _choice(self.result_theme, RESULT_THEMES, "dark"),
+            "show_settings_on_startup": _boolean(
+                self.show_settings_on_startup, False
+            ),
+            "ring_color": (
+                normalize_hex_color(self.ring_color)
+                if isinstance(self.ring_color, str)
+                else None
+            ),
+            "logo_path": self.logo_path if isinstance(self.logo_path, str) else "",
+            "ai_correction_enabled": _boolean(
+                self.ai_correction_enabled, False
+            ),
+            "ai_base_url": (
+                self.ai_base_url.strip() if isinstance(self.ai_base_url, str) else ""
+            ),
+            "ai_model": self.ai_model.strip() if isinstance(self.ai_model, str) else "",
+            "auto_check_updates": _boolean(self.auto_check_updates, True),
+            "accent_theme": normalize_accent_theme(self.accent_theme),
+            "default_copy_format": _choice(self.default_copy_format, COPY_FORMATS, "mathml"),
+            "close_after_copy": _boolean(self.close_after_copy, True),
+            "result_panel_position": _choice(
+                self.result_panel_position, RESULT_POSITIONS, "near_orb"
+            ),
+            "orb_size": _choice(self.orb_size, tuple(ORB_SIZES), "medium"),
+            "orb_opacity": normalize_orb_opacity(self.orb_opacity),
+            "orb_snap_to_edge": _boolean(self.orb_snap_to_edge, True),
+        }
+        for name, value in normalized.items():
+            object.__setattr__(self, name, value)
 
     @property
     def effective_ring_color(self) -> str:
@@ -622,12 +679,14 @@ class FloatingPreferences:
                 except PreferencesSaveError:
                     return cls()
 
+            stored_keys = set(stored_values)
+
             def stored_value(key: str, default: object = None) -> object:
                 return stored_values.get(key, default)
 
         else:
             settings.sync()
-            settings.allKeys()
+            stored_keys = set(settings.allKeys())
             if settings.status() != QSettings.Status.NoError:
                 return cls()
 
@@ -663,19 +722,23 @@ class FloatingPreferences:
         stored_recognition_mode = stored_value("recognition/mode")
         stored_ai_base_url = stored_value("recognition/ai_base_url")
         stored_ai_model = stored_value("recognition/ai_model")
-        ai_base_url, base_url_valid = _stored_ai_base_url(stored_ai_base_url)
-        ai_model, model_valid = _stored_ai_model(stored_ai_model)
-        ai_correction_enabled = _boolean(
+        stored_ai_enabled = _boolean(
             stored_value("recognition/ai_correction_enabled"), False
         )
+        ai_base_url, base_url_valid = _stored_ai_base_url(stored_ai_base_url)
+        ai_model, model_valid = _stored_ai_model(stored_ai_model)
+        ai_correction_enabled = stored_ai_enabled
         if ai_correction_enabled and not (base_url_valid and model_valid):
             ai_correction_enabled = False
+        startup_key = "window/show_settings_on_startup"
+        startup_key_missing = startup_key not in stored_keys
+        startup_default = bool(stored_keys) if startup_key_missing else False
         preferences = cls(
             recognition_mode=recognition_mode,
             orb_color=_preset_name(ring),
             result_theme=theme,
             show_settings_on_startup=_boolean(
-                stored_value("window/show_settings_on_startup"), True
+                stored_value(startup_key), startup_default
             ),
             ring_color=ring,
             logo_path=logo,
@@ -684,8 +747,19 @@ class FloatingPreferences:
             ai_model=ai_model,
             auto_check_updates=_boolean(stored_value("updates/automatic"), True),
             accent_theme=accent_theme,
+            default_copy_format=stored_value("output/default_copy_format", "mathml"),
+            close_after_copy=stored_value("output/close_after_copy", True),
+            result_panel_position=stored_value("window/result_panel_position", "near_orb"),
+            orb_size=stored_value("appearance/orb_size", "medium"),
+            orb_opacity=stored_value("appearance/orb_opacity", 100),
+            orb_snap_to_edge=stored_value("window/orb_snap_to_edge", True),
         )
         migrations: dict[str, object] = {}
+        if startup_key_missing:
+            # New installations start with the four-step guide and then use the
+            # orb. Existing stores without this once-implicit preference retain
+            # the previous default of opening the settings center.
+            migrations[startup_key] = preferences.show_settings_on_startup
         if stored_recognition_mode != recognition_mode:
             migrations["recognition/mode"] = recognition_mode
         if migrated_legacy_ring:
@@ -700,6 +774,20 @@ class FloatingPreferences:
             stored_value("recognition/ai_correction_enabled"), False
         ) and not ai_correction_enabled:
             migrations["recognition/ai_correction_enabled"] = False
+        if (
+            isinstance(stored_ai_base_url, str)
+            and stored_ai_base_url.strip()
+            and not base_url_valid
+        ):
+            # Never retain credentials accidentally embedded in an unsafe URL.
+            migrations["recognition/ai_base_url"] = ""
+            migrations["recognition/ai_model"] = ""
+        elif (
+            isinstance(stored_ai_model, str)
+            and stored_ai_model.strip()
+            and not model_valid
+        ):
+            migrations["recognition/ai_model"] = ""
         if migrations:
             with suppress(PreferencesSaveError):
                 write_settings_values(settings, migrations)
@@ -735,6 +823,12 @@ class FloatingPreferences:
                 "recognition/ai_base_url": ai_base_url,
                 "recognition/ai_model": ai_model,
                 "updates/automatic": self.auto_check_updates,
+                "output/default_copy_format": self.default_copy_format,
+                "output/close_after_copy": self.close_after_copy,
+                "window/result_panel_position": self.result_panel_position,
+                "appearance/orb_size": self.orb_size,
+                "appearance/orb_opacity": self.orb_opacity,
+                "window/orb_snap_to_edge": self.orb_snap_to_edge,
                 # Keep the V3 keys synchronized for downgrade compatibility.
                 "appearance/orb_color": _preset_name(ring),
                 "appearance/result_theme": self.result_theme,
@@ -744,8 +838,11 @@ class FloatingPreferences:
         # Native stores do not offer a multi-key transaction. Persist a safe
         # disabled state first, then make the privacy-sensitive opt-in the last
         # isolated write so any earlier failure cannot enable network upload.
-        values["recognition/ai_correction_enabled"] = False
-        saved_settings = write_settings_values(settings, values)
+        values.pop("recognition/ai_correction_enabled")
+        saved_settings = write_settings_values(
+            settings, {"recognition/ai_correction_enabled": False}
+        )
+        saved_settings = write_settings_values(saved_settings, values)
         if ai_enabled:
             saved_settings = write_settings_values(
                 saved_settings,
@@ -796,11 +893,12 @@ def _boolean(value: object, default: bool) -> bool:
     return default
 
 
-def _backend_is_available(key: str) -> bool:
-    return any(
-        backend_key == key and available
-        for backend_key, _name, available in backend_summaries()
-    )
+def normalize_orb_opacity(value: object) -> int:
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+        value = int(value.strip()) if len(value.strip()) <= 3 else None
+    if type(value) is int and 60 <= value <= 100:
+        return value
+    return 100
 
 
 class OrbAppearancePreview(QWidget):
@@ -846,7 +944,7 @@ class TutorialStepIllustration(QWidget):
         self.step_index = step_index
         self._formula_image = tutorial_formula_image()
         self.setObjectName("TutorialIllustration")
-        self.setMinimumSize(220, 220)
+        self.setMinimumSize(140, 200)
         self.setMaximumWidth(320)
         self.setAccessibleName(f"使用方法第 {step_index + 1} 步图示")
         self.setAccessibleDescription(
@@ -1207,6 +1305,90 @@ class TutorialStepIllustration(QWidget):
         )
 
 
+class ModernComboBox(QComboBox):
+    """Model picker with a compact popup and theme-aware chevron."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        popup = QListView(self)
+        popup.setObjectName("ModernComboPopup")
+        popup.setSpacing(2)
+        popup.setUniformItemSizes(True)
+        popup.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setView(popup)
+        self.setMaxVisibleItems(8)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, _event: object) -> None:  # noqa: N802
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.currentText = ""
+        option.currentIcon = QIcon()
+        painter = QStylePainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        palette = option.palette
+        placeholder = self.currentIndex() < 0
+        text = self.placeholderText() if placeholder else self.currentText()
+        text_color = palette.color(
+            QPalette.ColorRole.PlaceholderText
+            if placeholder
+            else QPalette.ColorRole.Text
+        )
+        if not self.isEnabled():
+            text_color = palette.color(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.Text,
+            )
+        text_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        ).adjusted(1, 0, -2, 0)
+        painter.setPen(text_color)
+        painter.drawText(
+            text_rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            self.fontMetrics().elidedText(
+                text,
+                Qt.TextElideMode.ElideRight,
+                max(0, text_rect.width()),
+            ),
+        )
+        if not self.isEnabled():
+            color = palette.color(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.Text,
+            )
+        elif self.hasFocus() or self.underMouse() or self.view().isVisible():
+            color = QColor(current_accent_color())
+        else:
+            color = palette.color(QPalette.ColorRole.PlaceholderText)
+        painter.setPen(
+            QPen(
+                color,
+                1.8,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        center_x = self.width() - 20
+        center_y = self.height() // 2
+        painter.drawPolyline(
+            QPolygon(
+                (
+                    QPoint(center_x - 4, center_y - 2),
+                    QPoint(center_x, center_y + 2),
+                    QPoint(center_x + 4, center_y - 2),
+                )
+            )
+        )
+        painter.end()
+
+
 class ToggleSwitch(QAbstractButton):
     """Compact, keyboard-accessible switch with an animated thumb."""
 
@@ -1285,68 +1467,51 @@ class NavigationButton(QPushButton):
             trailing.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
 
-class ModeCard(QPushButton):
-    """A whole-card radio choice that remains accessible from the keyboard."""
+class SegmentedControl(QWidget):
+    """Exclusive choices with explicit values and keyboard-accessible buttons."""
 
-    selected = Signal(str)
+    value_changed = Signal(str)
 
-    def __init__(
-        self,
-        key: str,
-        title: str,
-        tag: str,
-        accessible_description: str,
-    ) -> None:
+    def __init__(self, label: str, choices: tuple[tuple[str, str], ...]) -> None:
         super().__init__()
-        self.mode_key = key
-        self.setObjectName("ModeCard")
-        self.setCheckable(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName(f"{title}识别模式")
-        self.setAccessibleDescription(accessible_description)
-        self.setToolTip(accessible_description)
-        self.setMinimumHeight(68)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 12)
-        layout.setSpacing(12)
-        self.indicator = QLabel()
-        self.indicator.setObjectName("ModeIndicator")
-        self.indicator.setFixedSize(18, 18)
-        self.indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignVCenter)
-        copy = QVBoxLayout()
-        copy.setSpacing(4)
-        title_row = QHBoxLayout()
-        title_row.setSpacing(9)
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("ModeTitle")
-        tag_label = QLabel(tag)
-        tag_label.setObjectName("ModeTag")
-        title_row.addWidget(self.title_label)
-        title_row.addWidget(tag_label)
-        title_row.addStretch(1)
-        for label in (
-            self.indicator,
-            self.title_label,
-            tag_label,
-        ):
-            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        copy.addLayout(title_row)
-        layout.addLayout(copy, 1)
-        self.toggled.connect(self._sync_visual)
-        self.clicked.connect(lambda: self.selected.emit(self.mode_key))
-        self._sync_visual(False)
+        self.setObjectName("SegmentedControl")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.setMinimumWidth(180)
+        self.setAccessibleName(label)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons: dict[str, QPushButton] = {}
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 4, 4, 4)
+        row.setSpacing(4)
+        for value, title in choices:
+            button = QPushButton(title)
+            button.setObjectName("SegmentButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(34)
+            button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setAccessibleName(f"{label}：{title}")
+            button.setToolTip(title)
+            button.clicked.connect(lambda _checked=False, item=value: self.value_changed.emit(item))
+            self.group.addButton(button)
+            self.buttons[value] = button
+            row.addWidget(button)
+        self.set_value(choices[0][0])
 
-    @Slot(bool)
-    def _sync_visual(self, checked: bool) -> None:
-        value = "true" if checked else "false"
-        self.setProperty("selected", value)
-        self.indicator.setProperty("selected", value)
-        self.indicator.setText("●" if checked else "")
-        for widget in (self, self.indicator):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+    def value(self) -> str:
+        return next((key for key, button in self.buttons.items() if button.isChecked()), "")
+
+    def set_value(self, value: str) -> None:
+        if value in self.buttons:
+            self.buttons[value].setChecked(True)
+
 
 class SettingsPanel(QWidget):
     start_requested = Signal()
@@ -1355,6 +1520,7 @@ class SettingsPanel(QWidget):
     settings_backend_changed = Signal(object)
     ai_credential_changed = Signal()
     update_check_requested = Signal()
+    orb_reset_requested = Signal()
 
     _TUTORIAL_STEPS = (
         (
@@ -1378,7 +1544,7 @@ class SettingsPanel(QWidget):
         (
             "复制",
             "复制 LaTeX 或 MathML",
-            "选择 LaTeX 或 MathML，复制成功后结果面板自动收起。",
+            "选择 LaTeX 或 MathML，粘贴到需要的编辑器中。",
             "直接粘贴到 Word、MathType 或其他支持 LaTeX / MathML 的编辑器。",
         ),
     )
@@ -1432,7 +1598,7 @@ class SettingsPanel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.resize(1080, 700)
-        self.setMinimumSize(960, 620)
+        self.setMinimumSize(800, 520)
         apply_application_theme(
             preferences.result_theme,
             preferences.effective_accent_theme,
@@ -1473,13 +1639,17 @@ class SettingsPanel(QWidget):
         self.pages = QStackedWidget()
         self.pages.setObjectName("SettingsPages")
         self.settings_page = self._build_overview_page()
+        self.output_page = self._build_output_page()
         self.recognition_page = self._build_recognition_page()
         self.appearance_page = self._build_appearance_page()
+        self.about_page = self._build_about_page()
         self.tutorial_page = self._build_tutorial_page()
+        self._navigation_pages = (
+            self.settings_page, self.output_page, self.recognition_page,
+            self.appearance_page, self.about_page,
+        )
         for page in (
-            self.settings_page,
-            self.recognition_page,
-            self.appearance_page,
+            *self._navigation_pages,
             self.tutorial_page,
         ):
             self.pages.addWidget(page)
@@ -1522,9 +1692,10 @@ class SettingsPanel(QWidget):
         self._nav_entries: list[tuple[NavigationButton, str]] = []
         for label, title, hint, icon_name in (
             ("常规", "常规", "", "general"),
-            ("识别", "识别", "", "recognition"),
+            ("输出", "输出", "", "output"),
+            ("AI 增强", "AI 增强", "", "recognition"),
             ("外观", "外观", "", "orb"),
-            ("使用方法", "使用方法", "", "tutorial"),
+            ("关于", "关于", "", "about"),
         ):
             button = NavigationButton(label, hint)
             button.setObjectName("NavButton")
@@ -1532,6 +1703,8 @@ class SettingsPanel(QWidget):
             button.setIconSize(QSize(19, 19))
             button.setCheckable(True)
             button.setFixedHeight(44)
+            button.setAccessibleName(title)
+            button.setToolTip(f"打开{title}")
             self.nav_group.addButton(button)
             self._nav_entries.append((button, title))
             layout.addWidget(button)
@@ -1572,9 +1745,19 @@ class SettingsPanel(QWidget):
         self.start_button.setObjectName("SettingsPrimary")
         self.start_button.setFixedHeight(34)
         self.start_button.setMinimumWidth(104)
+        self.start_button.setAccessibleName("开始识别")
+        self.start_button.setToolTip("返回悬浮球，点击截图识别公式")
         self.start_button.clicked.connect(self.start_requested.emit)
+        self.help_button = QPushButton()
+        self.help_button.setObjectName("HelpButton")
+        self.help_button.setFixedSize(34, 34)
+        self.help_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.help_button.setAccessibleName("使用帮助")
+        self.help_button.setToolTip("查看截图、校对与复制教程")
+        self.help_button.clicked.connect(self.show_tutorial)
         layout.addWidget(self.page_title)
         layout.addStretch(1)
+        layout.addWidget(self.help_button)
         layout.addWidget(self.theme_toggle_button)
         layout.addWidget(self.start_button)
         return header
@@ -1583,10 +1766,12 @@ class SettingsPanel(QWidget):
         body = QWidget()
         body.setObjectName("SettingsPageBody")
         layout = QVBoxLayout(body)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(28, 20, 28, 24)
         layout.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(body)
         shell = QWidget()
         shell_layout = QVBoxLayout(shell)
@@ -1596,122 +1781,148 @@ class SettingsPanel(QWidget):
 
     def _build_overview_page(self) -> QWidget:
         page, layout = self._page_shell()
-        mode_card = _card("")
-        mode_card.setObjectName("OverviewModeCard")
-        mode_layout = mode_card.layout()
-        assert mode_layout is not None
-        mode_row = QHBoxLayout()
-        mode_copy = QVBoxLayout()
-        mode_copy.setSpacing(0)
-        mode_title_row = QHBoxLayout()
-        mode_title_row.setSpacing(9)
-        self.overview_mode_name = QLabel()
-        self.overview_mode_name.setObjectName("OverviewModeName")
-        self.overview_mode_tag = QLabel()
-        self.overview_mode_tag.setObjectName("ModeTag")
-        mode_title_row.addWidget(self.overview_mode_name)
-        mode_title_row.addWidget(self.overview_mode_tag)
-        mode_title_row.addStretch(1)
-        mode_copy.addLayout(mode_title_row)
-        self.mode_summary_label = _muted_text("")
-        self.mode_summary_label.hide()
-        mode_row.addLayout(mode_copy, 1)
-        mode_layout.addLayout(mode_row)
-        layout.addWidget(mode_card)
+        local = _card("")
+        local_layout = local.layout()
+        status_row = QHBoxLayout()
+        status_row.addWidget(_row_title("本地识别"), 1)
+        self._engine_available = {
+            key: available for key, _name, available in backend_summaries()
+        }
+        self.engine_status_labels: dict[str, QLabel] = {}
+        self.engine_status_dots: dict[str, QLabel] = {}
+        dot = QLabel()
+        dot.setObjectName("EngineDot")
+        dot.setFixedSize(6, 6)
+        status = QLabel()
+        status.setObjectName("EngineStatus")
+        self.engine_status_labels["mathcraft"] = status
+        self.engine_status_dots["mathcraft"] = dot
+        status_row.addWidget(dot)
+        status_row.addWidget(status)
+        local_layout.addLayout(status_row)
+        self.set_engine_status("mathcraft", "waiting")
+        layout.addWidget(local)
 
-        general = _card("应用与引擎")
-        general_layout = general.layout()
-        assert general_layout is not None
-        startup_row = QWidget()
-        startup_row.setObjectName("SettingsRow")
-        startup_layout = QHBoxLayout(startup_row)
-        startup_layout.setContentsMargins(0, 6, 0, 6)
-        startup_copy = QVBoxLayout()
-        startup_copy.setSpacing(0)
-        startup_copy.addWidget(_row_title("启动时显示设置中心"))
-        self.startup_checkbox = ToggleSwitch()
-        self.startup_checkbox.toggled.connect(self._startup_toggle_changed)
-        startup_layout.addLayout(startup_copy, 1)
-        startup_layout.addWidget(self.startup_checkbox)
-        general_layout.addWidget(startup_row)
-        general_layout.addWidget(_divider())
-
-        automatic_row = QHBoxLayout()
-        automatic_row.addWidget(_row_title("自动检查更新"), 1)
-        self.auto_update_toggle = ToggleSwitch()
-        self.auto_update_toggle.setAccessibleName("自动检查更新")
-        self.auto_update_toggle.toggled.connect(self._controls_changed)
-        automatic_row.addWidget(self.auto_update_toggle)
-        general_layout.addLayout(automatic_row)
-
-        update_row = QWidget()
-        update_row.setObjectName("SettingsRow")
-        update_layout = QHBoxLayout(update_row)
-        update_layout.setContentsMargins(0, 6, 0, 6)
-        update_copy = QVBoxLayout()
-        update_copy.setSpacing(3)
-        self.update_version_label = _row_title(
-            f"当前版本 v{application_version()}"
+        startup = _card("启动行为")
+        self.startup_control = SegmentedControl(
+            "启动时", (("orb", "显示悬浮球"), ("settings", "打开设置中心"))
         )
-        update_copy.addWidget(self.update_version_label)
+        startup.layout().addWidget(self.startup_control)
+        # Retain the previous programmatic switch API without a duplicate UI.
+        self.startup_checkbox = ToggleSwitch()
+        self.startup_checkbox.setParent(startup)
+        self.startup_checkbox.hide()
+        self.startup_checkbox.toggled.connect(self._startup_toggle_changed)
+        self.startup_control.value_changed.connect(
+            lambda value: self.startup_checkbox.setChecked(value == "settings")
+        )
+        layout.addWidget(startup)
+
+        orb = _card("悬浮球")
+        orb_layout = orb.layout()
+        size_row = QHBoxLayout()
+        size_row.addWidget(_row_title("大小"), 1)
+        self.orb_size_control = SegmentedControl(
+            "悬浮球大小", (("small", "小"), ("medium", "中"), ("large", "大"))
+        )
+        self.orb_size_control.value_changed.connect(self._controls_changed)
+        size_row.addWidget(self.orb_size_control)
+        orb_layout.addLayout(size_row)
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(_row_title("不透明度"), 1)
+        self.orb_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.orb_opacity_slider.setRange(60, 100)
+        self.orb_opacity_slider.setSingleStep(5)
+        self.orb_opacity_slider.setFixedWidth(200)
+        self.orb_opacity_slider.setAccessibleName("悬浮球不透明度")
+        self.orb_opacity_slider.setToolTip("60% 至 100%，方向键可调整")
+        self.orb_opacity_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.orb_opacity_label = QLabel("100%")
+        self.orb_opacity_label.setFixedWidth(44)
+        self.orb_opacity_slider.valueChanged.connect(self._orb_opacity_changed)
+        opacity_row.addWidget(self.orb_opacity_slider)
+        opacity_row.addWidget(self.orb_opacity_label)
+        orb_layout.addLayout(opacity_row)
+        self.orb_snap_toggle = self._add_toggle(orb_layout, "自动贴边")
+        reset_row = QHBoxLayout()
+        reset_row.addWidget(_muted_text("将悬浮球移回当前屏幕右侧"), 1)
+        self.orb_reset_button = QPushButton("重置位置")
+        self.orb_reset_button.setAccessibleName("重置悬浮球位置")
+        self.orb_reset_button.setToolTip("移回鼠标所在屏幕的右侧中部")
+        self.orb_reset_button.clicked.connect(self.orb_reset_requested.emit)
+        reset_row.addWidget(self.orb_reset_button)
+        orb_layout.addLayout(reset_row)
+        layout.addWidget(orb)
+        layout.addStretch(1)
+        return page
+
+    def _add_toggle(self, layout: QVBoxLayout, title: str) -> ToggleSwitch:
+        row = QHBoxLayout()
+        row.addWidget(_row_title(title), 1)
+        toggle = ToggleSwitch()
+        toggle.setAccessibleName(title)
+        toggle.setToolTip(title)
+        toggle.toggled.connect(self._controls_changed)
+        row.addWidget(toggle)
+        layout.addLayout(row)
+        return toggle
+
+    def _build_output_page(self) -> QWidget:
+        page, layout = self._page_shell()
+        copy = _card("默认复制格式", "两种复制按钮始终可用，所选格式将优先突出显示。")
+        self.copy_format_control = SegmentedControl(
+            "默认复制格式", (("mathml", "Word / MathType"), ("latex", "LaTeX / Markdown"))
+        )
+        self.copy_format_control.value_changed.connect(self._controls_changed)
+        copy.layout().addWidget(self.copy_format_control)
+        layout.addWidget(copy)
+        result = _card("结果窗口")
+        self.close_after_copy_toggle = self._add_toggle(result.layout(), "复制后自动收起")
+        result.layout().addWidget(_divider())
+        result.layout().addWidget(_field_label("显示位置"))
+        self.result_position_control = SegmentedControl(
+            "结果窗口位置", (("near_orb", "悬浮球旁"), ("screen_center", "屏幕中央"))
+        )
+        self.result_position_control.value_changed.connect(self._controls_changed)
+        result.layout().addWidget(self.result_position_control)
+        layout.addWidget(result)
+        layout.addStretch(1)
+        return page
+
+    def _build_about_page(self) -> QWidget:
+        page, layout = self._page_shell()
+        about = _card("FormulaSnip", "截图 · 校对 · 复制")
+        self.update_version_label = _row_title(f"当前版本 v{application_version()}")
+        about.layout().addWidget(self.update_version_label)
+        layout.addWidget(about)
+        update = _card("应用更新")
+        self.auto_update_toggle = self._add_toggle(update.layout(), "自动检查更新")
+        update.layout().addWidget(_divider())
         self.update_status_label = _muted_text("")
+        self.update_status_label.setWordWrap(True)
         self.update_status_label.hide()
-        update_copy.addWidget(self.update_status_label)
+        update.layout().addWidget(self.update_status_label)
+        row = QHBoxLayout()
         self.check_update_button = QPushButton("检查更新")
         self.update_button = self.check_update_button
         self.check_update_button.setObjectName("CompactButton")
-        self.check_update_button.setFixedSize(96, 36)
+        self.check_update_button.setAccessibleName("检查应用更新")
+        self.check_update_button.setToolTip("检查 FormulaSnip 新版本")
         self.check_update_button.clicked.connect(self.update_check_requested.emit)
-        update_layout.addLayout(update_copy, 1)
-        update_layout.addWidget(self.check_update_button)
-        general_layout.addWidget(update_row)
-        general_layout.addWidget(_divider())
-
-        summaries = backend_summaries()
-        self.engine_status_labels: dict[str, QLabel] = {}
-        self.engine_status_dots: dict[str, QLabel] = {}
-        self._engine_available = {key: available for key, _name, available in summaries}
-        for index, (key, name, available) in enumerate(summaries):
-            row = QWidget()
-            row.setObjectName("EngineRow")
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 5, 0, 5)
-            row_layout.setSpacing(12)
-            badge = QLabel("MC")
-            badge.setObjectName("EngineBadge")
-            badge.setFixedSize(30, 30)
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dot = QLabel()
-            dot.setObjectName("EngineDot")
-            dot.setProperty("available", "false")
-            dot.setFixedSize(6, 6)
-            copy = QVBoxLayout()
-            copy.setSpacing(0)
-            copy.addWidget(_row_title(name))
-            if available:
-                detail = "本地模型 · CPU 推理 · 无需 API"
-            else:
-                detail = "安装缺失 · 请重新运行 uv sync"
-            row.setToolTip(detail)
-            status = QLabel("已安装 · 等待初始化" if available else "安装缺失")
-            status.setObjectName("EngineStatus")
-            status.setProperty("available", "false")
-            self.engine_status_labels[key] = status
-            self.engine_status_dots[key] = dot
-            row_layout.addWidget(badge)
-            row_layout.addLayout(copy, 1)
-            status_row = QHBoxLayout()
-            status_row.setContentsMargins(0, 0, 0, 0)
-            status_row.setSpacing(6)
-            status_row.addWidget(dot)
-            status_row.addWidget(status)
-            row_layout.addLayout(status_row)
-            general_layout.addWidget(row)
-            if index < len(summaries) - 1:
-                general_layout.addWidget(_divider())
-        layout.addWidget(general)
+        row.addWidget(self.check_update_button)
+        row.addStretch(1)
+        update.layout().addLayout(row)
+        layout.addWidget(update)
+        privacy = _muted_text("默认在本地识别；仅启用 AI 增强后发送框选图像。")
+        privacy.setWordWrap(True)
+        layout.addWidget(privacy)
         layout.addStretch(1)
         return page
+
+    @Slot(int)
+    def _orb_opacity_changed(self, value: int) -> None:
+        self.orb_opacity_label.setText(f"{value}%")
+        self._controls_changed()
 
     def set_engine_status(self, key: str, state: str) -> None:
         """Update one engine's compact initialization status."""
@@ -1725,11 +1936,11 @@ class SettingsPanel(QWidget):
             ready = False
         else:
             messages = {
-                "waiting": "已安装 · 等待初始化",
-                "started": "正在初始化",
-                "warming": "正在初始化",
-                "succeeded": "已初始化",
-                "ready": "已初始化",
+                "waiting": "初始化中",
+                "started": "初始化中",
+                "warming": "初始化中",
+                "succeeded": "已就绪",
+                "ready": "已就绪",
                 "failed": "初始化失败（识别时可重试）",
             }
             message = messages.get(state, state)
@@ -1744,54 +1955,35 @@ class SettingsPanel(QWidget):
 
     def _build_recognition_page(self) -> QWidget:
         page, layout = self._page_shell()
-        self.mode_combo = QComboBox()
-        self.mode_combo.setVisible(False)
-        mathcraft_available = _backend_is_available("mathcraft")
-        mathcraft_label = "MathCraft OCR（CPU）"
-        if not mathcraft_available:
-            mathcraft_label += "（未安装）"
-        self.mode_combo.addItem(mathcraft_label, "mathcraft")
-        if not mathcraft_available:
-            mathcraft_item = self.mode_combo.model().item(self.mode_combo.count() - 1)
-            if mathcraft_item is not None:
-                mathcraft_item.setEnabled(False)
-        self.mode_combo.currentIndexChanged.connect(self._mode_combo_changed)
-        layout.addWidget(self.mode_combo)
-
-        modes = (
-            (
-                "mathcraft",
-                "MathCraft OCR",
-                "CPU" if mathcraft_available else "安装缺失",
-                "本地单引擎公式识别；无需 API。"
-                if mathcraft_available
-                else "MathCraft 本地识别引擎未安装。",
-            ),
-        )
-        self.mode_card_group = QButtonGroup(self)
-        self.mode_card_group.setExclusive(True)
-        self.mode_cards: dict[str, ModeCard] = {}
-        for key, title, tag, description in modes:
-            mode_card = ModeCard(key, title, tag, description)
-            mode_card.setEnabled(key != "mathcraft" or mathcraft_available)
-            mode_card.selected.connect(self._select_recognition_mode)
-            self.mode_card_group.addButton(mode_card)
-            self.mode_cards[key] = mode_card
-            layout.addWidget(mode_card)
-
         ai_card = _card("")
         ai_layout = ai_card.layout()
         assert ai_layout is not None
         ai_header = QHBoxLayout()
-        ai_title = _row_title("AI 辅助识别")
-        ai_title.setToolTip("与 MathCraft 并行识别，结果不一致时可切换对照")
+        ai_title = _row_title("AI 增强")
+        ai_title.setToolTip("与本地识别并行，结果不一致时可切换对照")
         ai_title.setAccessibleDescription(ai_title.toolTip())
+        self.ai_status_badge = QLabel("未配置")
+        self.ai_status_badge.setObjectName("StatusBadge")
         self.ai_correction_toggle = ToggleSwitch()
-        self.ai_correction_toggle.setAccessibleName("启用 AI 智能并行")
+        self.ai_correction_toggle.setAccessibleName("启用 AI 增强")
+        self.ai_correction_toggle.setToolTip("启用后会向已配置的服务发送框选图像")
         self.ai_correction_toggle.toggled.connect(self._ai_toggle_changed)
         ai_header.addWidget(ai_title, 1)
+        ai_header.addWidget(self.ai_status_badge)
         ai_header.addWidget(self.ai_correction_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         ai_layout.addLayout(ai_header)
+        self.ai_summary_label = _muted_text("配置后可使用 AI 增强，当前仅在本地识别。")
+        self.ai_summary_label.setWordWrap(True)
+        ai_layout.addWidget(self.ai_summary_label)
+        self.ai_configure_button = QPushButton("配置")
+        self.ai_configure_button.setCheckable(True)
+        self.ai_configure_button.setAccessibleName("展开或收起 AI 配置")
+        self.ai_configure_button.setToolTip("配置服务地址、API Key 和模型")
+        self.ai_configure_button.clicked.connect(self._toggle_ai_configuration)
+        configure_row = QHBoxLayout()
+        configure_row.addWidget(self.ai_configure_button)
+        configure_row.addStretch(1)
+        ai_layout.addLayout(configure_row)
 
         self.ai_configuration_widget = QWidget()
         self.ai_configuration_widget.setObjectName("AiConfiguration")
@@ -1805,6 +1997,11 @@ class SettingsPanel(QWidget):
         self.ai_base_url_input.setObjectName("AiTextInput")
         self.ai_base_url_input.setPlaceholderText("输入 OpenAI 兼容 API 地址")
         self.ai_base_url_input.setClearButtonEnabled(True)
+        self.ai_base_url_input.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        self.ai_base_url_input.setAccessibleName("兼容 API 地址")
+        self.ai_base_url_input.setToolTip("输入受信任的 OpenAI 兼容服务地址")
         self.ai_base_url_input.textChanged.connect(self._ai_base_url_changed)
         ai_configuration_layout.addWidget(self.ai_base_url_input)
 
@@ -1819,6 +2016,11 @@ class SettingsPanel(QWidget):
             else "输入兼容服务 API Key"
         )
         self.ai_api_key_input.setClearButtonEnabled(True)
+        self.ai_api_key_input.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        self.ai_api_key_input.setAccessibleName("API Key")
+        self.ai_api_key_input.setToolTip("仅保存在 Windows 凭据管理器")
         self.ai_api_key_input.textChanged.connect(
             lambda _text: self._update_ai_action_state()
         )
@@ -1842,9 +2044,14 @@ class SettingsPanel(QWidget):
 
         ai_configuration_layout.addWidget(_field_label("模型"))
         model_row = QHBoxLayout()
-        self.ai_model_combo = QComboBox()
+        self.ai_model_combo = ModernComboBox()
         self.ai_model_combo.setObjectName("AiModelCombo")
+        self.ai_model_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
         self.ai_model_combo.setPlaceholderText("获取后选择模型")
+        self.ai_model_combo.setAccessibleName("AI 模型")
+        self.ai_model_combo.setToolTip("先获取服务端模型，再从列表中选择")
         self.ai_model_combo.currentTextChanged.connect(self._ai_draft_changed)
         self.ai_refresh_models_button = QPushButton("获取模型")
         self.ai_refresh_models_button.setFixedHeight(36)
@@ -1876,7 +2083,7 @@ class SettingsPanel(QWidget):
         ai_configuration_layout.addWidget(self.ai_privacy_label)
         save_row = QHBoxLayout()
         save_row.addStretch(1)
-        self.ai_save_config_button = QPushButton("保存配置")
+        self.ai_save_config_button = QPushButton("保存并启用")
         self.ai_save_config_button.setObjectName("SettingsPrimary")
         self.ai_save_config_button.setFixedHeight(38)
         self.ai_save_config_button.setMinimumWidth(112)
@@ -1884,6 +2091,15 @@ class SettingsPanel(QWidget):
         self.ai_save_config_button.clicked.connect(self._save_ai_configuration)
         save_row.addWidget(self.ai_save_config_button)
         ai_configuration_layout.addLayout(save_row)
+        for button in (
+            self.ai_save_key_button, self.ai_delete_key_button,
+            self.ai_refresh_models_button, self.ai_test_connection_button,
+            self.ai_save_config_button,
+        ):
+            button.setAccessibleName(button.text())
+            if not button.toolTip():
+                button.setToolTip(button.text())
+            button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         ai_layout.addWidget(self.ai_configuration_widget)
         layout.addWidget(ai_card)
 
@@ -1925,7 +2141,7 @@ class SettingsPanel(QWidget):
             button = QPushButton()
             button.setObjectName("ThemeSwatchButton")
             button.setCheckable(True)
-            button.setFixedSize(34, 34)
+            button.setFixedSize(32, 32)
             button.setProperty("accentTheme", name)
             button.setToolTip(THEME_ACCENT_LABELS[name])
             button.setAccessibleName(f"界面主题色：{THEME_ACCENT_LABELS[name]}")
@@ -1946,7 +2162,7 @@ class SettingsPanel(QWidget):
             button = QPushButton()
             button.setObjectName("SwatchButton")
             button.setCheckable(True)
-            button.setFixedSize(34, 34)
+            button.setFixedSize(32, 32)
             button.setProperty("ringColor", color)
             button.setToolTip(color)
             button.setAccessibleName(f"圆环颜色：{RING_PRESET_LABELS[name]}（{color}）")
@@ -1956,7 +2172,7 @@ class SettingsPanel(QWidget):
             swatches.addWidget(button)
         self.custom_color_button = QPushButton("+")
         self.custom_color_button.setObjectName("CustomColorButton")
-        self.custom_color_button.setFixedSize(34, 34)
+        self.custom_color_button.setFixedSize(32, 32)
         self.custom_color_button.setToolTip("从系统颜色盘选择")
         self.custom_color_button.setAccessibleName("从系统颜色盘选择圆环颜色")
         self.custom_color_button.clicked.connect(self.choose_ring_color)
@@ -1985,6 +2201,11 @@ class SettingsPanel(QWidget):
         controls_layout.addWidget(self.logo_status_label)
         row.addWidget(controls, 6)
         layout.addLayout(row)
+        self.restore_appearance_button = QPushButton("恢复默认外观")
+        self.restore_appearance_button.setAccessibleName("恢复默认外观")
+        self.restore_appearance_button.setToolTip("恢复主题色、圆环和 Logo，保留当前明暗主题")
+        self.restore_appearance_button.clicked.connect(self.restore_default_appearance)
+        layout.addWidget(self.restore_appearance_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
         self.theme_color_group.buttonClicked.connect(self._accent_theme_selected)
         self.color_group.buttonClicked.connect(self._preset_color_selected)
@@ -1999,6 +2220,9 @@ class SettingsPanel(QWidget):
             step_button = QPushButton(f"{step_index + 1:02d}  {step_data[0]}")
             step_button.setObjectName("TutorialStepButton")
             step_button.setFixedHeight(38)
+            step_button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
             step_button.setToolTip(step_data[3])
             step_button.setAccessibleDescription(f"{step_data[2]} {step_data[3]}")
             step_button.clicked.connect(
@@ -2011,6 +2235,9 @@ class SettingsPanel(QWidget):
         self.tutorial_stack = QStackedWidget()
         self.tutorial_stack.setObjectName("TutorialStack")
         self.tutorial_stack.setMinimumHeight(300)
+        self.tutorial_stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         self.tutorial_counters: list[QLabel] = []
         self.tutorial_illustrations: list[TutorialStepIllustration] = []
         for step_index, (_label, heading, body, tip) in enumerate(
@@ -2018,7 +2245,8 @@ class SettingsPanel(QWidget):
         ):
             step = QWidget()
             step_layout = QHBoxLayout(step)
-            step_layout.setContentsMargins(28, 22, 28, 22)
+            step_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+            step_layout.setContentsMargins(20, 22, 20, 22)
             step_layout.setSpacing(24)
             copy = QVBoxLayout()
             copy.setSpacing(0)
@@ -2027,9 +2255,16 @@ class SettingsPanel(QWidget):
             self.tutorial_counters.append(counter)
             heading_label = QLabel(heading)
             heading_label.setObjectName("TutorialHeading")
+            heading_label.setWordWrap(True)
+            heading_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
             body_label = QLabel(body)
             body_label.setObjectName("TutorialBody")
             body_label.setWordWrap(True)
+            body_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
             step.setToolTip(tip)
             step.setAccessibleDescription(f"{body} {tip}")
             heading_label.setToolTip(tip)
@@ -2040,6 +2275,9 @@ class SettingsPanel(QWidget):
             copy.addWidget(body_label)
             copy.addStretch(1)
             illustration = TutorialStepIllustration(step_index)
+            illustration.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+            )
             illustration.setToolTip(tip)
             self.tutorial_illustrations.append(illustration)
             step_layout.addLayout(copy, 3)
@@ -2072,9 +2310,6 @@ class SettingsPanel(QWidget):
         return page
 
     def _load_controls(self, preferences: FloatingPreferences) -> None:
-        mode_index = self.mode_combo.findData(preferences.recognition_mode)
-        self.mode_combo.setCurrentIndex(max(0, mode_index))
-        self._sync_mode_cards()
         self.ai_correction_toggle.setChecked(
             preferences.ai_correction_enabled and self._ai_key_present
         )
@@ -2088,10 +2323,14 @@ class SettingsPanel(QWidget):
             self.ai_model_combo.setCurrentIndex(0)
         else:
             self.ai_model_combo.setCurrentIndex(-1)
-        self.ai_configuration_widget.setVisible(
-            self.ai_correction_toggle.isChecked()
-        )
+        self.ai_configuration_widget.hide()
         self._update_ai_action_state()
+        self.copy_format_control.set_value(preferences.default_copy_format)
+        self.result_position_control.set_value(preferences.result_panel_position)
+        self.orb_size_control.set_value(preferences.orb_size)
+        self.orb_opacity_slider.setValue(preferences.orb_opacity)
+        self.close_after_copy_toggle.setChecked(preferences.close_after_copy)
+        self.orb_snap_toggle.setChecked(preferences.orb_snap_to_edge)
         self.startup_checkbox.setChecked(preferences.show_settings_on_startup)
         self.auto_update_toggle.setChecked(preferences.auto_check_updates)
         self.startup_checkbox.set_position(
@@ -2100,6 +2339,8 @@ class SettingsPanel(QWidget):
         self.auto_update_toggle.set_position(
             1.0 if preferences.auto_check_updates else 0.0
         )
+        for toggle in (self.close_after_copy_toggle, self.orb_snap_toggle):
+            toggle.set_position(1.0 if toggle.isChecked() else 0.0)
         self._startup_toggle_changed(self.startup_checkbox.isChecked())
         self._ring_color = preferences.effective_ring_color
         selected = _preset_name(self._ring_color)
@@ -2114,10 +2355,13 @@ class SettingsPanel(QWidget):
     def _select_page(self, index: int) -> None:
         bounded = min(max(index, 0), self.pages.count() - 1)
         self.pages.setCurrentIndex(bounded)
-        button, title = self._nav_entries[bounded]
-        button.setChecked(True)
-        for nav_button, _nav_title in self._nav_entries:
-            selected = nav_button is button
+        page = self.pages.currentWidget()
+        self.nav_group.setExclusive(False)
+        for nav_page, (nav_button, _nav_title) in zip(
+            self._navigation_pages, self._nav_entries, strict=True
+        ):
+            selected = nav_page is page
+            nav_button.setChecked(selected)
             nav_button.marker.setProperty(
                 "selected", "true" if selected else "false"
             )
@@ -2129,39 +2373,16 @@ class SettingsPanel(QWidget):
                     self._navigation_icon_color(selected=selected),
                 )
             )
-        self.page_title.setText(title)
+        self.nav_group.setExclusive(True)
+        self.page_title.setText(
+            next((title for nav_page, (_button, title) in zip(
+                self._navigation_pages, self._nav_entries, strict=True
+            ) if nav_page is page), "使用方法")
+        )
 
     @Slot()
     def _open_github_repository(self) -> None:
         QDesktopServices.openUrl(QUrl("https://github.com/loLollipop/FormulaSnip"))
-
-    @Slot(str)
-    def _select_recognition_mode(self, mode: str) -> None:
-        index = self.mode_combo.findData(mode)
-        item = self.mode_combo.model().item(index) if index >= 0 else None
-        if index < 0 or (item is not None and not item.isEnabled()):
-            self._sync_mode_cards()
-            return
-        self.mode_combo.setCurrentIndex(index)
-
-    @Slot()
-    def _mode_combo_changed(self) -> None:
-        self._sync_mode_cards()
-        self._controls_changed()
-
-    def _sync_mode_cards(self) -> None:
-        selected = str(self.mode_combo.currentData())
-        for key, card in self.mode_cards.items():
-            card.setChecked(key == selected)
-        summary = (
-            "MathCraft OCR",
-            "CPU" if self._engine_available.get("mathcraft", False) else "安装缺失",
-            "本地单引擎公式识别",
-        )
-        name, tag, meta = summary
-        self.overview_mode_name.setText(name)
-        self.overview_mode_tag.setText(tag)
-        self.mode_summary_label.setText(meta)
 
     @Slot()
     def _controls_changed(self) -> None:
@@ -2175,6 +2396,12 @@ class SettingsPanel(QWidget):
             ring_color=self._ring_color,
             logo_path=self._logo_path,
             auto_check_updates=self.auto_update_toggle.isChecked(),
+            default_copy_format=self.copy_format_control.value(),
+            close_after_copy=self.close_after_copy_toggle.isChecked(),
+            result_panel_position=self.result_position_control.value(),
+            orb_size=self.orb_size_control.value(),
+            orb_opacity=self.orb_opacity_slider.value(),
+            orb_snap_to_edge=self.orb_snap_toggle.isChecked(),
         )
         self._save_preferences()
 
@@ -2197,6 +2424,7 @@ class SettingsPanel(QWidget):
             self._preferences = session_preferences
             ai_blocker = QSignalBlocker(self.ai_correction_toggle)
             self.ai_correction_toggle.setChecked(False)
+            self.ai_correction_toggle.set_position(0.0)
             del ai_blocker
             self.ai_configuration_widget.hide()
             self.ai_correction_toggle.setAccessibleDescription("已关闭")
@@ -2213,6 +2441,7 @@ class SettingsPanel(QWidget):
                 self._settings.setValue("recognition/ai_correction_enabled", False)
                 self._settings.sync()
             self.session_preferences_changed.emit(session_preferences)
+            self._update_ai_action_state()
             return False
         self._save_failed = False
         self._settings_format_error = False
@@ -2221,6 +2450,7 @@ class SettingsPanel(QWidget):
         if self._settings is not previous_settings:
             self.settings_backend_changed.emit(self._settings)
         self.preferences_changed.emit(self._preferences)
+        self._update_ai_action_state()
         return True
 
     def _set_settings_error(self, message: str) -> None:
@@ -2237,22 +2467,100 @@ class SettingsPanel(QWidget):
 
     @Slot(bool)
     def _ai_toggle_changed(self, checked: bool) -> None:
-        self.ai_configuration_widget.setVisible(checked)
-        self.ai_correction_toggle.setAccessibleDescription(
-            "已开启" if checked else "已关闭"
-        )
+        if self._building:
+            return
+        if checked and not self._saved_ai_is_configured():
+            self._update_ai_action_state()
+            return
         if not checked:
             self.cancel_ai_request()
-            if self._preferences.ai_correction_enabled:
-                self._preferences = replace(
-                    self._preferences, ai_correction_enabled=False
-                )
-                if not self._save_preferences():
-                    return
-            self._set_ai_connection_status("AI 辅助已关闭")
-        else:
-            self._update_ai_draft_status()
+        if checked != self._preferences.ai_correction_enabled:
+            self._preferences = replace(self._preferences, ai_correction_enabled=checked)
+            if not self._save_preferences():
+                return
+        self._set_ai_connection_status(
+            "配置已保存并生效" if checked else "已关闭，不会上传图片"
+        )
         self._update_ai_action_state()
+
+    @Slot(bool)
+    def _toggle_ai_configuration(self, expanded: bool) -> None:
+        self.ai_configuration_widget.setVisible(expanded)
+        if not expanded:
+            self.cancel_ai_request()
+        self._update_ai_action_state()
+        if expanded:
+            self._update_ai_draft_status()
+            self.ai_base_url_input.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _saved_ai_is_configured(self) -> bool:
+        try:
+            base_url = validate_ai_base_url(self._preferences.ai_base_url)
+            validate_ai_model_id(self._preferences.ai_model)
+            present = self._api_key_store.has_key_for_base_url(base_url)
+        except AICorrectionError:
+            return False
+        except CredentialError as exc:
+            self._disable_ai_for_credential_error(exc)
+            return False
+        try:
+            draft_base_url = validate_ai_base_url(self.ai_base_url_input.text())
+        except AICorrectionError:
+            draft_base_url = ""
+        if draft_base_url == base_url:
+            state_changed = (
+                self._ai_key_present != present or bool(self._credential_error)
+            )
+            self._ai_key_present = present
+            self._credential_error = ""
+            if state_changed:
+                self._update_ai_key_status()
+        return present
+
+    def _disable_ai_for_credential_error(self, exc: CredentialError) -> None:
+        """Make a credential failure match the UI's no-upload promise."""
+
+        self._ai_key_present = False
+        self._credential_error = str(exc)
+        if not self._preferences.ai_correction_enabled:
+            return
+        self.cancel_ai_request()
+        self._preferences = replace(self._preferences, ai_correction_enabled=False)
+        if self._building:
+            with suppress(PreferencesSaveError):
+                self._settings = self._preferences.save(self._settings)
+                self._persisted_preferences = self._preferences
+        else:
+            self._save_preferences()
+        self.ai_credential_changed.emit()
+
+    def _update_ai_summary(self, configured: bool | None = None) -> None:
+        if configured is None:
+            configured = self._saved_ai_is_configured()
+        active = configured and self._preferences.ai_correction_enabled
+        checked_changed = self.ai_correction_toggle.isChecked() != active
+        blocker = QSignalBlocker(self.ai_correction_toggle)
+        self.ai_correction_toggle.setChecked(active)
+        del blocker
+        if checked_changed:
+            self.ai_correction_toggle.set_position(1.0 if active else 0.0)
+        self.ai_correction_toggle.setVisible(configured)
+        self.ai_correction_toggle.setEnabled(configured and not self._save_failed)
+        self.ai_correction_toggle.setAccessibleDescription("已启用" if active else "已关闭")
+        self.ai_status_badge.setText("已启用" if active else "已关闭" if configured else "未配置")
+        self.ai_status_badge.setProperty("active", active)
+        self.ai_status_badge.style().unpolish(self.ai_status_badge)
+        self.ai_status_badge.style().polish(self.ai_status_badge)
+        self.ai_summary_label.setText(
+            "已启用，将向所配服务发送框选图像。" if active
+            else "已关闭，不会上传图片" if self._preferences.ai_base_url
+            else "配置后可使用 AI 增强，当前仅在本地识别。"
+        )
+        expanded = not self.ai_configuration_widget.isHidden()
+        self.ai_configure_button.setChecked(expanded)
+        self.ai_configure_button.setText(
+            "收起配置" if expanded else "编辑配置" if self._preferences.ai_base_url else "配置"
+        )
 
     @Slot(str)
     def _ai_base_url_changed(self, _text: str) -> None:
@@ -2302,16 +2610,14 @@ class SettingsPanel(QWidget):
 
     def _ai_draft_is_dirty(self) -> bool:
         return (
-            self.ai_correction_toggle.isChecked()
-            != self._preferences.ai_correction_enabled
-            or self.ai_base_url_input.text().strip()
+            self.ai_base_url_input.text().strip()
             != self._preferences.ai_base_url
             or self.ai_model_combo.currentText().strip()
             != self._preferences.ai_model
         )
 
     def _update_ai_draft_status(self) -> None:
-        if self._building or not self.ai_correction_toggle.isChecked():
+        if self._building or self.ai_configuration_widget.isHidden():
             return
         if self._save_failed:
             self._set_ai_connection_status(SETTINGS_ERROR_MESSAGE, error=True)
@@ -2329,10 +2635,14 @@ class SettingsPanel(QWidget):
         elif self._ai_draft_is_dirty():
             self._set_ai_connection_status("配置已更改，请保存后生效")
         else:
-            self._set_ai_connection_status("配置已保存并生效")
+            self._set_ai_connection_status(
+                "配置已保存并生效" if self._preferences.ai_correction_enabled
+                else "已关闭，不会上传图片"
+            )
 
     def _update_ai_action_state(self) -> None:
-        visible = self.ai_correction_toggle.isChecked()
+        configured = self._saved_ai_is_configured()
+        visible = not self.ai_configuration_widget.isHidden()
         idle = self._ai_model_worker is None
         try:
             validate_ai_base_url(self.ai_base_url_input.text())
@@ -2364,17 +2674,15 @@ class SettingsPanel(QWidget):
             and base_url_valid
             and model_valid
         )
-        has_complete_draft = bool(
-            self.ai_base_url_input.text().strip()
-            and self.ai_model_combo.currentText().strip()
-        )
         self.ai_save_config_button.setEnabled(
             visible
             and idle
             and self._ai_key_present
-            and has_complete_draft
-            and self._ai_draft_is_dirty()
+            and base_url_valid
+            and model_valid
+            and (self._ai_draft_is_dirty() or not self._preferences.ai_correction_enabled)
         )
+        self._update_ai_summary(configured)
 
     @Slot()
     def _ai_request_configuration_changed(self) -> None:
@@ -2389,6 +2697,7 @@ class SettingsPanel(QWidget):
 
     @Slot(bool)
     def _startup_toggle_changed(self, checked: bool) -> None:
+        self.startup_control.set_value("settings" if checked else "orb")
         self.startup_checkbox.setAccessibleDescription(
             "已开启" if checked else "已关闭"
         )
@@ -2410,7 +2719,7 @@ class SettingsPanel(QWidget):
                 ai_base_url
             )
         except CredentialError as exc:
-            self._credential_error = str(exc)
+            self._disable_ai_for_credential_error(exc)
             self._set_ai_connection_status(str(exc), error=True)
             self._update_ai_key_status()
             self._update_ai_action_state()
@@ -2452,8 +2761,9 @@ class SettingsPanel(QWidget):
         try:
             self._api_key_store.save(self.ai_api_key_input.text(), base_url)
         except CredentialError as exc:
-            self._credential_error = str(exc)
+            self._disable_ai_for_credential_error(exc)
             self._update_ai_key_status()
+            self._update_ai_action_state()
             return
         self._disable_active_ai_for_changed_provider()
         self.cancel_ai_request()
@@ -2472,14 +2782,18 @@ class SettingsPanel(QWidget):
         try:
             self._api_key_store.delete()
         except CredentialError as exc:
-            self._credential_error = str(exc)
+            self._disable_ai_for_credential_error(exc)
             self._update_ai_key_status()
+            self._update_ai_action_state()
             return
         self.cancel_ai_request()
         self._ai_credential_generation += 1
         self._credential_error = ""
         self._ai_key_present = False
         self.ai_correction_toggle.setChecked(False)
+        if self._preferences.ai_correction_enabled:
+            self._preferences = replace(self._preferences, ai_correction_enabled=False)
+            self._save_preferences()
         self.ai_api_key_input.clear()
         self.ai_api_key_input.setPlaceholderText("输入兼容服务 API Key")
         self._set_ai_connection_status("填写地址并保存 Key")
@@ -2513,7 +2827,10 @@ class SettingsPanel(QWidget):
         try:
             api_key = self._api_key_store.load_for_base_url(base_url)
         except CredentialError as exc:
+            self._disable_ai_for_credential_error(exc)
             self._set_ai_connection_status(str(exc), error=True)
+            self._update_ai_key_status()
+            self._update_ai_action_state()
             return
         if api_key is None:
             self._ai_key_present = False
@@ -2651,13 +2968,14 @@ class SettingsPanel(QWidget):
             base_url = validate_ai_base_url(self.ai_base_url_input.text())
         except AICorrectionError:
             self._ai_key_present = False
+            self._credential_error = ""
+            self._update_ai_key_status()
             return
         try:
             self._ai_key_present = self._api_key_store.has_key_for_base_url(base_url)
             self._credential_error = ""
         except CredentialError as exc:
-            self._ai_key_present = False
-            self._credential_error = str(exc)
+            self._disable_ai_for_credential_error(exc)
         self._update_ai_key_status()
 
     @Slot()
@@ -2699,6 +3017,8 @@ class SettingsPanel(QWidget):
             )
         )
         self.theme_toggle_button.setIconSize(QSize(17, 17))
+        self.help_button.setIcon(line_icon("help", self._navigation_icon_color(selected=False)))
+        self.help_button.setIconSize(QSize(19, 19))
         self._update_navigation_icons()
 
     def _update_brand_logo(self) -> None:
@@ -2803,6 +3123,18 @@ class SettingsPanel(QWidget):
         self._update_appearance_preview()
         self._controls_changed()
 
+    @Slot()
+    def restore_default_appearance(self) -> None:
+        self._ring_color = DEFAULT_RING_COLOR
+        self._logo_path = ""
+        self._preferences = replace(self._preferences, accent_theme=DEFAULT_ACCENT_THEME)
+        self.theme_color_buttons[DEFAULT_ACCENT_THEME].setChecked(True)
+        self.color_buttons["blue"].setChecked(True)
+        apply_application_theme(self._preferences.result_theme, DEFAULT_ACCENT_THEME)
+        self._update_theme_button()
+        self._update_appearance_preview()
+        self._controls_changed()
+
     def _update_appearance_preview(self) -> None:
         self.orb_preview.set_appearance(self._ring_color, self._logo_path)
         self.ring_hex_label.setText(self._ring_color)
@@ -2816,7 +3148,7 @@ class SettingsPanel(QWidget):
     @Slot()
     def show_tutorial(self) -> None:
         self.tutorial_stack.setCurrentIndex(0)
-        self._select_page(3)
+        self._select_page(self.pages.indexOf(self.tutorial_page))
         self._update_tutorial_controls()
 
     @Slot()
@@ -2840,10 +3172,30 @@ class SettingsPanel(QWidget):
         self._select_page(0)
 
     def show_appearance_page(self) -> None:
-        self._select_page(2)
+        self._select_page(self.pages.indexOf(self.appearance_page))
 
     def show_recognition_page(self) -> None:
-        self._select_page(1)
+        self._select_page(self.pages.indexOf(self.recognition_page))
+
+    def show_about_page(self) -> None:
+        self._select_page(self.pages.indexOf(self.about_page))
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        screen = (
+            QApplication.screenAt(self.frameGeometry().center())
+            or QApplication.primaryScreen()
+        )
+        if screen is not None:
+            area = screen.availableGeometry()
+            self.resize(
+                min(self.width(), max(self.minimumWidth(), area.width() - 24)),
+                min(self.height(), max(self.minimumHeight(), area.height() - 24)),
+            )
+            self.move(
+                min(max(self.x(), area.left()), area.right() - self.width() + 1),
+                min(max(self.y(), area.top()), area.bottom() - self.height() + 1),
+            )
+        super().showEvent(event)
 
     def set_update_status(self, message: str, *, checking: bool = False) -> None:
         self.update_status_label.setText(message)

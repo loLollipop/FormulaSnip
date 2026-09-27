@@ -93,7 +93,7 @@ FormulaSnip renders an offline MathJax preview instead of showing a magnified sc
 | Microsoft Word or MathType | **MathML** — paste into a formula-editing area |
 | LaTeX editor or Markdown | **LaTeX** — paste into the appropriate math environment |
 
-After a successful copy, the result panel closes automatically so you can return directly to your document.
+By default, the result panel closes after a successful copy. This behavior and the preferred output format can be changed under **Settings → Output**.
 
 > [!TIP]
 > Formula OCR is not infallible. Always compare complex fractions, matrices, integrals, partial derivatives, and tightly spaced subscripts with the source before pasting.
@@ -102,7 +102,7 @@ After a successful copy, the result panel closes automatically so you can return
 
 ## Optional AI Assistance
 
-AI assistance is disabled by default. Open **Settings → Recognition**, enable **AI Assistance**, enter an OpenAI-compatible API URL and API key, retrieve and select a model, test the connection, and save the configuration.
+AI assistance is disabled by default. Open **Settings → AI Enhancement → Configure**, enter an OpenAI-compatible API URL and API key, retrieve and select a model, test the connection, then choose **Save and Enable**.
 
 - FormulaSnip retrieves the provider's available models and lets you test the connection.
 - Local MathCraft OCR and the remote vision model run independently in parallel.

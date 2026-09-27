@@ -39,12 +39,14 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QApplication,
     QButtonGroup,
     QHBoxLayout,
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QSystemTrayIcon,
     QVBoxLayout,
@@ -67,12 +69,16 @@ from formulasnip.ui.branding import application_icon, application_version
 from formulasnip.ui.image_conversion import qimage_to_pil
 from formulasnip.ui.latex_editor import LatexEditor
 from formulasnip.ui.settings import (
+    COPY_FORMATS,
     DEFAULT_RING_COLOR,
+    ORB_SIZES,
+    RESULT_POSITIONS,
     RING_PRESETS,
     FloatingPreferences,
     PreferencesSaveError,
     SettingsPanel,
     normalize_hex_color,
+    normalize_orb_opacity,
     read_logo_image,
     read_settings_value,
     write_settings_values,
@@ -124,6 +130,9 @@ class FloatingOrb(QWidget):
         self._logo = QImage()
         self._logo_path = ""
         self._positioned = False
+        self._reset_pending = False
+        self._size_preset = "medium"
+        self._snap_enabled = True
         self.setObjectName("FloatingOrb")
         self.setWindowTitle("FormulaSnip")
         self.setWindowFlags(
@@ -163,9 +172,9 @@ class FloatingOrb(QWidget):
             "border: 1px solid rgba(124, 108, 247, 120);"
             "border-radius: 8px;"
             "padding: 6px 10px;"
-            'font-family: "Microsoft YaHei UI", "Segoe UI";'
+            'font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI";'
             "font-size: 12px;"
-            "font-weight: 500;"
+            "font-weight: 400;"
             "}"
         )
         self._busy_label.hide()
@@ -190,13 +199,44 @@ class FloatingOrb(QWidget):
         ]
 
     def show_at_default_position(self) -> None:
+        if not self._positioned:
+            self._move_to_default_position()
+        else:
+            self.move(self._clamped_position(self.pos()))
+        self.show()
+        self.raise_()
+
+    def _move_to_default_position(self) -> None:
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
-        if screen is not None and not self._positioned:
+        if screen is not None:
             area = screen.availableGeometry()
             self.move(area.right() - self.width() - 20, area.center().y() - self.height() // 2)
             self._positioned = True
-        self.show()
-        self.raise_()
+            self._reset_pending = False
+
+    def set_size_preset(self, preset: str) -> None:
+        self._size_preset = preset if preset in ORB_SIZES else "medium"
+        center = self.geometry().center()
+        size = ORB_SIZES[self._size_preset]
+        self.setFixedSize(size, size)
+        self.set_logo_path(self._logo_path)
+        if self._positioned:
+            self.move(self._clamped_position(center - self.rect().center()))
+        self._sync_busy_indicator()
+        self.update()
+
+    def set_opacity_percent(self, percent: int) -> None:
+        self.setWindowOpacity(normalize_orb_opacity(percent) / 100)
+
+    def set_snap_to_edge(self, enabled: bool) -> None:
+        self._snap_enabled = enabled
+
+    @Slot()
+    def reset_position(self) -> None:
+        self._positioned = False
+        self._reset_pending = True
+        if self.isVisible():
+            self._move_to_default_position()
 
     def set_color(self, color: str) -> None:
         if color in ORB_PALETTES:
@@ -227,7 +267,7 @@ class FloatingOrb(QWidget):
         return self._logo_path
 
     def set_logo_path(self, path: str) -> None:
-        image = read_logo_image(path, 34)
+        image = read_logo_image(path, round(self.width() / 2))
         self._logo = image if image is not None else QImage()
         self._logo_path = path if image is not None else ""
         self.update()
@@ -316,7 +356,8 @@ class FloatingOrb(QWidget):
     def paintEvent(self, _event: object) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        circle = self.rect().adjusted(4, 4, -4, -4)
+        painter.scale(self.width() / 68, self.height() / 68)
+        circle = QRect(4, 4, 60, 60)
         ring_color = QColor(self._ring_color)
         if self._busy:
             base_ring = QColor(ring_color)
@@ -351,14 +392,14 @@ class FloatingOrb(QWidget):
         if (self._has_result or self._initializing) and not self._busy:
             painter.setPen(QPen(QColor("#0f172a"), 2))
             painter.setBrush(QColor("#34d399" if self._has_result else "#f59e0b"))
-            painter.drawEllipse(self.width() - 18, 7, 11, 11)
+            painter.drawEllipse(50, 7, 11, 11)
 
         if self.hasFocus():
             focus_pen = QPen(QColor("#c9c2ff"), 2)
             focus_pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(focus_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(self.rect().adjusted(1, 1, -2, -2))
+            painter.drawEllipse(QRect(1, 1, 65, 65))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
@@ -385,7 +426,11 @@ class FloatingOrb(QWidget):
         self._press_global = None
         self._dragged = False
         if was_dragged:
-            self._snap_to_edge()
+            if self._snap_enabled:
+                self._snap_to_edge()
+            else:
+                self.move(self._clamped_position(self.pos()))
+            self._positioned = True
         elif not self._busy:
             self.capture_requested.emit()
 
@@ -396,6 +441,8 @@ class FloatingOrb(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
+        if self._reset_pending:
+            self._move_to_default_position()
         self._sync_busy_indicator()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
@@ -475,7 +522,10 @@ class FloatingResultPanel(QWidget):
     draft_changed = Signal(str)
     source_changed = Signal(str)
 
-    def __init__(self, theme: str = "dark") -> None:
+    def __init__(
+        self, theme: str = "dark", *, default_copy_format: str = "mathml",
+        close_after_copy: bool = True, result_panel_position: str = "near_orb",
+    ) -> None:
         super().__init__()
         self._result: RecognitionResult | None = None
         self._source_candidates: dict[str, RecognitionCandidate] = {}
@@ -498,6 +548,26 @@ class FloatingResultPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._build_ui()
         self.set_theme(theme)
+        self.set_output_preferences(default_copy_format, close_after_copy, result_panel_position)
+
+    def set_output_preferences(
+        self, default_copy_format: str, close_after_copy: bool, result_panel_position: str,
+    ) -> None:
+        self._default_copy_format = (
+            default_copy_format if default_copy_format in COPY_FORMATS else "mathml"
+        )
+        self._close_after_copy = close_after_copy
+        self._result_panel_position = (
+            result_panel_position if result_panel_position in RESULT_POSITIONS else "near_orb"
+        )
+        for name, button in (
+            ("latex", self.copy_latex_button), ("mathml", self.copy_mathml_button),
+        ):
+            primary = name == self._default_copy_format
+            button.setObjectName("FloatingPrimary" if primary else "FloatingCopySecondary")
+            button.setAutoDefault(primary)
+            button.setDefault(primary)
+            _refresh_style(button)
 
     @property
     def theme_name(self) -> str:
@@ -509,9 +579,29 @@ class FloatingResultPanel(QWidget):
         _refresh_style(self)
 
     def _build_ui(self) -> None:
-        outer = QVBoxLayout(self)
+        panel_layout = QVBoxLayout(self)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        self.result_scroll_area = QScrollArea()
+        self.result_scroll_area.setObjectName("FloatingResultScroll")
+        self.result_scroll_area.setWidgetResizable(True)
+        self.result_scroll_area.setFrameStyle(0)
+        self.result_scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.result_scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.result_scroll_area.setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
+        )
+        self._result_content = QWidget()
+        self._result_content.setObjectName("FloatingResultContent")
+        outer = QVBoxLayout(self._result_content)
         outer.setContentsMargins(18, 14, 18, 18)
         outer.setSpacing(12)
+        self.result_scroll_area.setWidget(self._result_content)
+        panel_layout.addWidget(self.result_scroll_area)
 
         header_widget = QWidget()
         header_widget.setObjectName("FloatingResultHeader")
@@ -626,6 +716,7 @@ class FloatingResultPanel(QWidget):
         self.copy_mathml_button.setObjectName("FloatingPrimary")
         for button in (self.copy_latex_button, self.copy_mathml_button):
             button.setMinimumHeight(44)
+            button.setToolTip(button.text())
             copy_row.addWidget(button)
         self.copy_latex_button.setAccessibleName("复制 LaTeX")
         self.copy_latex_button.setAccessibleDescription("复制当前校对后的 LaTeX 公式")
@@ -693,7 +784,11 @@ class FloatingResultPanel(QWidget):
             candidate=None if edited_draft else selected_candidate,
         )
         self._show_near(anchor)
-        self.preview_stack.setFocus(Qt.FocusReason.OtherFocusReason)
+        primary = (
+            self.copy_latex_button if self._default_copy_format == "latex"
+            else self.copy_mathml_button
+        )
+        primary.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_error(self, message: str, anchor: QRect) -> None:
         self._clear_source_switch()
@@ -702,7 +797,7 @@ class FloatingResultPanel(QWidget):
         self.preview_message.setText(message)
         self.preview_stack.setCurrentWidget(self.preview_message)
         self.quality_label.setText(
-            "请重新截图；若问题持续，请在设置中检查识别引擎。"
+            "请重新截图；若问题持续，请在常规设置中查看本地识别状态。"
         )
         self.quality_label.setProperty("warning", True)
         self.quality_label.show()
@@ -841,6 +936,20 @@ class FloatingResultPanel(QWidget):
             self.show()
             return
         area = screen.availableGeometry()
+        if self._result_panel_position == "screen_center":
+            self.setFixedWidth(min(620, max(1, area.width() - 24)))
+            self.resize(
+                self.width(),
+                min(self._result_content.sizeHint().height(), area.height()),
+            )
+            self.move(
+                area.left() + (area.width() - self.width()) // 2,
+                area.top() + (area.height() - self.height()) // 2,
+            )
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            return
         gap = 12
         minimum_panel_width = min(320, max(1, area.width() - 24))
         left_space = max(0, anchor.left() - area.left() - gap)
@@ -853,7 +962,10 @@ class FloatingResultPanel(QWidget):
             else min(620, max(1, area.width() - 24))
         )
         self.setFixedWidth(panel_width)
-        self.adjustSize()
+        self.resize(
+            self.width(),
+            min(self._result_content.sizeHint().height(), area.height()),
+        )
         if use_side:
             if left_space >= right_space:
                 x = anchor.left() - gap - self.width()
@@ -887,11 +999,7 @@ class FloatingResultPanel(QWidget):
             self._set_status(f"复制失败：{exc}", "error")
             return
         self._set_status("LaTeX 已复制", "success")
-        self._clear_source_switch()
-        self._result = None
-        self._preview_timer.stop()
-        self.hide()
-        self.result_consumed.emit()
+        self._finish_copy()
 
     @Slot()
     def _copy_mathml(self) -> None:
@@ -915,11 +1023,11 @@ class FloatingResultPanel(QWidget):
             self._set_status(str(exc), "error")
             return
         self._set_status("MathML 已复制，可粘贴到 Word/MathType", "success")
-        self._clear_source_switch()
-        self._result = None
-        self._preview_timer.stop()
-        self.hide()
-        self.result_consumed.emit()
+        self._finish_copy()
+
+    def _finish_copy(self) -> None:
+        if self._close_after_copy:
+            self._dismiss_result()
 
     @Slot()
     def _latex_edited(self) -> None:
@@ -1124,6 +1232,11 @@ class FloatingFormulaAssistant(QObject):
     ) -> None:
         super().__init__()
         self.settings_store = settings or QSettings()
+        # Loading preferences writes migration keys, so inspect the original store first.
+        self._first_run = (
+            not self.settings_store.allKeys()
+            and self.settings_store.status() == QSettings.Status.NoError
+        )
         self.preferences = FloatingPreferences.load(self.settings_store)
         apply_application_theme(
             self.preferences.result_theme,
@@ -1135,7 +1248,15 @@ class FloatingFormulaAssistant(QObject):
             self.preferences.effective_ring_color,
             self.preferences.effective_logo_path,
         )
-        self.panel = FloatingResultPanel(self.preferences.result_theme)
+        self.orb.set_size_preset(self.preferences.orb_size)
+        self.orb.set_opacity_percent(self.preferences.orb_opacity)
+        self.orb.set_snap_to_edge(self.preferences.orb_snap_to_edge)
+        self.panel = FloatingResultPanel(
+            self.preferences.result_theme,
+            default_copy_format=self.preferences.default_copy_format,
+            close_after_copy=self.preferences.close_after_copy,
+            result_panel_position=self.preferences.result_panel_position,
+        )
         self.settings_panel = SettingsPanel(
             self.settings_store,
             self.preferences,
@@ -1185,6 +1306,7 @@ class FloatingFormulaAssistant(QObject):
         self.panel.draft_changed.connect(self._result_draft_changed)
         self.panel.source_changed.connect(self._result_source_changed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
+        self.settings_panel.orb_reset_requested.connect(self.orb.reset_position)
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
         self.settings_panel.session_preferences_changed.connect(self._apply_preferences)
         self.settings_panel.settings_backend_changed.connect(self._replace_settings_store)
@@ -1337,13 +1459,18 @@ class FloatingFormulaAssistant(QObject):
     def show(self, *, after_update: bool = False) -> None:
         if after_update:
             self.open_settings()
+            self.settings_panel.show_about_page()
             self.settings_panel.set_update_status(
                 f"已更新到 v{application_version()}"
             )
+        elif self._first_run:
+            self.open_settings()
+            self.settings_panel.show_tutorial()
         elif self.preferences.show_settings_on_startup:
             self.open_settings()
         else:
             self.enter_floating_mode()
+        self._first_run = False
 
     def start_update_checks(self) -> None:
         if self._shutdown or not self.preferences.auto_check_updates:
@@ -1804,6 +1931,7 @@ class FloatingFormulaAssistant(QObject):
         if self._shutdown or self._capture_in_progress():
             return
         self.open_settings()
+        self.settings_panel.show_about_page()
         self.check_for_updates(manual=True)
 
     @staticmethod
@@ -1840,7 +1968,15 @@ class FloatingFormulaAssistant(QObject):
             self._worker.cancel_ai()
         self.orb.set_color(preferences.effective_ring_color)
         self.orb.set_logo_path(preferences.effective_logo_path)
+        self.orb.set_size_preset(preferences.orb_size)
+        self.orb.set_opacity_percent(preferences.orb_opacity)
+        self.orb.set_snap_to_edge(preferences.orb_snap_to_edge)
         self.panel.set_theme(preferences.result_theme)
+        self.panel.set_output_preferences(
+            preferences.default_copy_format,
+            preferences.close_after_copy,
+            preferences.result_panel_position,
+        )
         apply_application_theme(
             preferences.result_theme,
             preferences.effective_accent_theme,
