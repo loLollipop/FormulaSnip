@@ -15,8 +15,19 @@ from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRunnable, QSettings, Qt, QThreadPool
-from PySide6.QtGui import QColor, QFont, QImage, QPixmap
+import shiboken6
+from PySide6.QtCore import (
+    QCoreApplication,
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    QRunnable,
+    QSettings,
+    Qt,
+    QThreadPool,
+)
+from PySide6.QtGui import QColor, QFont, QImage, QPalette, QPixmap
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -352,10 +363,13 @@ def test_ai_saved_configuration_can_disable_edit_and_reenable_without_losing_key
     panel = SettingsPanel(_settings(tmp_path), saved, api_key_store=key_store)
     assert panel.ai_configuration_widget.isHidden()
     assert panel.ai_status_badge.text() == "已启用"
+    assert panel.ai_summary_label.text() == "将上传当前框选图像。"
+    assert not panel.ai_summary_label.isHidden()
     assert not panel.ai_correction_toggle.isHidden()
     panel.ai_correction_toggle.click()
     assert not panel.preferences.ai_correction_enabled
-    assert panel.ai_summary_label.text() == "已关闭，不会上传图片"
+    assert panel.ai_summary_label.text() == ""
+    assert panel.ai_summary_label.isHidden()
     assert panel.ai_configure_button.text() == "编辑配置"
     panel.ai_configure_button.click()
     assert not panel.ai_configuration_widget.isHidden()
@@ -390,7 +404,8 @@ def test_credential_read_failure_disables_ai_until_user_reenables(
 
     assert not assistant.settings_panel.preferences.ai_correction_enabled
     assert not assistant.preferences.ai_correction_enabled
-    assert assistant.settings_panel.ai_summary_label.text() == "已关闭，不会上传图片"
+    assert assistant.settings_panel.ai_summary_label.text() == ""
+    assert assistant.settings_panel.ai_summary_label.isHidden()
     assert not settings_ui._boolean(
         settings.value("recognition/ai_correction_enabled"), True
     )
@@ -440,6 +455,64 @@ def test_new_preferences_apply_live_and_restore_appearance_preserves_theme(tmp_p
     assistant.orb.close()
     assistant.panel.close()
     panel.hide()
+
+
+def test_orb_opacity_changes_preview_immediately_and_debounce_persistence(
+    tmp_path: Path,
+) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    panel = SettingsPanel(settings, FloatingPreferences())
+    previews = QSignalSpy(panel.orb_opacity_preview_requested)
+    persisted = QSignalSpy(panel.preferences_changed)
+
+    panel.orb_opacity_slider.setValue(95)
+    panel.orb_opacity_slider.setValue(90)
+    panel.orb_opacity_slider.setValue(85)
+
+    assert previews.count() == 3
+    assert [previews.at(index)[0] for index in range(previews.count())] == [95, 90, 85]
+    assert persisted.count() == 0
+    assert panel.preferences.orb_opacity == 100
+    assert settings.value("appearance/orb_opacity") is None
+
+    QTest.qWait(250)
+
+    assert persisted.count() == 1
+    assert panel.preferences.orb_opacity == 85
+    assert int(settings.value("appearance/orb_opacity", 0)) == 85
+    panel.close()
+
+
+def test_orb_opacity_release_keyboard_and_close_flush_only_the_final_value(
+    tmp_path: Path,
+) -> None:
+    application = _application()
+    settings = _settings(tmp_path)
+    panel = SettingsPanel(settings, FloatingPreferences())
+    persisted = QSignalSpy(panel.preferences_changed)
+
+    panel.orb_opacity_slider.setValue(95)
+    panel.orb_opacity_slider.setValue(90)
+    panel.orb_opacity_slider.sliderReleased.emit()
+    assert persisted.count() == 1
+    assert panel.preferences.orb_opacity == 90
+    assert not panel._orb_opacity_save_timer.isActive()
+    QTest.qWait(250)
+    assert persisted.count() == 1
+
+    panel.orb_opacity_slider.setFocus()
+    QTest.keyClick(panel.orb_opacity_slider, Qt.Key.Key_Left)
+    QTest.qWait(250)
+    assert persisted.count() == 2
+    assert panel.preferences.orb_opacity == 85
+
+    panel.orb_opacity_slider.setValue(80)
+    panel.close()
+    application.processEvents()
+    assert persisted.count() == 3
+    assert panel.preferences.orb_opacity == 80
+    assert int(settings.value("appearance/orb_opacity", 0)) == 80
 
 
 def test_first_run_precedes_migrations_and_following_launch_uses_orb(tmp_path: Path) -> None:
@@ -1358,10 +1431,15 @@ def test_update_release_notes_are_formatted_and_escaped() -> None:
     assert "发布页" in plain_text
     assert "https://example.invalid" not in plain_text
     assert "<script>" not in rendered_html
-    assert dialog.current_version_label.text() == "v0.2.8"
-    assert dialog.latest_version_label.text() == "v0.3.0"
     assert dialog.minimumHeight() == 0
     assert dialog.notes.accessibleName() == "更新内容"
+    assert dialog.findChild(QLabel, "UpdateTitle").text() == "FormulaSnip v0.3.0"
+    assert dialog.findChild(QLabel, "UpdateSubtitle").text() == (
+        "新版本可用 · 当前 v0.2.8"
+    )
+    assert dialog.findChild(QLabel, "UpdateMeta").text() == (
+        "安装包 96.0 MB · SHA-256 校验"
+    )
     dialog.close()
     application.processEvents()
 
@@ -1384,7 +1462,7 @@ def test_update_dialog_presents_download_waiting_and_error_states() -> None:
     dialog = UpdateDialog("0.2.8", _update_release("- 修复问题"))
     requested = QSignalSpy(dialog.update_requested)
 
-    assert dialog.findChild(QLabel, "UpdateSubtitle") is None
+    assert dialog.findChild(QLabel, "UpdateSubtitle") is not None
     assert dialog.status_panel.isHidden()
     dialog.show_downloading()
     assert not dialog.status_panel.isHidden()
@@ -1525,6 +1603,60 @@ def test_update_dialog_style_contract_exists_in_both_themes() -> None:
         assert f"background: {error_soft}; border-color: {error};" in stylesheet
         assert f"color: {error};" in stylesheet
         assert "QProgressBar#UpdateProgress" in stylesheet
+        assert "QWidget#SettingsPanel QWidget#SettingsModalBackdrop" in stylesheet
+
+
+@pytest.mark.parametrize(
+    ("theme", "muted_color", "error_color"),
+    (
+        ("light", "#64697a", "#b42318"),
+        ("dark", "#9aa3b5", "#fda29b"),
+    ),
+)
+def test_parented_update_dialog_keeps_its_visual_hierarchy(
+    theme: str,
+    muted_color: str,
+    error_color: str,
+    tmp_path: Path,
+) -> None:
+    application = _application()
+    apply_application_theme(theme, "blue")
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences(result_theme=theme))
+    panel.show()
+    dialog = UpdateDialog("0.2.15", _update_release("- 修复问题"), panel)
+    dialog.show()
+    application.processEvents()
+
+    title = dialog.findChild(QLabel, "UpdateTitle")
+    subtitle = dialog.findChild(QLabel, "UpdateSubtitle")
+    section = dialog.findChild(QLabel, "UpdateSectionTitle")
+    metadata = dialog.findChild(QLabel, "UpdateMeta")
+    assert title.font().pixelSize() == 20
+    assert title.font().weight() == 650
+    assert subtitle.font().pixelSize() == 12
+    assert section.font().pixelSize() == 14
+    assert section.font().weight() == 650
+    assert metadata.font().pixelSize() == 11
+    assert (
+        subtitle.palette().color(QPalette.ColorRole.WindowText).name().lower()
+        == muted_color
+    )
+    assert (
+        metadata.palette().color(QPalette.ColorRole.WindowText).name().lower()
+        == muted_color
+    )
+    dialog.show_error("更新失败，请重试")
+    application.processEvents()
+    assert (
+        dialog.status_label.palette()
+        .color(QPalette.ColorRole.WindowText)
+        .name()
+        .lower()
+        == error_color
+    )
+    dialog.reject()
+    application.processEvents()
+    panel.hide()
 
 
 def test_update_dialog_source_build_state_keeps_release_action_available() -> None:
@@ -2679,6 +2811,49 @@ def test_v2_settings_center_matches_reference_layout_and_navigation(tmp_path: Pa
         button.accessibleName() for button in panel.theme_color_buttons.values()
     )
     assert panel.findChild(settings_ui.QWidget, "SettingsCTA") is None
+    panel.hide()
+
+
+def test_opacity_slider_geometry_and_focus_style_do_not_expand_handle(
+    tmp_path: Path,
+) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    slider = panel.orb_opacity_slider
+    stylesheet = application_stylesheet("light", "blue")
+
+    assert slider.objectName() == "OrbOpacitySlider"
+    assert slider.minimumHeight() >= 32
+    assert slider.height() >= 32
+    assert "QSlider#OrbOpacitySlider::handle:horizontal" in stylesheet
+    assert "width: 18px; height: 18px" in stylesheet
+    focus_rule = stylesheet.split(
+        "QSlider#OrbOpacitySlider::handle:horizontal:focus", 1
+    )[1].split("}", 1)[0]
+    assert "border: 2px" in focus_rule
+    assert "border-width" not in focus_rule
+    panel.hide()
+
+
+def test_settings_copy_is_concise_but_keeps_ai_upload_risk_details(
+    tmp_path: Path,
+) -> None:
+    _application()
+    panel = SettingsPanel(_settings(tmp_path), FloatingPreferences())
+    visible_label_text = {
+        label.text() for label in panel.findChildren(QLabel) if label.text()
+    }
+
+    assert "位置" in visible_label_text
+    assert "将悬浮球移回当前屏幕右侧" not in visible_label_text
+    assert "两种复制按钮始终可用，所选格式将优先突出显示。" not in visible_label_text
+    assert "截图 · 校对 · 复制" not in visible_label_text
+    assert "默认在本地识别；仅启用 AI 增强后发送框选图像。" not in visible_label_text
+    assert panel.ai_summary_label.text() == ""
+    assert panel.ai_summary_label.isHidden()
+    assert panel.ai_privacy_label.text() == "将上传当前框选图像，服务商可能收费。"
+    assert "不上传本地识别结果" in panel.ai_privacy_label.toolTip()
+    assert "可能收取费用" in panel.ai_privacy_label.accessibleDescription()
     panel.hide()
 
 
@@ -3930,14 +4105,28 @@ def test_new_update_dialog_replaces_old_transaction(
         def connect(self, callback: Any) -> None:
             self.callback = callback
 
+        def emit(self, *args: Any) -> None:
+            if self.callback is not None:
+                self.callback(*args)
+
     class Dialog:
-        def __init__(self, _current: str, release: ReleaseInfo) -> None:
+        def __init__(
+            self,
+            _current: str,
+            release: ReleaseInfo,
+            parent: QWidget | None = None,
+        ) -> None:
             self.release = release
+            self.parent = parent
             self.update_requested = Signal()
+            self.cancel_requested = Signal()
+            self.finished = Signal()
             self.closed = False
+            self.deleted = False
 
         def close(self) -> None:
             self.closed = True
+            self.finished.emit(0)
 
         def show(self) -> None:
             pass
@@ -3947,6 +4136,9 @@ def test_new_update_dialog_replaces_old_transaction(
 
         def activateWindow(self) -> None:  # noqa: N802
             pass
+
+        def deleteLater(self) -> None:  # noqa: N802
+            self.deleted = True
 
     monkeypatch.setattr(floating, "UpdateDialog", Dialog)
     assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
@@ -3965,10 +4157,130 @@ def test_new_update_dialog_replaces_old_transaction(
     assistant._update_available(second_release, True, second_worker)  # type: ignore[arg-type]
 
     assert first_dialog.closed is True
+    assert first_dialog.deleted is True
     assert assistant._update_dialog is not first_dialog
+    assert assistant._update_dialog.parent is assistant.settings_panel
+    assert not assistant.settings_panel._modal_backdrop.isHidden()
     assistant._begin_update(first_release, first_dialog)  # type: ignore[arg-type]
     assert assistant._update_download_worker is None
     assistant.shutdown()
+
+
+def test_update_dialog_is_window_modal_over_dimmed_settings_and_restores(
+    tmp_path: Path,
+) -> None:
+    application = _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    release = _update_release("# 修复\n- 修复问题")
+
+    assistant._update_available(release, True)
+    application.processEvents()
+
+    dialog = assistant._update_dialog
+    assert dialog is not None
+    assert dialog.parentWidget() is assistant.settings_panel
+    assert dialog.windowModality() == Qt.WindowModality.WindowModal
+    assert dialog.isModal()
+    backdrop = assistant.settings_panel._modal_backdrop
+    assert backdrop.objectName() == "SettingsModalBackdrop"
+    assert backdrop.accessibleName() == "设置中心模态遮罩"
+    assert backdrop.isVisible()
+    assert backdrop.geometry() == assistant.settings_panel.rect()
+    assert assistant.settings_panel.isEnabled()
+
+    assistant.settings_panel.resize(900, 560)
+    application.processEvents()
+    assert backdrop.geometry() == assistant.settings_panel.rect()
+
+    dialog.reject()
+    application.processEvents()
+    assert assistant._update_dialog is None
+    assert backdrop.isHidden()
+    assert assistant.settings_panel.isVisible()
+    assistant.shutdown()
+
+
+def test_closed_update_dialogs_are_destroyed_without_unlocking_replacement(
+    tmp_path: Path,
+) -> None:
+    application = _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    first_release = _update_release("- 修复问题")
+    second_release = ReleaseInfo(
+        "0.4.0",
+        "v0.4.0",
+        "- 优化体验",
+        first_release.asset,
+    )
+
+    assistant._update_available(first_release, True)
+    first_dialog = assistant._update_dialog
+    assert first_dialog is not None
+
+    assistant._update_available(second_release, True)
+    second_dialog = assistant._update_dialog
+    assert second_dialog is not None
+    assert second_dialog is not first_dialog
+    assert assistant.settings_panel._modal_backdrop.isVisible()
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    application.processEvents()
+    assert not shiboken6.isValid(first_dialog)
+    assert shiboken6.isValid(second_dialog)
+    assert assistant._update_dialog is second_dialog
+    assert assistant.settings_panel._modal_backdrop.isVisible()
+
+    second_dialog.reject()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    application.processEvents()
+    assert not shiboken6.isValid(second_dialog)
+    assert assistant._update_dialog is None
+    assert assistant.settings_panel._modal_backdrop.isHidden()
+    assert assistant.settings_panel.findChildren(UpdateDialog) == []
+    assistant.shutdown()
+
+
+def test_update_dialog_blocks_tray_mode_changes_and_restores_settings_state(
+    tmp_path: Path,
+) -> None:
+    application = _application()
+    assistant = FloatingFormulaAssistant(settings=_settings(tmp_path))
+    assistant._update_available(_update_release("- 修复问题"), True)
+    application.processEvents()
+    dialog = assistant._update_dialog
+    assert dialog is not None
+
+    assistant._show_floating_from_tray()
+    assistant._start_capture_from_tray()
+    assert assistant._settings_visible
+    assert assistant.settings_panel.isVisible()
+    assert assistant.orb.isHidden()
+    assert assistant._capture_pending is False
+    assert dialog.isVisible()
+
+    dialog.reject()
+    application.processEvents()
+    assert assistant._settings_visible
+    assert assistant.settings_panel.isVisible()
+    assert assistant.orb.isHidden()
+    assistant.shutdown()
+
+
+def test_shutdown_flushes_pending_orb_opacity(tmp_path: Path) -> None:
+    _application()
+    settings = _settings(tmp_path)
+    assistant = FloatingFormulaAssistant(settings=settings)
+
+    assistant.settings_panel.orb_opacity_slider.setValue(75)
+    assert assistant.settings_panel._orb_opacity_save_timer.isActive()
+    assert assistant.settings_panel.preferences.orb_opacity == 100
+
+    assistant.shutdown()
+
+    assert not assistant.settings_panel._orb_opacity_save_timer.isActive()
+    assert assistant.settings_panel.preferences.orb_opacity == 75
+    assert assistant.preferences.orb_opacity == 75
+    assert int(settings.value("appearance/orb_opacity", 0)) == 75
 
 
 def test_starting_download_cancels_overlapping_update_check(
@@ -4379,6 +4691,7 @@ def test_selected_recognition_mode_is_passed_to_worker(
         "ai_api_key": None,
         "ai_base_url": "",
         "ai_model": "",
+        "ai_fallback_warning": None,
     }
     assistant._worker = None
     assistant.orb.close()
@@ -4538,6 +4851,7 @@ def test_enabled_ai_configuration_is_passed_to_worker(
             "ai_api_key": "unit-test-token",
             "ai_base_url": "https://api.openai.com/v1",
             "ai_model": "gpt-5.6-luna",
+            "ai_fallback_warning": None,
         }
     ]
     assistant._worker = None
@@ -4617,9 +4931,80 @@ def test_draft_provider_change_disables_ai_before_replacement_key_capture(
             "ai_api_key": None,
             "ai_base_url": "https://provider-a.example/v1",
             "ai_model": "provider-a-model",
+            "ai_fallback_warning": None,
         }
     ]
     assistant._worker = None
+    assistant.shutdown()
+    assistant.orb.close()
+    assistant.panel.close()
+    assistant.settings_panel.hide()
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_reason"),
+    (("deleted", "凭据已不存在"), ("read-error", "无法读取 AI 凭据")),
+)
+def test_capture_credential_failure_disables_ai_and_explains_fallback(
+    failure_mode: str,
+    expected_reason: str,
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _application()
+    key_store = FlakyApiKeyStore(
+        "unit-test-token", "https://api.openai.com/v1"
+    )
+    monkeypatch.setattr(floating, "OpenAIApiKeyStore", lambda: key_store)
+    monkeypatch.setattr(
+        worker_module,
+        "transcribe_formula",
+        lambda *_args, **_kwargs: pytest.fail("missing credentials must not upload"),
+    )
+
+    class Manager:
+        def recognize(self, _image: Any, _backend_key: str) -> RecognitionResult:
+            return RecognitionResult("local-x", "MathCraft", 0.1)
+
+        def close(self) -> None:
+            pass
+
+    class ImmediatePool:
+        @staticmethod
+        def start(worker: Any) -> None:
+            worker.run()
+
+    settings = _settings(tmp_path)
+    FloatingPreferences(
+        ai_correction_enabled=True,
+        ai_base_url="https://api.openai.com/v1",
+        ai_model="vision-model",
+    ).save(settings)
+    assistant = FloatingFormulaAssistant(
+        settings=settings,
+        manager=Manager(),  # type: ignore[arg-type]
+    )
+    assistant._thread_pool = ImmediatePool()  # type: ignore[assignment]
+    if failure_mode == "deleted":
+        key_store.delete()
+    else:
+        key_store.fail_reads = True
+    pixmap = QPixmap(80, 40)
+    pixmap.fill(Qt.GlobalColor.white)
+
+    assistant._captured(pixmap)
+
+    assert not assistant.preferences.ai_correction_enabled
+    assert not assistant.settings_panel.preferences.ai_correction_enabled
+    assert not settings_ui._boolean(
+        settings.value("recognition/ai_correction_enabled"), True
+    )
+    assert assistant.settings_panel.ai_status_badge.text() != "已启用"
+    assert expected_reason in assistant.settings_panel.ai_connection_status_label.text()
+    assert assistant._last_result is not None
+    assert assistant._last_result.latex == "local-x"
+    assert expected_reason in assistant._last_result.warnings[-1]
+    assert "仅使用本地识别" in assistant._last_result.warnings[-1]
     assistant.shutdown()
     assistant.orb.close()
     assistant.panel.close()

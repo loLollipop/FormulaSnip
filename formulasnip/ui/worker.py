@@ -45,6 +45,7 @@ class RecognitionWorker(QRunnable):
         ai_api_key: str | None = None,
         ai_base_url: str = DEFAULT_AI_BASE_URL,
         ai_model: str = DEFAULT_AI_MODEL,
+        ai_fallback_warning: str | None = None,
     ) -> None:
         super().__init__()
         self.manager = manager
@@ -55,6 +56,7 @@ class RecognitionWorker(QRunnable):
         self.ai_api_key = ai_api_key
         self.ai_base_url = ai_base_url
         self.ai_model = ai_model
+        self.ai_fallback_warning = ai_fallback_warning
         self._task_identity = object()
         self._cancel_event = Event()
         self._local_cancel_event = Event()
@@ -62,10 +64,10 @@ class RecognitionWorker(QRunnable):
         self.signals = RecognitionSignals()
 
     def cancel(self) -> None:
+        """Request cancellation without doing process cleanup on the caller thread."""
+
         self._cancel_event.set()
         self._local_cancel_event.set()
-        if isinstance(self.manager, BackendManager):
-            self.manager.cancel_current(self._task_identity)
 
     def cancel_ai(self) -> None:
         """Stop only the optional AI branch and retain local OCR work."""
@@ -99,13 +101,25 @@ class RecognitionWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
+        try:
+            self._run_recognition()
+        except Exception as exc:
+            log_exception("recognition-worker-postprocess-failed", exc)
+            message = (
+                "识别任务已取消。"
+                if self._local_cancel_event.is_set()
+                else "识别结果处理失败，请重试。"
+            )
+            self.signals.failed.emit(self, message)
+        finally:
+            self.ai_api_key = None
+
+    def _run_recognition(self) -> None:
         image = self.image
         if image is None:
-            self.ai_api_key = None
             self.signals.failed.emit(self, "识别任务截图不可用。")
             return
         if self._local_cancel_event.is_set():
-            self.ai_api_key = None
             self.signals.failed.emit(self, "识别任务已取消。")
             return
         started = perf_counter()
@@ -164,7 +178,6 @@ class RecognitionWorker(QRunnable):
             ai_thread.join()
 
         del image
-        self.ai_api_key = None
         elapsed = perf_counter() - started
         ai_candidate = ai_state.get("candidate")
         ai_error = ai_state.get("error")
@@ -180,7 +193,8 @@ class RecognitionWorker(QRunnable):
                 warning = (
                     "AI 识别已取消，已保留本地结果。"
                     if self._cancel_event.is_set()
-                    else "AI 识别未配置有效 API Key，已保留本地结果。"
+                    else self.ai_fallback_warning
+                    or "AI 识别未配置有效 API Key，已保留本地结果。"
                 )
                 result = self._local_only_result(local_result, elapsed, warning)
             else:

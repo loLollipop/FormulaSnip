@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from threading import Barrier
+from threading import Barrier, Event, Thread, current_thread
+from time import monotonic, sleep
 from typing import Any
 
 from PIL import Image
 
 from formulasnip.domain import RecognitionCandidate, RecognitionResult
+from formulasnip.exceptions import RecognitionError
+from formulasnip.recognition.manager import BackendManager
+from formulasnip.recognition.mathcraft_backend import MathCraftBackend
 from formulasnip.recognition.openai_correction import AICorrectionError
 from formulasnip.ui import worker as worker_module
 from formulasnip.ui.worker import CompatibleModelWorker, RecognitionWorker
@@ -223,6 +227,87 @@ def test_worker_replaces_ai_result_when_cancelled_before_emit(monkeypatch: Any) 
     assert results[0][1].backend_name == "MathCraft"
     assert results[0][1].strategy != "ai-assisted"
     assert "已取消" in results[0][1].warnings[-1]
+
+
+def test_cancel_returns_quickly_and_native_cleanup_finishes_off_caller_thread() -> None:
+    recognition_started = Event()
+    cleanup_finished = Event()
+    cleanup_threads: list[Thread] = []
+
+    class BlockingClient:
+        def recognize(
+            self, _image: Image.Image, *, cancel_event: Event | None = None
+        ) -> RecognitionResult:
+            assert cancel_event is not None
+            recognition_started.set()
+            assert cancel_event.wait(2)
+            cleanup_threads.append(current_thread())
+            sleep(0.2)
+            cleanup_finished.set()
+            raise RecognitionError("公式识别任务已取消。")
+
+        def cancel_current(self) -> None:
+            raise AssertionError("caller thread must not dispose the native worker")
+
+        def close(self) -> None:
+            cleanup_finished.set()
+
+    client = BlockingClient()
+    manager = BackendManager()
+    manager._instances["mathcraft"] = MathCraftBackend(client=client)  # type: ignore[arg-type]
+    worker = RecognitionWorker(
+        manager,
+        Image.new("RGB", (8, 8), "white"),
+        "mathcraft",
+    )
+    run_thread = Thread(target=worker.run, name="recognition-test")
+    run_thread.start()
+    assert recognition_started.wait(1)
+
+    started = monotonic()
+    worker.cancel()
+    cancel_elapsed = monotonic() - started
+    run_thread.join(3)
+
+    assert cancel_elapsed < 0.05
+    assert not run_thread.is_alive()
+    assert cleanup_finished.is_set()
+    assert cleanup_threads and cleanup_threads[0] is not current_thread()
+
+
+def test_postprocessing_exception_emits_exactly_one_terminal_signal(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        worker_module,
+        "transcribe_formula",
+        lambda *_args, **_kwargs: RecognitionCandidate(
+            "ai-x", "AI · vision-model", 0.1, source="ai"
+        ),
+    )
+    worker = RecognitionWorker(
+        Manager(RecognitionResult("local-x", "MathCraft", 0.1)),  # type: ignore[arg-type]
+        Image.new("RGB", (8, 8), "white"),
+        "mathcraft",
+        ai_enabled=True,
+        ai_api_key="unit-test-token",
+    )
+    monkeypatch.setattr(
+        worker,
+        "_combined_result",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("sensitive result body")),
+    )
+    results: list[RecognitionResult] = []
+    failures: list[str] = []
+    worker.signals.finished.connect(lambda _task, result: results.append(result))
+    worker.signals.failed.connect(lambda _task, message: failures.append(message))
+
+    worker.run()
+
+    assert results == []
+    assert failures == ["识别结果处理失败，请重试。"]
+    assert "sensitive result body" not in failures[0]
+    assert worker.ai_api_key is None
 
 
 def test_ai_only_cancel_before_run_still_delivers_local_result() -> None:

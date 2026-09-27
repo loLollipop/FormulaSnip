@@ -20,6 +20,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QThreadPool,
+    QTimer,
     QUrl,
     Signal,
     Slot,
@@ -36,6 +37,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QPolygon,
+    QResizeEvent,
     QShowEvent,
 )
 from PySide6.QtSvg import QSvgRenderer
@@ -1517,6 +1519,7 @@ class SettingsPanel(QWidget):
     start_requested = Signal()
     preferences_changed = Signal(object)
     session_preferences_changed = Signal(object)
+    orb_opacity_preview_requested = Signal(int)
     settings_backend_changed = Signal(object)
     ai_credential_changed = Signal()
     update_check_requested = Signal()
@@ -1584,6 +1587,10 @@ class SettingsPanel(QWidget):
         self._ai_active_context: tuple[str, str, str, int] | None = None
         self._ai_credential_generation = 0
         self._ai_models_base_url = preferences.ai_base_url if preferences.ai_model else ""
+        self._orb_opacity_save_timer = QTimer(self)
+        self._orb_opacity_save_timer.setSingleShot(True)
+        self._orb_opacity_save_timer.setInterval(200)
+        self._orb_opacity_save_timer.timeout.connect(self._flush_orb_opacity)
         self._building = True
         self._ring_color = preferences.effective_ring_color
         self._logo_path = preferences.effective_logo_path
@@ -1604,6 +1611,16 @@ class SettingsPanel(QWidget):
             preferences.effective_accent_theme,
         )
         self._build_ui()
+        self._modal_backdrop = QWidget(self)
+        self._modal_backdrop.setObjectName("SettingsModalBackdrop")
+        self._modal_backdrop.setAccessibleName("设置中心模态遮罩")
+        self._modal_backdrop.setAccessibleDescription(
+            "更新窗口打开时，设置中心暂不可操作"
+        )
+        self._modal_backdrop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        self._modal_backdrop.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._modal_backdrop.setGeometry(self.rect())
+        self._modal_backdrop.hide()
         self._load_controls(preferences)
         self._building = False
         self._update_ai_draft_status()
@@ -1831,21 +1848,24 @@ class SettingsPanel(QWidget):
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(_row_title("不透明度"), 1)
         self.orb_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.orb_opacity_slider.setObjectName("OrbOpacitySlider")
         self.orb_opacity_slider.setRange(60, 100)
         self.orb_opacity_slider.setSingleStep(5)
         self.orb_opacity_slider.setFixedWidth(200)
+        self.orb_opacity_slider.setFixedHeight(32)
         self.orb_opacity_slider.setAccessibleName("悬浮球不透明度")
         self.orb_opacity_slider.setToolTip("60% 至 100%，方向键可调整")
         self.orb_opacity_slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.orb_opacity_label = QLabel("100%")
         self.orb_opacity_label.setFixedWidth(44)
         self.orb_opacity_slider.valueChanged.connect(self._orb_opacity_changed)
+        self.orb_opacity_slider.sliderReleased.connect(self._flush_orb_opacity)
         opacity_row.addWidget(self.orb_opacity_slider)
         opacity_row.addWidget(self.orb_opacity_label)
         orb_layout.addLayout(opacity_row)
         self.orb_snap_toggle = self._add_toggle(orb_layout, "自动贴边")
         reset_row = QHBoxLayout()
-        reset_row.addWidget(_muted_text("将悬浮球移回当前屏幕右侧"), 1)
+        reset_row.addWidget(_row_title("位置"), 1)
         self.orb_reset_button = QPushButton("重置位置")
         self.orb_reset_button.setAccessibleName("重置悬浮球位置")
         self.orb_reset_button.setToolTip("移回鼠标所在屏幕的右侧中部")
@@ -1869,7 +1889,10 @@ class SettingsPanel(QWidget):
 
     def _build_output_page(self) -> QWidget:
         page, layout = self._page_shell()
-        copy = _card("默认复制格式", "两种复制按钮始终可用，所选格式将优先突出显示。")
+        copy = _card("默认复制格式")
+        copy_format_detail = "两种复制按钮始终可用，所选格式将优先突出显示。"
+        copy.setToolTip(copy_format_detail)
+        copy.setAccessibleDescription(copy_format_detail)
         self.copy_format_control = SegmentedControl(
             "默认复制格式", (("mathml", "Word / MathType"), ("latex", "LaTeX / Markdown"))
         )
@@ -1891,7 +1914,7 @@ class SettingsPanel(QWidget):
 
     def _build_about_page(self) -> QWidget:
         page, layout = self._page_shell()
-        about = _card("FormulaSnip", "截图 · 校对 · 复制")
+        about = _card("FormulaSnip")
         self.update_version_label = _row_title(f"当前版本 v{application_version()}")
         about.layout().addWidget(self.update_version_label)
         layout.addWidget(about)
@@ -1913,16 +1936,27 @@ class SettingsPanel(QWidget):
         row.addStretch(1)
         update.layout().addLayout(row)
         layout.addWidget(update)
-        privacy = _muted_text("默认在本地识别；仅启用 AI 增强后发送框选图像。")
-        privacy.setWordWrap(True)
-        layout.addWidget(privacy)
         layout.addStretch(1)
         return page
 
     @Slot(int)
     def _orb_opacity_changed(self, value: int) -> None:
         self.orb_opacity_label.setText(f"{value}%")
-        self._controls_changed()
+        if self._building:
+            return
+        self.orb_opacity_preview_requested.emit(value)
+        self._orb_opacity_save_timer.start()
+
+    @Slot()
+    def _flush_orb_opacity(self) -> None:
+        self._orb_opacity_save_timer.stop()
+        if self._building:
+            return
+        opacity = self.orb_opacity_slider.value()
+        if opacity == self._preferences.orb_opacity:
+            return
+        self._preferences = replace(self._preferences, orb_opacity=opacity)
+        self._save_preferences()
 
     def set_engine_status(self, key: str, state: str) -> None:
         """Update one engine's compact initialization status."""
@@ -1972,8 +2006,15 @@ class SettingsPanel(QWidget):
         ai_header.addWidget(self.ai_status_badge)
         ai_header.addWidget(self.ai_correction_toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         ai_layout.addLayout(ai_header)
-        self.ai_summary_label = _muted_text("配置后可使用 AI 增强，当前仅在本地识别。")
+        self.ai_summary_label = _muted_text("")
         self.ai_summary_label.setWordWrap(True)
+        ai_upload_detail = (
+            "启用后仅上传当前框选图像，不上传本地识别结果；"
+            "兼容 API 服务商可能收取费用。"
+        )
+        self.ai_summary_label.setToolTip(ai_upload_detail)
+        self.ai_summary_label.setAccessibleDescription(ai_upload_detail)
+        self.ai_summary_label.hide()
         ai_layout.addWidget(self.ai_summary_label)
         self.ai_configure_button = QPushButton("配置")
         self.ai_configure_button.setCheckable(True)
@@ -2072,7 +2113,7 @@ class SettingsPanel(QWidget):
         self.ai_connection_status_label.setObjectName("AiConnectionStatus")
         self.ai_connection_status_label.setWordWrap(True)
         ai_configuration_layout.addWidget(self.ai_connection_status_label)
-        self.ai_privacy_label = _muted_text("框选图像将发送到所配 API，并可能产生费用。")
+        self.ai_privacy_label = _muted_text("将上传当前框选图像，服务商可能收费。")
         privacy_detail = (
             "AI 默认关闭。启用后仅上传当前框选图像，不上传本地识别结果；"
             "兼容 API 服务商可能收取费用。"
@@ -2534,6 +2575,19 @@ class SettingsPanel(QWidget):
             self._save_preferences()
         self.ai_credential_changed.emit()
 
+    def handle_ai_credential_failure(
+        self,
+        exc: CredentialError,
+        *,
+        status: str,
+    ) -> None:
+        """Fail closed and refresh all visible AI state after a runtime error."""
+
+        self._disable_ai_for_credential_error(exc)
+        self._update_ai_key_status()
+        self._update_ai_summary(False)
+        self._set_ai_connection_status(status, error=True)
+
     def _update_ai_summary(self, configured: bool | None = None) -> None:
         if configured is None:
             configured = self._saved_ai_is_configured()
@@ -2552,10 +2606,9 @@ class SettingsPanel(QWidget):
         self.ai_status_badge.style().unpolish(self.ai_status_badge)
         self.ai_status_badge.style().polish(self.ai_status_badge)
         self.ai_summary_label.setText(
-            "已启用，将向所配服务发送框选图像。" if active
-            else "已关闭，不会上传图片" if self._preferences.ai_base_url
-            else "配置后可使用 AI 增强，当前仅在本地识别。"
+            "将上传当前框选图像。" if active else ""
         )
+        self.ai_summary_label.setVisible(active)
         expanded = not self.ai_configuration_widget.isHidden()
         self.ai_configure_button.setChecked(expanded)
         self.ai_configure_button.setText(
@@ -3180,6 +3233,29 @@ class SettingsPanel(QWidget):
     def show_about_page(self) -> None:
         self._select_page(self.pages.indexOf(self.about_page))
 
+    def show_modal_backdrop(self) -> None:
+        """Dim and intercept the settings client area for a child modal."""
+
+        self._modal_backdrop.setGeometry(self.rect())
+        self._modal_backdrop.show()
+        self._modal_backdrop.raise_()
+        self._modal_backdrop.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def hide_modal_backdrop(self) -> None:
+        """Restore access to the settings client area."""
+
+        self._modal_backdrop.hide()
+
+    def flush_pending_preferences(self) -> None:
+        """Persist any debounced setting before the application exits."""
+
+        self._flush_orb_opacity()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        if hasattr(self, "_modal_backdrop"):
+            self._modal_backdrop.setGeometry(self.rect())
+        super().resizeEvent(event)
+
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         screen = (
             QApplication.screenAt(self.frameGeometry().center())
@@ -3218,6 +3294,7 @@ class SettingsPanel(QWidget):
         self.tutorial_start_button.setVisible(last)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self.flush_pending_preferences()
         self.start_requested.emit()
         event.accept()
 

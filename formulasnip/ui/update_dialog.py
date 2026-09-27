@@ -9,7 +9,6 @@ from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import TypeVar
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -207,13 +206,13 @@ def format_release_notes(notes: str) -> str:
 body {{
     font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
     font-size: 13px;
-    line-height: 1.55;
-    margin: 5px 8px;
+    line-height: 1.6;
+    margin: 1px 2px;
 }}
-p {{ margin: 0 0 9px 0; }}
-p.release-heading {{ font-size: 14px; font-weight: 600; margin: 10px 0 6px 0; }}
-ul, ol {{ margin: 2px 0 10px 20px; padding: 0; }}
-li {{ margin: 0 0 5px 0; }}
+p {{ margin: 0 0 10px 0; }}
+p.release-heading {{ font-size: 13px; font-weight: 600; margin: 13px 0 5px 0; }}
+ul, ol {{ margin: 2px 0 11px 19px; padding: 0; }}
+li {{ margin: 0 0 6px 0; padding-left: 2px; }}
 code {{ font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }}
 </style>
 </head>
@@ -235,19 +234,25 @@ class UpdateDialog(QDialog):
     remind_later_requested = Signal()
     cancel_requested = Signal()
 
-    def __init__(self, current_version: str, release: ReleaseInfo) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        current_version: str,
+        release: ReleaseInfo,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.release = release
         self._busy_state = "idle"
         self._cancel_emitted = False
         self._remind_emitted = False
+        self._closing = False
         self.setObjectName("UpdateDialog")
         self.setWindowTitle("FormulaSnip 更新")
         self.setWindowIcon(application_icon())
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
-        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumWidth(600)
-        self.resize(620, 520)
+        self.resize(620, 470)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -256,20 +261,30 @@ class UpdateDialog(QDialog):
         header = QFrame()
         header.setObjectName("UpdateHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(28, 24, 28, 22)
-        header_layout.setSpacing(14)
+        header_layout.setContentsMargins(24, 18, 24, 17)
+        header_layout.setSpacing(12)
 
         app_icon = QLabel()
         app_icon.setObjectName("UpdateAppIcon")
-        app_icon.setFixedSize(48, 48)
+        app_icon.setFixedSize(42, 42)
         app_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        app_icon.setPixmap(application_icon().pixmap(QSize(30, 30)))
+        app_icon.setPixmap(application_icon().pixmap(QSize(26, 26)))
         app_icon.setAccessibleName("FormulaSnip 应用图标")
         header_layout.addWidget(app_icon)
 
-        title = QLabel("发现新版本")
+        heading_layout = QVBoxLayout()
+        heading_layout.setContentsMargins(0, 0, 0, 0)
+        heading_layout.setSpacing(2)
+        title = QLabel(f"FormulaSnip v{release.version}")
         title.setObjectName("UpdateTitle")
-        header_layout.addWidget(title, 1)
+        subtitle = QLabel(f"新版本可用 · 当前 v{current_version}")
+        subtitle.setObjectName("UpdateSubtitle")
+        subtitle.setAccessibleName(
+            f"当前版本 {current_version}，最新版本 {release.version}"
+        )
+        heading_layout.addWidget(title)
+        heading_layout.addWidget(subtitle)
+        header_layout.addLayout(heading_layout, 1)
         layout.addWidget(header)
 
         self.content_scroll = QScrollArea()
@@ -284,43 +299,10 @@ class UpdateDialog(QDialog):
         content = QWidget()
         content.setObjectName("UpdateContent")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(28, 22, 28, 22)
-        content_layout.setSpacing(13)
+        content_layout.setContentsMargins(24, 18, 24, 18)
+        content_layout.setSpacing(11)
 
-        version_card = QFrame()
-        version_card.setObjectName("UpdateVersionCard")
-        version_layout = QHBoxLayout(version_card)
-        version_layout.setContentsMargins(18, 13, 18, 13)
-        version_layout.setSpacing(18)
-
-        current_layout = QVBoxLayout()
-        current_layout.setSpacing(3)
-        current_caption = QLabel("当前版本")
-        current_caption.setObjectName("UpdateVersionCaption")
-        self.current_version_label = QLabel(f"v{current_version}")
-        self.current_version_label.setObjectName("UpdateCurrentVersion")
-        current_layout.addWidget(current_caption)
-        current_layout.addWidget(self.current_version_label)
-        version_layout.addLayout(current_layout, 1)
-
-        version_arrow = QLabel("→")
-        version_arrow.setObjectName("UpdateVersionArrow")
-        version_arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version_arrow.setAccessibleName("升级到")
-        version_layout.addWidget(version_arrow)
-
-        latest_layout = QVBoxLayout()
-        latest_layout.setSpacing(3)
-        latest_caption = QLabel("最新版本")
-        latest_caption.setObjectName("UpdateVersionCaption")
-        self.latest_version_label = QLabel(f"v{release.version}")
-        self.latest_version_label.setObjectName("UpdateLatestVersion")
-        latest_layout.addWidget(latest_caption)
-        latest_layout.addWidget(self.latest_version_label)
-        version_layout.addLayout(latest_layout, 1)
-        content_layout.addWidget(version_card)
-
-        notes_title = QLabel("更新内容")
+        notes_title = QLabel("本次更新")
         notes_title.setObjectName("UpdateSectionTitle")
         content_layout.addWidget(notes_title)
 
@@ -337,22 +319,19 @@ class UpdateDialog(QDialog):
             1,
             len([line for line in release.notes.splitlines() if line.strip()]),
         )
-        notes_height = min(180, max(88, 68 + visible_note_lines * 18))
+        notes_height = min(190, max(112, 70 + visible_note_lines * 20))
         self.notes.setFixedHeight(notes_height)
         notes_title.setBuddy(self.notes)
         content_layout.addWidget(self.notes)
 
-        metadata = QHBoxLayout()
-        metadata.setContentsMargins(0, 0, 0, 0)
-        metadata.setSpacing(8)
-        size_label = QLabel(f"安装包  {format_size(release.asset.size)}")
-        size_label.setObjectName("UpdateMetaChip")
-        checksum_label = QLabel("完整性校验  SHA-256")
-        checksum_label.setObjectName("UpdateMetaChip")
-        metadata.addWidget(size_label)
-        metadata.addWidget(checksum_label)
-        metadata.addStretch(1)
-        content_layout.addLayout(metadata)
+        metadata = QLabel(
+            f"安装包 {format_size(release.asset.size)} · SHA-256 校验"
+        )
+        metadata.setObjectName("UpdateMeta")
+        metadata.setAccessibleName(
+            f"安装包大小 {format_size(release.asset.size)}，SHA-256 完整性校验"
+        )
+        content_layout.addWidget(metadata)
 
         self.status_panel = QFrame()
         self.status_panel.setObjectName("UpdateStatusPanel")
@@ -388,10 +367,10 @@ class UpdateDialog(QDialog):
         footer = QFrame()
         footer.setObjectName("UpdateFooter")
         actions = QHBoxLayout(footer)
-        actions.setContentsMargins(28, 17, 28, 18)
+        actions.setContentsMargins(24, 14, 24, 15)
         actions.setSpacing(10)
         actions.addStretch(1)
-        self.later_button = QPushButton("稍后提醒")
+        self.later_button = QPushButton("稍后")
         self.later_button.setObjectName("UpdateLaterButton")
         self.update_button = QPushButton("立即更新")
         self.update_button.setObjectName("SettingsPrimary")
@@ -405,11 +384,7 @@ class UpdateDialog(QDialog):
 
     @Slot()
     def _remind_later(self) -> None:
-        if self._busy_state in {"downloading", "waiting", "cancelling"}:
-            self._request_cancel()
-            return
-        self.hide()
-        self._emit_remind_later()
+        self.reject()
 
     def _emit_remind_later(self) -> None:
         if self._remind_emitted:
@@ -518,19 +493,14 @@ class UpdateDialog(QDialog):
         self.update_button.setText("再次打开发布页")
 
     def reject(self) -> None:
-        if self._busy_state in {"downloading", "waiting", "cancelling"}:
-            self._request_cancel()
-            self.hide()
+        if self._closing:
             return
-        self._emit_remind_later()
-        super().reject()
-
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._closing = True
         if self._busy_state in {"downloading", "waiting", "cancelling"}:
             self._request_cancel()
         else:
             self._emit_remind_later()
-        event.accept()
+        super().reject()
 
     def _show_status(
         self,
@@ -541,12 +511,14 @@ class UpdateDialog(QDialog):
         detail: str = "",
     ) -> None:
         self.status_panel.setProperty("state", state)
+        self.status_label.setProperty("state", state)
         self.status_label.setText(message)
         self.progress_detail_label.setText(detail)
         self.progress_detail_label.setVisible(bool(detail))
         self.progress_bar.setVisible(progress)
         self.status_panel.show()
         _repolish(self.status_panel)
+        _repolish(self.status_label)
         QTimer.singleShot(0, self._ensure_status_visible_if_needed)
 
     def _ensure_status_visible_if_needed(self) -> None:

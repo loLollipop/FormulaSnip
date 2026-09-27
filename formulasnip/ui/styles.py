@@ -196,6 +196,9 @@ QWidget#SettingsPanel, QWidget#SettingsPanel QWidget {{
     font-weight: 400;
 }}
 QWidget#SettingsPanel {{ background: {settings['window']}; }}
+QWidget#SettingsPanel QWidget#SettingsModalBackdrop {{
+    background: {'rgba(15, 23, 42, 82)' if light else 'rgba(3, 7, 18, 142)'};
+}}
 QDialog#UpdateDialog {{ background: {colors['surface']}; }}
 QFrame#UpdateHeader {{
     background: {colors['surface']};
@@ -205,30 +208,28 @@ QLabel#UpdateAppIcon {{
     background: {colors['accent_soft']}; border: 1px solid {colors['border']};
     border-radius: 12px;
 }}
-QLabel#UpdateTitle {{ font-size: 20px; font-weight: 650; }}
+QLabel#UpdateTitle,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateTitle {{
+    color: {colors['text']}; font-size: 20px; font-weight: 650;
+}}
+QLabel#UpdateSubtitle,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateSubtitle {{
+    color: {colors['muted']}; font-size: 12px; font-weight: 400;
+}}
 QWidget#UpdateContent {{ background: {colors['surface']}; }}
 QScrollArea#UpdateContentScroll,
 QScrollArea#UpdateContentScroll > QWidget > QWidget {{
     background: {colors['surface']};
     border: none;
 }}
-QFrame#UpdateVersionCard {{
-    background: {colors['surface_alt']}; border: 1px solid {colors['border']};
-    border-radius: 11px;
+QLabel#UpdateSectionTitle,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateSectionTitle {{
+    color: {colors['text']}; font-size: 14px; font-weight: 650;
 }}
-QLabel#UpdateVersionCaption {{ color: {colors['muted']}; font-size: 11px; }}
-QLabel#UpdateCurrentVersion, QLabel#UpdateLatestVersion {{
-    font-family: "Segoe UI", "Microsoft YaHei UI";
-    font-size: 19px; font-weight: 650;
-}}
-QLabel#UpdateCurrentVersion {{ color: {colors['muted']}; }}
-QLabel#UpdateLatestVersion {{ color: {colors['accent']}; }}
-QLabel#UpdateVersionArrow {{ color: {colors['muted']}; font-size: 20px; }}
-QLabel#UpdateSectionTitle {{ font-size: 13px; font-weight: 650; }}
 QTextBrowser#UpdateNotes {{
-    background: {colors['surface_alt']}; color: {colors['text']};
-    border: 1px solid {colors['border']}; border-radius: 10px;
-    padding: 8px; selection-background-color: {colors['accent']};
+    background: {colors['surface']}; color: {colors['text']};
+    border: 1px solid {colors['border']}; border-radius: 9px;
+    padding: 11px 13px; selection-background-color: {colors['accent']};
 }}
 QTextBrowser#UpdateNotes QScrollBar:vertical {{
     background: transparent; width: 8px; margin: 4px 2px 4px 0;
@@ -252,10 +253,9 @@ QTextBrowser#UpdateNotes QScrollBar::add-page:vertical,
 QTextBrowser#UpdateNotes QScrollBar::sub-page:vertical,
 QScrollArea#UpdateContentScroll QScrollBar::add-page:vertical,
 QScrollArea#UpdateContentScroll QScrollBar::sub-page:vertical {{ background: transparent; }}
-QLabel#UpdateMetaChip {{
-    color: {colors['muted']}; background: {colors['surface_alt']};
-    border: 1px solid {colors['border']}; border-radius: 7px;
-    padding: 4px 9px; font-size: 12px;
+QLabel#UpdateMeta,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateMeta {{
+    color: {colors['muted']}; font-size: 11px; font-weight: 400;
 }}
 QFrame#UpdateStatusPanel {{
     background: {colors['accent_soft']}; border: 1px solid {colors['border']};
@@ -264,13 +264,19 @@ QFrame#UpdateStatusPanel {{
 QFrame#UpdateStatusPanel[state="error"] {{
     background: {colors['error_soft']}; border-color: {colors['error']};
 }}
-QLabel#UpdateStatusLabel {{ background: transparent; font-size: 13px; }}
-QFrame#UpdateStatusPanel[state="error"] QLabel#UpdateStatusLabel {{
+QLabel#UpdateStatusLabel,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateStatusLabel {{
+    color: {colors['text']}; background: transparent;
+    font-size: 13px; font-weight: 400;
+}}
+QLabel#UpdateStatusLabel[state="error"],
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateStatusLabel[state="error"] {{
     color: {colors['error']};
 }}
-QLabel#UpdateProgressDetail {{
+QLabel#UpdateProgressDetail,
+QWidget#SettingsPanel QDialog#UpdateDialog QLabel#UpdateProgressDetail {{
     color: {colors['muted']}; background: transparent;
-    font-family: "Segoe UI", sans-serif; font-size: 11px;
+    font-family: "Segoe UI", sans-serif; font-size: 11px; font-weight: 400;
 }}
 QProgressBar#UpdateProgress {{
     min-height: 6px; max-height: 6px; background: {colors['surface_hover']};
@@ -457,20 +463,20 @@ QWidget#SettingsPanel QLabel#StatusBadge[active="true"] {{
     color: {colors['success']}; background: {colors['success_soft']};
     border-color: {colors['success']};
 }}
-QWidget#SettingsPanel QSlider {{ min-height: 24px; }}
-QWidget#SettingsPanel QSlider::groove:horizontal {{
-    height: 6px; margin: 0 11px;
+QWidget#SettingsPanel QSlider#OrbOpacitySlider {{ min-height: 32px; }}
+QWidget#SettingsPanel QSlider#OrbOpacitySlider::groove:horizontal {{
+    height: 6px; margin: 0 10px;
     background: {settings['border']}; border-radius: 3px;
 }}
-QWidget#SettingsPanel QSlider::sub-page:horizontal {{
+QWidget#SettingsPanel QSlider#OrbOpacitySlider::sub-page:horizontal {{
     background: {settings['accent']}; border-radius: 3px;
 }}
-QWidget#SettingsPanel QSlider::handle:horizontal {{
-    width: 16px; margin: -6px 0; border-radius: 9px;
+QWidget#SettingsPanel QSlider#OrbOpacitySlider::handle:horizontal {{
+    width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;
     background: {settings['surface']}; border: 2px solid {settings['accent']};
 }}
-QWidget#SettingsPanel QSlider::handle:horizontal:focus {{
-    background: {settings['accent_soft']}; border-width: 3px;
+QWidget#SettingsPanel QSlider#OrbOpacitySlider::handle:horizontal:focus {{
+    background: {settings['accent_soft']}; border: 2px solid {settings['accent']};
 }}
 QWidget#FloatingResultPanel QPushButton, QDialog#UpdateDialog QPushButton {{
     background: {colors['surface_alt']}; color: {colors['text']};

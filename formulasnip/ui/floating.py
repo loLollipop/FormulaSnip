@@ -1307,6 +1307,9 @@ class FloatingFormulaAssistant(QObject):
         self.panel.source_changed.connect(self._result_source_changed)
         self.settings_panel.start_requested.connect(self.enter_floating_mode)
         self.settings_panel.orb_reset_requested.connect(self.orb.reset_position)
+        self.settings_panel.orb_opacity_preview_requested.connect(
+            self.orb.set_opacity_percent
+        )
         self.settings_panel.preferences_changed.connect(self._apply_preferences)
         self.settings_panel.session_preferences_changed.connect(self._apply_preferences)
         self.settings_panel.settings_backend_changed.connect(self._replace_settings_store)
@@ -1383,6 +1386,7 @@ class FloatingFormulaAssistant(QObject):
     def shutdown(self) -> None:
         if self._shutdown:
             return
+        self.settings_panel.flush_pending_preferences()
         self._shutdown = True
         self._update_timer.stop()
         self._tray_trigger_timer.stop()
@@ -1426,6 +1430,13 @@ class FloatingFormulaAssistant(QObject):
         if menu is not None:
             menu.close()
             menu.deleteLater()
+        update_dialog = self._update_dialog
+        self._update_dialog = None
+        self.settings_panel.hide_modal_backdrop()
+        if update_dialog is not None:
+            close_dialog = getattr(update_dialog, "close", None)
+            if callable(close_dialog):
+                close_dialog()
 
     @Slot(str)
     def _model_warmup_succeeded(self, key: str) -> None:
@@ -1582,20 +1593,34 @@ class FloatingFormulaAssistant(QObject):
         self._persist_update_check_time(int(time.time()))
         if manual:
             self.settings_panel.set_update_status(f"发现新版本 v{release.version}")
+        self.open_settings()
+        self.settings_panel.show_modal_backdrop()
         previous_dialog = self._update_dialog
-        if previous_dialog is not None:
-            previous_dialog.close()
-        dialog = UpdateDialog(application_version(), release)
+        dialog = UpdateDialog(application_version(), release, self.settings_panel)
         dialog.update_requested.connect(
             lambda task=dialog: self._begin_update(release, task)
         )
         cancel_signal = getattr(dialog, "cancel_requested", None)
         if cancel_signal is not None:
             cancel_signal.connect(lambda task=dialog: self._cancel_update(task))
+        dialog.finished.connect(
+            lambda _result, task=dialog: self._update_dialog_finished(task)
+        )
         self._update_dialog = dialog
+        if previous_dialog is not None:
+            previous_dialog.close()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _update_dialog_finished(self, dialog: UpdateDialog) -> None:
+        is_current = dialog is self._update_dialog
+        if is_current:
+            self._update_dialog = None
+            self.settings_panel.hide_modal_backdrop()
+            if not self._shutdown:
+                self.open_settings()
+        dialog.deleteLater()
 
     @Slot()
     def _update_not_available(
@@ -1905,14 +1930,34 @@ class FloatingFormulaAssistant(QObject):
 
     @Slot()
     def _start_capture_from_tray(self) -> None:
+        if self._focus_update_dialog():
+            return
         if not self._can_start_capture():
             return
         self.enter_floating_mode()
         self.start_capture()
 
+    def _focus_update_dialog(self) -> bool:
+        dialog = self._update_dialog
+        if dialog is None:
+            return False
+        self._settings_visible = True
+        self.panel.hide()
+        self.orb.hide()
+        self.settings_panel.show()
+        self.settings_panel.raise_()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return True
+
     @Slot()
     def _show_floating_from_tray(self) -> None:
-        if self._shutdown or self._capture_in_progress():
+        if (
+            self._shutdown
+            or self._capture_in_progress()
+            or self._focus_update_dialog()
+        ):
             return
         self.enter_floating_mode()
 
@@ -1922,13 +1967,21 @@ class FloatingFormulaAssistant(QObject):
 
     @Slot()
     def _open_settings_from_tray(self) -> None:
-        if self._shutdown or self._capture_in_progress():
+        if (
+            self._shutdown
+            or self._capture_in_progress()
+            or self._focus_update_dialog()
+        ):
             return
         self.open_settings()
 
     @Slot()
     def _check_for_updates_from_tray(self) -> None:
-        if self._shutdown or self._capture_in_progress():
+        if (
+            self._shutdown
+            or self._capture_in_progress()
+            or self._focus_update_dialog()
+        ):
             return
         self.open_settings()
         self.settings_panel.show_about_page()
@@ -1966,21 +2019,36 @@ class FloatingFormulaAssistant(QObject):
             )
         ):
             self._worker.cancel_ai()
-        self.orb.set_color(preferences.effective_ring_color)
-        self.orb.set_logo_path(preferences.effective_logo_path)
-        self.orb.set_size_preset(preferences.orb_size)
-        self.orb.set_opacity_percent(preferences.orb_opacity)
-        self.orb.set_snap_to_edge(preferences.orb_snap_to_edge)
-        self.panel.set_theme(preferences.result_theme)
-        self.panel.set_output_preferences(
-            preferences.default_copy_format,
-            preferences.close_after_copy,
-            preferences.result_panel_position,
-        )
-        apply_application_theme(
-            preferences.result_theme,
-            preferences.effective_accent_theme,
-        )
+        if preferences.effective_ring_color != previous.effective_ring_color:
+            self.orb.set_color(preferences.effective_ring_color)
+        if preferences.effective_logo_path != previous.effective_logo_path:
+            self.orb.set_logo_path(preferences.effective_logo_path)
+        if preferences.orb_size != previous.orb_size:
+            self.orb.set_size_preset(preferences.orb_size)
+        if preferences.orb_opacity != previous.orb_opacity:
+            self.orb.set_opacity_percent(preferences.orb_opacity)
+        if preferences.orb_snap_to_edge != previous.orb_snap_to_edge:
+            self.orb.set_snap_to_edge(preferences.orb_snap_to_edge)
+        if preferences.result_theme != previous.result_theme:
+            self.panel.set_theme(preferences.result_theme)
+        if (
+            preferences.default_copy_format != previous.default_copy_format
+            or preferences.close_after_copy != previous.close_after_copy
+            or preferences.result_panel_position != previous.result_panel_position
+        ):
+            self.panel.set_output_preferences(
+                preferences.default_copy_format,
+                preferences.close_after_copy,
+                preferences.result_panel_position,
+            )
+        if (
+            preferences.result_theme != previous.result_theme
+            or preferences.effective_accent_theme != previous.effective_accent_theme
+        ):
+            apply_application_theme(
+                preferences.result_theme,
+                preferences.effective_accent_theme,
+            )
 
     @Slot()
     def _cancel_active_recognition(self) -> None:
@@ -2073,23 +2141,40 @@ class FloatingFormulaAssistant(QObject):
     def _start_recognition(self, image: PILImage) -> None:
         self._recognition_cancel_requested = False
         ai_api_key: str | None = None
-        if self.preferences.ai_correction_enabled:
+        ai_fallback_warning: str | None = None
+        ai_requested = self.preferences.ai_correction_enabled
+        if ai_requested:
             try:
                 ai_api_key = self._api_key_store.load_for_base_url(
                     self.preferences.ai_base_url
                 )
-            except CredentialError:
-                ai_api_key = None
-        ai_enabled = self.preferences.ai_correction_enabled and ai_api_key is not None
+            except CredentialError as exc:
+                log_exception("ai-credential-read-failed", exc)
+                ai_fallback_warning = (
+                    "无法读取 AI 凭据，已关闭 AI；本次仅使用本地识别。"
+                )
+                self.settings_panel.handle_ai_credential_failure(
+                    exc,
+                    status=ai_fallback_warning,
+                )
+            if ai_api_key is None and ai_fallback_warning is None:
+                ai_fallback_warning = (
+                    "AI 凭据已不存在，已关闭 AI；本次仅使用本地识别。"
+                )
+                self.settings_panel.handle_ai_credential_failure(
+                    CredentialError("AI 凭据已不存在。"),
+                    status=ai_fallback_warning,
+                )
         try:
             worker = RecognitionWorker(
                 self.manager,
                 image,
                 self.preferences.recognition_mode,
-                ai_enabled=ai_enabled,
+                ai_enabled=ai_requested,
                 ai_api_key=ai_api_key,
                 ai_base_url=self.preferences.ai_base_url,
                 ai_model=self.preferences.ai_model,
+                ai_fallback_warning=ai_fallback_warning,
             )
         except Exception as exc:
             self._recognition_failed(f"无法启动识别任务：{exc}")
