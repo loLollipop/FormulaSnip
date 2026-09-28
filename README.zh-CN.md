@@ -18,6 +18,7 @@
   <a href="https://github.com/loLollipop/FormulaSnip/releases/latest"><strong>下载软件</strong></a>
   · <a href="#下载与开始使用">快速开始</a>
   · <a href="https://github.com/loLollipop/FormulaSnip/blob/main/README.md">English</a>
+  · <a href="https://linux.do">LINUX DO 社区</a>
   · <a href="https://github.com/loLollipop/FormulaSnip/issues">问题反馈</a>
 </p>
 
